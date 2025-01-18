@@ -1,9 +1,10 @@
 import os
-from os.path import join
 from pathlib import Path
 
 import cv2
 import numpy as np
+from jaxtyping import Float
+from numpy import ndarray
 
 from simplecv.camera_parameters import (
     Distortion,
@@ -112,14 +113,6 @@ def read_camera(
     return cams
 
 
-def read_cameras(path, intri="intri.yml", extri="extri.yml", subs=[]):
-    cameras = read_camera(join(path, intri), join(path, extri))
-    cameras.pop("basenames")
-    if len(subs) > 0:
-        cameras = {key: cameras[key].astype(np.float32) for key in subs}
-    return cameras
-
-
 def load_cameras(data_path: Path) -> list[PinholeParameters]:
     cameras = read_camera(str(data_path / "intri.yml"), str(data_path / "extri.yml"))
     cameras.pop("basenames")
@@ -133,12 +126,13 @@ def load_cameras(data_path: Path) -> list[PinholeParameters]:
             cx=cam["K"][0, 2],
             cy=cam["K"][1, 2],
         )
+        cam_distortion: Float[ndarray, "5"] = cam["dist"].squeeze()
         distortion = Distortion(
-            k1=float(cam["dist"][0]),
-            k2=float(cam["dist"][1]),
-            p1=float(cam["dist"][2]),
-            p2=float(cam["dist"][3]),
-            k3=float(cam["dist"][4]),
+            k1=float(cam_distortion[0]),
+            k2=float(cam_distortion[1]),
+            p1=float(cam_distortion[2]),
+            p2=float(cam_distortion[3]),
+            k3=float(cam_distortion[4]),
         )
         pinhole_cam = PinholeParameters(
             name=cam_name, extrinsics=extri, intrinsics=intri, distortion=distortion
