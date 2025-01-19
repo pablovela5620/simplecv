@@ -48,7 +48,10 @@ class RerunTyroConfig:
 
 
 def log_pinhole(
-    camera: PinholeParameters, cam_log_path: Path, static: bool = False
+    camera: PinholeParameters,
+    cam_log_path: Path,
+    image_plane_distance: float = 0.5,
+    static: bool = False,
 ) -> None:
     """
     Logs the pinhole camera parameters and transformation data.
@@ -56,6 +59,7 @@ def log_pinhole(
     Parameters:
     camera (PinholeParameters): The pinhole camera parameters including intrinsics and extrinsics.
     cam_log_path (Path): The path where the camera log will be saved.
+    image_plane_distance (float, optional): The distance of the image plane from the camera. Defaults to 0.5.
     static (bool, optional): If True, the log data will be marked as static. Defaults to False.
 
     Returns:
@@ -72,6 +76,7 @@ def log_pinhole(
                 rr.ViewCoordinates,
                 camera.intrinsics.camera_conventions,
             ),
+            image_plane_distance=image_plane_distance,
         ),
         static=static,
     )
