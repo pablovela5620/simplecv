@@ -14,20 +14,53 @@ dependencies = [
     "pyserde>=0.20.0",
     "rerun-sdk>=0.21.0",
     "tyro>=0.9.1",
+    "tqdm >=4.67",
+    "calibur>=0.0.1",
+    "hf-transfer>=0.1.9",
 ]
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["simplecv*", "tools*"]
+
 [tool.pixi.project]
-channels = ["conda-forge"]
+channels = ["https://prefix.dev/conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.pypi-dependencies]
 simplecv = { path = ".", editable = true }
 
 [tool.pixi.tasks]
+view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path data/example-room-scan-poly.zip", depends-on = [
+    "_download-example-polycam-data",
+], description = "View example polycam data" }
+
+[tool.pixi.tasks._download-example-polycam-data]
+cmd = """
+    test -e data/example-room-scan-poly.zip
+    || (
+        huggingface-cli download pablovela5620/polycam-example-data \
+        example-room-scan-poly.zip --repo-type dataset \
+        --local-dir data/
+    )
+    """
+outputs = ["data/example-room-scan-poly.zip"]
+description = "Downloads an example polycam dataset from huggingface, this may take a while"
+
+[tool.pixi.tasks._download-example-easymocap-data]
+cmd = """
+    test -e data/412-hand.zip
+    || (
+        huggingface-cli download pablovela5620/easymocap-example-data \
+        412-hand.zip --repo-type dataset \
+        --local-dir data/
+    )
+    """
+outputs = ["data/412-hand.zip"]
+description = "Downloads an example easymocap dataset from huggingface, this may take a while"
 
 [tool.pixi.dependencies]
 python = ">=3.11"
@@ -40,6 +73,9 @@ py-opencv = ">=4.10.0,<5"
 pyserde = ">=0.20.0,<0.21"
 rerun-sdk = ">=0.21.0,<0.22"
 tyro = ">=0.9.1,<0.10"
+tqdm = ">=4.67.1,<5"
+huggingface_hub = ">=0.27.1,<0.28"
+open3d = ">=0.18.0,<0.19"
 
 [tool.ruff]
 select = [
