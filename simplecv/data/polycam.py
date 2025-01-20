@@ -105,7 +105,7 @@ class PolycamDataset:
         self.depth_path: list[Path] = sorted(
             (self.keyframe_dir / "depth").glob("*.png")
         )
-        if (self.keyframe_dir / "correctednp._cameras").exists() and (
+        if (self.keyframe_dir / "corrected_cameras").exists() and (
             self.keyframe_dir / "corrected_images"
         ).exists():
             self.using_corrected = True
