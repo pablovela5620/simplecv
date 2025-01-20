@@ -15,7 +15,6 @@ dependencies = [
     "rerun-sdk>=0.21.0",
     "tyro>=0.9.1",
     "tqdm >=4.67",
-    "calibur>=0.0.1",
     "hf-transfer>=0.1.9",
 ]
 

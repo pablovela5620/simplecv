@@ -5,7 +5,6 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
-import calibur
 import cv2
 import numpy as np
 from jaxtyping import Float32, UInt8, UInt16
@@ -13,6 +12,7 @@ from serde import serde
 from serde.json import from_json
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.ops import conventions
 
 
 class DepthConfidenceLevel(IntEnum):
@@ -67,10 +67,10 @@ class PolycamCameraData:
             dtype=np.float32,
         )
         # convert to opencv convention
-        world_T_cam_44_cv: Float32[np.ndarray, "4 4"] = calibur.convert_pose(
+        world_T_cam_44_cv: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
             world_T_cam_44_gl,
-            src_convention=calibur.CC.GL,
-            dst_convention=calibur.CC.CV,
+            src_convention=conventions.CC.GL,
+            dst_convention=conventions.CC.CV,
         )
         return world_T_cam_44_cv
 
