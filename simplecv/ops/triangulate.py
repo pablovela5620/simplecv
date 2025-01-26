@@ -1,6 +1,6 @@
 import numpy as np
 from einops import rearrange
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from numpy import ndarray
 
 
