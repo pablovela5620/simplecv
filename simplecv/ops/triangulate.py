@@ -1,12 +1,15 @@
 import numpy as np
+from einops import rearrange
 from jaxtyping import Float
+from numpy import ndarray
 
 
 def projectN3(
-    kpts3d: Float[np.ndarray, "n_views n_kpts 4"],
-    Pall: Float[np.ndarray, "n_views 3 4"],
-) -> Float[np.ndarray, "nViews nJoints 3"]:
+    kpts3d: Float[ndarray, "n_views n_kpts 4"],
+    Pall: Float[ndarray, "n_views 3 4"],
+) -> Float[ndarray, "nViews nJoints 3"]:
     nViews: int = len(Pall)
+    # convert to homogenous
     kp3d = np.hstack((kpts3d[:, :3], np.ones((kpts3d.shape[0], 1))))
     kp2ds = []
     for nv in range(nViews):
@@ -19,36 +22,48 @@ def projectN3(
 
 
 def batch_triangulate(
-    keypoints_2d: Float[np.ndarray, "nViews nJoints 3"],
-    projection_matrices: Float[np.ndarray, "nViews 3 4"],
+    keypoints_2d: Float[ndarray, "nViews nJoints 3"],
+    projection_matrices: Float[ndarray, "nViews 3 4"],
     min_views: int = 2,
-) -> Float[np.ndarray, "nJoints 4"]:
+) -> Float[ndarray, "nJoints 4"]:
     """
-    Camera has to be in OPENCV convention
+    Camera MUST be in OPENCV convention
     """
-    num_joints = keypoints_2d.shape[1]
+    num_joints: int = keypoints_2d.shape[1]
 
     # Count views where each joint is visible
-    visibility_count = (keypoints_2d[:, :, -1] > 0).sum(axis=0)
+    visibility_count: Int[ndarray, "nJoints"] = (keypoints_2d[:, :, -1] > 0).sum(axis=0)  # noqa: UP037
     valid_joints = np.where(visibility_count >= min_views)[0]
 
     # Filter keypoints by valid joints
-    filtered_keypoints = keypoints_2d[:, valid_joints]
+    filtered_keypoints: Float[ndarray, "nViews nJoints 3"] = keypoints_2d[
+        :, valid_joints
+    ]
     conf3d = filtered_keypoints[:, :, -1].sum(axis=0) / visibility_count[valid_joints]
 
-    # (1, nViews, 1, 4)
-    P0 = projection_matrices[None, :, 0, :]
-    P1 = projection_matrices[None, :, 1, :]
-    P2 = projection_matrices[None, :, 2, :]
+    P0: Float[ndarray, "1 nViews 4"] = projection_matrices[None, :, 0, :]
+    P1: Float[ndarray, "1 nViews 4"] = projection_matrices[None, :, 1, :]
+    P2: Float[ndarray, "1 nViews 4"] = projection_matrices[None, :, 2, :]
 
-    # Triangulation calculations
-    uP2 = filtered_keypoints[:, :, 0].T[:, :, None] * P2
-    vP2 = filtered_keypoints[:, :, 1].T[:, :, None] * P2
-    confidences = filtered_keypoints[:, :, 2].T[:, :, None]
+    # x-coords homogenous
+    u: Float[ndarray, "nJoints nViews 1"] = rearrange(
+        filtered_keypoints[..., 0], "c j -> j c 1"
+    )
+    uP2: Float[ndarray, "nJoints nViews 4"] = u * P2
 
-    Au = confidences * (uP2 - P0)
-    Av = confidences * (vP2 - P1)
-    A = np.hstack([Au, Av])
+    # y-coords homogenous
+    v: Float[ndarray, "nJoints nViews 1"] = rearrange(
+        filtered_keypoints[..., 1], "c j -> j c 1"
+    )
+    vP2: Float[ndarray, "nJoints nViews 4"] = v * P2
+
+    confidences: Float[ndarray, "nJoints nViews 1"] = rearrange(
+        filtered_keypoints[..., 2], "c j -> j c 1"
+    )
+
+    Au: Float[ndarray, "nJoints nViews 4"] = confidences * (uP2 - P0)
+    Av: Float[ndarray, "nJoints nViews 4"] = confidences * (vP2 - P1)
+    A: Float[ndarray, "nJoints _ 4"] = np.hstack([Au, Av])
 
     # Solve using SVD
     _, _, Vh = np.linalg.svd(A)
@@ -56,7 +71,8 @@ def batch_triangulate(
     triangulated_points /= triangulated_points[:, 3, None]
 
     # Construct result
-    result = np.zeros((num_joints, 4))
+    result: Float[ndarray, "nJoints 4"] = np.zeros((num_joints, 4))
+    # convert from homogenous to euclidean and add confidence
     result[valid_joints, :3] = triangulated_points[:, :3]
     result[valid_joints, 3] = conf3d
 

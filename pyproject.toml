@@ -29,9 +29,6 @@ include = ["simplecv*", "tools*"]
 channels = ["https://prefix.dev/conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
-[tool.pixi.pypi-dependencies]
-simplecv = { path = ".", editable = true }
-
 [tool.pixi.tasks]
 view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path data/example-room-scan-poly.zip", depends-on = [
     "_download-example-polycam-data",
@@ -61,6 +58,10 @@ cmd = """
 outputs = ["data/412-hand.zip"]
 description = "Downloads an example easymocap dataset from huggingface, this may take a while"
 
+[tool.pixi.pypi-dependencies]
+simplecv = { path = ".", editable = true }
+
+
 [tool.pixi.dependencies]
 python = ">=3.11"
 jaxtyping = ">=0.2.33,<0.3"
@@ -75,6 +76,19 @@ tyro = ">=0.9.1,<0.10"
 tqdm = ">=4.67.1,<5"
 huggingface_hub = ">=0.27.1,<0.28"
 open3d = ">=0.18.0,<0.19"
+
+[tool.pixi.feature.ego.dependencies]
+python = ">=3.11"
+awscli = ">=2.23.5,<3"
+python-dateutil = ">=2.9.0,<3"
+
+[tool.pixi.feature.ego.pypi-dependencies]
+ego4d = ">=1.7.3,<2"
+
+[tool.pixi.environments]
+# Create a custom environment which only has the `ego` feature (numpy isn't part of that env).
+ego = { features = ["ego"], no-default-feature = true }
+
 
 [tool.ruff]
 select = [
