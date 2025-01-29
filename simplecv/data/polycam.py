@@ -78,9 +78,17 @@ class PolycamCameraData:
 @dataclass
 class PolycamData:
     rgb_hw3: UInt8[np.ndarray, "h w 3"]
+    """rgb_hw3: RGB image array with shape (height, width, 3) and uint8 values"""
     depth_hw: UInt16[np.ndarray, "h w"]
+    """depth_hw: Depth map array with same shape as image (height, width) and uint16 values"""
     confidence_hw: UInt8[np.ndarray, "h w"]
+    """confidence_hw: Confidence map array with same shape as image (height, width) and uint8 values"""
+    original_depth_hw: UInt16[np.ndarray, "192 256"]
+    """original_depth_hw: Original depth map array with fixed shape (192, 256) and uint16 values"""
+    original_confidence_hw: UInt8[np.ndarray, "192 256"]
+    """original_confidence_hw: Original confidence map array with fixed shape (192, 256) and uint8 values"""
     pinhole_params: PinholeParameters
+    """pinhole_params: Camera pinhole parameters"""
 
 
 @dataclass
@@ -176,23 +184,23 @@ class PolycamDataset:
             )
 
             # load depth
-            depth_hw: UInt16[np.ndarray, "h w"] = cv2.imread(
+            original_depth: UInt16[np.ndarray, "192 256"] = cv2.imread(
                 str(depth_path), cv2.IMREAD_ANYDEPTH
             )
             # upscale to image size
             depth_hw: UInt16[np.ndarray, "h w"] = cv2.resize(
-                depth_hw,
+                original_depth,
                 (pinhole_params.intrinsics.width, pinhole_params.intrinsics.height),
                 interpolation=cv2.INTER_LINEAR,
             )
 
             # load confidence
-            confidence_hw: UInt8[np.ndarray, "h w"] = cv2.imread(
+            original_confidence: UInt8[np.ndarray, "192 256"] = cv2.imread(
                 str(confidence_path), cv2.IMREAD_GRAYSCALE
             )
             # upscale to image size
             confidence_hw: UInt8[np.ndarray, "h w"] = cv2.resize(
-                confidence_hw,
+                original_confidence,
                 (pinhole_params.intrinsics.width, pinhole_params.intrinsics.height),
                 interpolation=cv2.INTER_NEAREST,  # to make sure no new values are introduced
             )
@@ -201,6 +209,8 @@ class PolycamDataset:
                 rgb_hw3=rgb_hw3,
                 depth_hw=depth_hw,
                 confidence_hw=confidence_hw,
+                original_depth_hw=original_depth,
+                original_confidence_hw=original_confidence,
                 pinhole_params=pinhole_params,
             )
 
