@@ -1,5 +1,5 @@
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
@@ -9,10 +9,19 @@ from numpy import ndarray
 
 from simplecv.camera_parameters import PinholeParameters
 
+def get_safe_application_id():
+    """Get application ID safely, with fallback if __main__.__file__ doesn't exist"""
+    try:
+        main = sys.modules.get("__main__")
+        if main and hasattr(main, "__file__"):
+            return Path(main.__file__).stem
+    except Exception:
+        pass
+    return "rerun-application"  # Default fallback
 
 @dataclass
 class RerunTyroConfig:
-    application_id: str = Path(sys.modules["__main__"].__file__).stem
+    application_id: str = field(default_factory=get_safe_application_id)
     """Name of the application"""
     recording_id: str | UUID | None = None
     """Recording ID"""
