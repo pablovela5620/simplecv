@@ -31,6 +31,7 @@ class VisualzeConfig:
     subject_id: SubjectIDs | None = "6"  # "6"8
     sequence_name: str = "20231025_111357"  # "20231025_111357"20231024_180733
     num_videos_to_log: Literal[4, 8] = 4
+    log_depths: bool = False
     send_as_batch: bool = True
 
 
@@ -385,6 +386,7 @@ def visualize_exo_ego(config: VisualzeConfig):
             shortest_timestamp=shortest_timestamp,
             parent_log_path=parent_log_path,
             timeline=timeline,
+            log_depth=config.log_depths,
         )
     else:
         log_exo_ego_sequence_incremental(
