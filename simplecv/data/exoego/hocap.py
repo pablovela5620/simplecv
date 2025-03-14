@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal, TypedDict
 
 import numpy as np
+import rerun as rr
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
 from serde import serde
@@ -127,9 +128,13 @@ class HOCapIntrinsicsData:
 
 class HOCapSequence(BaseExoEgoSequence):
     def __init__(
-        self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
+        self,
+        data_path: Path,
+        sequence_name: str,
+        subject_id: SubjectIDs,
+        load_labels: bool = False,
     ) -> None:
-        super().__init__(data_path, sequence_name, subject_id)
+        super().__init__(data_path, sequence_name, subject_id, load_labels)
 
     def __len__(self) -> int:
         assert len(self.video_path_list) > 0, "No videos found."
@@ -303,3 +308,8 @@ class HOCapSequence(BaseExoEgoSequence):
     @property
     def hand_id2name(self) -> dict[int, str]:
         return MEDIAPIPE_ID2NAME
+
+    @property
+    def world_coordinate_system(self):
+        """Get mapping from joint ID to joint name."""
+        return rr.ViewCoordinates.RIGHT_HAND_Z_UP

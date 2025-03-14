@@ -1,4 +1,4 @@
-HAND_LINKS = [
+HAND_LINKS = (
     (5, 6),
     (6, 7),
     (7, 0),  # Thumb
@@ -18,7 +18,7 @@ HAND_LINKS = [
     (17, 18),
     (18, 19),
     (19, 4),  # pinky
-]
+)
 
 HAND_ID2NAME: dict[int, str] = {
     0: "THUMB_TIP",

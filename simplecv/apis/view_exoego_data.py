@@ -11,11 +11,10 @@ from jaxtyping import Float32, Int
 from numpy import ndarray
 from tqdm import tqdm
 
+from simplecv.data.exoego.assembly_101 import Assembely101Sequence
 from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
 from simplecv.data.exoego.hocap import (
-    ExoCameraIDs,
     HOCapSequence,
-    ImageLabel,
     SubjectIDs,
 )
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
@@ -27,9 +26,10 @@ np.set_printoptions(suppress=True)
 @dataclass
 class VisualzeConfig:
     rr_config: RerunTyroConfig
+    dataset: Literal["hocap", "assembly101"] = "hocap"
     root_directory: Path = Path("/mnt/12tbdrive/data/HO-cap/datasets")
-    subject_id: SubjectIDs = "8"  # "1"
-    sequence_name: str = "20231024_180733"  # "20231025_165502"
+    subject_id: SubjectIDs | None = "1"  # "8"
+    sequence_name: str = "20231025_165502"  # "20231024_180733"
     num_videos_to_log: Literal[4, 8] = 4
     send_as_batch: bool = True
 
@@ -251,15 +251,25 @@ def log_exo_ego_sequence_incremental(
 
 def visualize_exo_ego(config: VisualzeConfig):
     start_time: float = timer()
-    parent_log_path: Path = Path("world")
 
-    sequence: HOCapSequence = HOCapSequence(
-        data_path=config.root_directory,
-        sequence_name=config.sequence_name,
-        subject_id=config.subject_id,
-    )
+    match config.dataset:
+        case "hocap":
+            sequence: HOCapSequence = HOCapSequence(
+                data_path=config.root_directory,
+                sequence_name=config.sequence_name,
+                subject_id=config.subject_id,
+                load_labels=True,
+            )
+        case "assembly101":
+            sequence: Assembely101Sequence = Assembely101Sequence(
+                data_path=config.root_directory,
+                sequence_name=config.sequence_name,
+                subject_id=None,
+                load_labels=True,
+            )
 
     set_pose_annotation_context(sequence)
+    rr.log("/", sequence.world_coordinate_system, static=True)
 
     parent_log_path = Path("world")
     timeline: str = "video_time"
@@ -281,10 +291,11 @@ def visualize_exo_ego(config: VisualzeConfig):
     # log stationary exo cameras and video assets
     for exo_cam in sequence.exo_cam_list:
         cam_log_path: Path = parent_log_path / exo_cam.name
+        image_plane_distance: float = 0.1 if config.dataset == "hocap" else 100.0
         log_pinhole(
             camera=exo_cam,
             cam_log_path=cam_log_path,
-            image_plane_distance=0.1,
+            image_plane_distance=image_plane_distance,
             static=True,
         )
 
@@ -300,7 +311,7 @@ def visualize_exo_ego(config: VisualzeConfig):
         all_timestamps.append(frame_timestamps_ns)
 
     # Find the timestamp list with the maximum length.
-    shortest_timestamp: Int[ndarray, "num_frames"] = max(all_timestamps, key=len)  # noqa: UP037
+    shortest_timestamp: Int[ndarray, "num_frames"] = min(all_timestamps, key=len)  # noqa: UP037
     assert len(shortest_timestamp) == len(sequence), (
         f"Length of timestamps {len(shortest_timestamp)} and sequence {len(sequence)} do not match"
     )

@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from collections.abc import Generator
+from dataclasses import dataclass
 from pathlib import Path
 
+import rerun as rr
 from jaxtyping import Float32
 from numpy import ndarray
 
@@ -26,7 +28,11 @@ class ExoBatchData:
 
 class BaseExoEgoSequence(ABC):
     def __init__(
-        self, data_path: Path, sequence_name: str, subject_id: str | None = None
+        self,
+        data_path: Path,
+        sequence_name: str,
+        subject_id: str | None = None,
+        load_labels: bool = False,
     ) -> None:
         self._exo_cam_list: list[PinholeParameters] = self.load_exo_cameras(
             data_path, sequence_name, subject_id
@@ -37,16 +43,19 @@ class BaseExoEgoSequence(ABC):
         self.exo_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self.video_path_list]
         )
-        self.exo_batch_data: ExoBatchData = self.load_exo_batch_data(
-            data_path, sequence_name, subject_id
-        )
+        if load_labels:
+            self.exo_batch_data: ExoBatchData = self.load_exo_batch_data(
+                data_path, sequence_name, subject_id
+            )
 
     @abstractmethod
-    def __iter__(self) -> ExoData:
+    def __iter__(self) -> Generator[ExoData, None, None]:
         pass
 
     @abstractmethod
-    def load_video_paths(self) -> list[Path]:
+    def load_video_paths(
+        self, data_path: Path, sequence_name: str, subject_id: str | None = None
+    ) -> list[Path]:
         """Load the paths to the video files."""
         pass
 
@@ -83,5 +92,11 @@ class BaseExoEgoSequence(ABC):
     @property
     @abstractmethod
     def hand_id2name(self) -> dict[int, str]:
+        """Get mapping from joint ID to joint name."""
+        pass
+
+    @property
+    @abstractmethod
+    def world_coordinate_system(self) -> rr.ViewCoordinates:
         """Get mapping from joint ID to joint name."""
         pass
