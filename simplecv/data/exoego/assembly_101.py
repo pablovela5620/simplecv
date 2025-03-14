@@ -349,3 +349,8 @@ class Assembely101Sequence(BaseExoEgoSequence):
     @property
     def world_coordinate_system(self):
         return rr.ViewCoordinates.BUL
+
+    @property
+    def depth_paths(self) -> None:
+        """Get mapping from joint ID to joint name."""
+        return None

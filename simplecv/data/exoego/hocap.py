@@ -7,6 +7,7 @@ import numpy as np
 import rerun as rr
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
+from rerun.components.view_coordinates import ViewCoordinates
 from serde import serde
 from serde.yaml import from_yaml
 from tqdm import tqdm
@@ -135,6 +136,9 @@ class HOCapSequence(BaseExoEgoSequence):
         load_labels: bool = False,
     ) -> None:
         super().__init__(data_path, sequence_name, subject_id, load_labels)
+        self._depth_paths: list[dict[ExoCameraIDs, Path]] = self.load_depth_paths(
+            data_path, sequence_name, subject_id
+        )
 
     def __len__(self) -> int:
         assert len(self.video_path_list) > 0, "No videos found."
@@ -198,6 +202,11 @@ class HOCapSequence(BaseExoEgoSequence):
                         [xyz_cam, ones], axis=-1
                     )
 
+                    # filger out -1 (not detected) values
+                    xyz_cam_homogeneous = np.where(
+                        xyz_cam_homogeneous == -1, np.nan, xyz_cam_homogeneous
+                    )
+
                     # Transform all joints at once using matrix multiplication.
                     # The multiplication is broadcast over the first two dimensions.
                     xyz_world_homogeneous: Float32[ndarray, "2 21 4"] = (
@@ -226,7 +235,6 @@ class HOCapSequence(BaseExoEgoSequence):
         # Load video paths for each exo camera, in
         for exo_cam in tqdm(self.exo_cam_list, desc="Loading videos"):
             img_dir: Path = sequence_path / exo_cam.name
-            # img_paths_list: list[Path] = sorted(img_dir.glob("color_*.jpg"))
             assert img_dir.exists(), f"Path {img_dir} does not exist."
             video_path: Path = create_temp_video_file(
                 img_dir, fps=30, quality="low", image_extension="jpg"
@@ -234,6 +242,34 @@ class HOCapSequence(BaseExoEgoSequence):
 
             video_path_list.append(video_path)
         return video_path_list
+
+    def load_depth_paths(
+        self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
+    ) -> list[dict[ExoCameraIDs, Path]]:
+        """Load depth image paths organized by timestamp."""
+        sequence_path: Path = data_path / f"subject_{subject_id}" / sequence_name
+        assert sequence_path.exists(), f"Path {sequence_path} does not exist."
+        # First, collect all depth paths per camera
+        camera_depth_paths: dict[ExoCameraIDs, list[Path]] = {}
+        for exo_cam in tqdm(self.exo_cam_list, desc="Indexing depth images"):
+            depth_dir: Path = sequence_path / exo_cam.name
+            assert depth_dir.exists(), f"Path {depth_dir} does not exist."
+            depth_paths: list[Path] = sorted(depth_dir.glob("*.png"))
+            camera_depth_paths[exo_cam.name] = depth_paths
+
+        # Then organize by timestamp
+        # Get minimum number of frames across all cameras
+        min_frames: int = min(len(paths) for paths in camera_depth_paths.values())
+
+        # Create list of dictionaries - each dict represents one timestamp
+        depth_paths_list: list[dict[ExoCameraIDs, Path]] = []
+        for frame_idx in range(min_frames):
+            frame_depth_dict: dict[ExoCameraIDs, Path] = {}
+            for camera_name, paths in camera_depth_paths.items():
+                frame_depth_dict[camera_name] = paths[frame_idx]
+            depth_paths_list.append(frame_depth_dict)
+
+        return depth_paths_list
 
     def load_exo_cameras(
         self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
@@ -310,6 +346,10 @@ class HOCapSequence(BaseExoEgoSequence):
         return MEDIAPIPE_ID2NAME
 
     @property
-    def world_coordinate_system(self):
+    def world_coordinate_system(self) -> ViewCoordinates:
         """Get mapping from joint ID to joint name."""
         return rr.ViewCoordinates.RIGHT_HAND_Z_UP
+
+    @property
+    def depth_paths(self) -> list[dict[ExoCameraIDs, Path]]:
+        return self._depth_paths

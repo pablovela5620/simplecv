@@ -100,3 +100,9 @@ class BaseExoEgoSequence(ABC):
     def world_coordinate_system(self) -> rr.ViewCoordinates:
         """Get mapping from joint ID to joint name."""
         pass
+
+    @property
+    @abstractmethod
+    def depth_paths(self) -> list[dict[str, Path]] | None:
+        """Get mapping from joint ID to joint name."""
+        pass
