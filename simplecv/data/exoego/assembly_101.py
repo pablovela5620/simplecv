@@ -6,7 +6,7 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32
+from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from serde import field as serde_field
 from serde import from_dict, serde
@@ -148,13 +148,19 @@ class Assembely101Sequence(BaseExoEgoSequence):
         return len(self.exo_video_readers)
 
     def __iter__(self) -> Generator[ExoData, None, None]:
-        raise NotImplementedError
-        yield ExoData(
-            cam_params_list=self._exo_cam_list,
-            bgr_list=next(self.exo_video_readers),
-            xyz=np.zeros((2, 21, 3), dtype=np.float32),
-            uv_dict={"test": np.zeros((2, 21, 2), dtype=np.float32)},
-        )
+        for idx in range(len(self)):
+            bgr_list: list[UInt8[ndarray, "H W 3"]] = self.exo_video_readers[idx]
+            xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
+            uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
+                cam_name: uv_stack[idx]
+                for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
+            }
+            yield ExoData(
+                cam_params_list=self.exo_cam_list,
+                bgr_list=bgr_list,
+                xyz=xyz,
+                uv_dict=uv_dict,
+            )
 
     def load_video_paths(
         self, data_path: Path, sequence_name: str, subject_id: str | None = None
