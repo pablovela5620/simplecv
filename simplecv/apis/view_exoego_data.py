@@ -3,20 +3,20 @@ from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
 
+import cv2
 import numpy as np
+import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
 from einops import rearrange
-from jaxtyping import Float32, Int
+from jaxtyping import Float32, Int, UInt16
 from numpy import ndarray
 from tqdm import tqdm
 
 from simplecv.data.exoego.assembly_101 import Assembely101Sequence
 from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
-from simplecv.data.exoego.hocap import (
-    HOCapSequence,
-    SubjectIDs,
-)
+from simplecv.data.exoego.hocap import ExoCameraIDs, HOCapSequence, SubjectIDs
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 
@@ -28,8 +28,8 @@ class VisualzeConfig:
     rr_config: RerunTyroConfig
     dataset: Literal["hocap", "assembly101"] = "hocap"
     root_directory: Path = Path("/mnt/12tbdrive/data/HO-cap/datasets")
-    subject_id: SubjectIDs | None = "1"  # "8"
-    sequence_name: str = "20231025_165502"  # "20231024_180733"
+    subject_id: SubjectIDs | None = "6"  # "6"8
+    sequence_name: str = "20231025_111357"  # "20231025_111357"20231024_180733
     num_videos_to_log: Literal[4, 8] = 4
     send_as_batch: bool = True
 
@@ -74,9 +74,9 @@ def create_blueprint(
             rrb.Horizontal(
                 contents=[
                     rrb.Tabs(
-                        rrb.Spatial2DView(origin=f"{video_log_path}"),
+                        rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
                         rrb.Spatial2DView(
-                            origin=f"{video_log_path}".replace("video", "image")
+                            origin=f"{video_log_path}".replace("video", "depth"),
                         ),
                         active_tab=active_tab,
                     )
@@ -89,8 +89,8 @@ def create_blueprint(
     additional_views = rrb.Vertical(
         contents=[
             rrb.Tabs(
-                rrb.Spatial2DView(origin=f"{video_log_path}"),
-                rrb.Spatial2DView(origin=f"{video_log_path}".replace("video", "image")),
+                rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                rrb.Spatial2DView(origin=f"{video_log_path}".replace("video", "depth")),
                 active_tab=active_tab,
             )
             for video_log_path in exo_video_log_paths[4:]
@@ -117,14 +117,22 @@ def log_exo_ego_sequence_batch(
     shortest_timestamp,
     parent_log_path: Path,
     timeline: str,
+    log_depth: bool = True,
 ) -> None:
     exo_batch_data: ExoBatchData = sequence.exo_batch_data
-    for hand_idx, (hand_side, color, class_id) in enumerate(
-        (
-            ("left", (0, 255, 0), 0),
-            ("right", (0, 255, 0), 1),
-        )
-    ):
+    ####################
+    # log 3d keypoints #
+    pbar = tqdm(
+        enumerate(
+            (
+                ("left", (0, 255, 0), 0),
+                ("right", (0, 255, 0), 1),
+            )
+        ),
+        desc="Logging hand keypoints",
+        total=2,
+    )
+    for hand_idx, (hand_side, color, class_id) in pbar:
         xyz_stack: Float32[ndarray, "num_frames 21 3"] = exo_batch_data.xyz_stack[
             :, hand_idx, ...
         ]
@@ -185,6 +193,14 @@ def log_exo_ego_sequence_batch(
                     ).partition(lengths=[21] * len(sequence)),
                 ],
             )
+
+    if log_depth:
+        log_depths(
+            sequence,
+            parent_log_path,
+            shortest_timestamp,
+            timeline,
+        )
 
 
 def log_exo_ego_sequence_incremental(
@@ -247,6 +263,53 @@ def log_exo_ego_sequence_incremental(
                             bgr,
                         ).compress(jpeg_quality=75),
                     )
+
+
+def log_depths(
+    sequence: BaseExoEgoSequence,
+    parent_log_path: Path,
+    shortest_timestamp: Int[ndarray, "num_frames"],
+    timeline: str,
+) -> None:
+    depth_paths: list[dict[str, Path]] | None = sequence.depth_paths
+    if depth_paths is not None:
+        for idx, depths_dict in enumerate(
+            tqdm(depth_paths, desc="Logging depth images")
+        ):
+            rr.set_time_nanos(timeline=timeline, nanos=shortest_timestamp[idx])
+            fuser = Open3DFuser(fusion_resolution=0.01, max_fusion_depth=1.25)
+            bgr_list = sequence.exo_video_readers[idx]
+            for exo_cam, bgr in zip(sequence.exo_cam_list, bgr_list, strict=True):
+                depth_path = depths_dict[exo_cam.name]
+                assert depth_path.exists(), f"Path {depth_path} does not exist."
+                depth_image: UInt16[np.ndarray, "480 640"] = cv2.imread(
+                    str(depth_path), cv2.IMREAD_ANYDEPTH
+                )
+                rgb_hw3 = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                # rr.log(
+                #     f"{parent_log_path / exo_cam.name / 'pinhole' / 'depth'}",
+                #     rr.DepthImage(depth_image, meter=1000),
+                # )
+                fuser.fuse_frames(
+                    depth_image,
+                    exo_cam.intrinsics.k_matrix,
+                    exo_cam.extrinsics.cam_T_world,
+                    rgb_hw3,
+                )
+            mesh: o3d.geometry.TriangleMesh = fuser.get_mesh()
+            mesh.compute_vertex_normals()
+
+            rr.log(
+                f"{parent_log_path}/mesh",
+                rr.Mesh3D(
+                    vertex_positions=mesh.vertices,
+                    triangle_indices=mesh.triangles,
+                    vertex_normals=mesh.vertex_normals,
+                    vertex_colors=mesh.vertex_colors,
+                ),
+            )
+    else:
+        print("No depth images found.")
 
 
 def visualize_exo_ego(config: VisualzeConfig):
