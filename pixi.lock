@@ -272,7 +272,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/re2-2024.07.02-h9925aae_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/readline-8.2-h8228510_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/requests-2.32.3-pyhd8ed1ab_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/rerun-sdk-0.21.0-py312hfee1b5e_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/rerun-sdk-0.22.1-py312h9ba6405_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/retrying-1.3.3-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-13.9.4-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/s2n-1.5.11-h072c03f_0.conda
@@ -582,7 +582,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/re2-2024.07.02-h6589ca4_2.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/readline-8.2-h92ec313_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/requests-2.32.3-pyhd8ed1ab_1.conda
-      - conda: https://prefix.dev/conda-forge/osx-arm64/rerun-sdk-0.21.0-py312heefbd10_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/rerun-sdk-0.22.1-py312hfa7f3a0_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/retrying-1.3.3-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-13.9.4-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/setuptools-75.8.0-pyhff2d567_0.conda
@@ -7400,9 +7400,9 @@ packages:
   - pkg:pypi/requests?source=hash-mapping
   size: 58723
   timestamp: 1733217126197
-- conda: https://prefix.dev/conda-forge/linux-64/rerun-sdk-0.21.0-py312hfee1b5e_0.conda
-  sha256: 3bebc806e5c5f0119ed80f7d47b5c574d22dd03834f0db1afe12c1c431e56ce4
-  md5: 3037c97638bf4d50b4d2e63b5c7cf305
+- conda: https://prefix.dev/conda-forge/linux-64/rerun-sdk-0.22.1-py312h9ba6405_0.conda
+  sha256: dccb6adaa10e68eedd960fa3e8469f6d7a27cf74fc95eef96d4f6cd6b7a81f0c
+  md5: 85173febdbcc7ac30b9a10ac63aedbfa
   depends:
   - __glibc >=2.17,<3.0.a0
   - anywidget
@@ -7422,11 +7422,11 @@ packages:
   purls:
   - pkg:pypi/rerun-notebook?source=hash-mapping
   - pkg:pypi/rerun-sdk?source=hash-mapping
-  size: 41056805
-  timestamp: 1734634716279
-- conda: https://prefix.dev/conda-forge/osx-arm64/rerun-sdk-0.21.0-py312heefbd10_0.conda
-  sha256: 0d4ba05e9a3d10a05a0c927dd719009b7fbd46d741019c8de84e220bb1c06938
-  md5: 426aee9e803794744a4bad1437adee0d
+  size: 43708889
+  timestamp: 1740766581543
+- conda: https://prefix.dev/conda-forge/osx-arm64/rerun-sdk-0.22.1-py312hfa7f3a0_0.conda
+  sha256: ffb202ac0df141e302b8cb5336955539d5110d639993288c3fdae2918ef42dbe
+  md5: d0cb01e0c03f7fc68443df91829a56e9
   depends:
   - __osx >=11.0
   - anywidget
@@ -7446,8 +7446,8 @@ packages:
   purls:
   - pkg:pypi/rerun-notebook?source=hash-mapping
   - pkg:pypi/rerun-sdk?source=hash-mapping
-  size: 37425216
-  timestamp: 1734635313845
+  size: 39695532
+  timestamp: 1740766285394
 - conda: https://prefix.dev/conda-forge/noarch/retrying-1.3.3-pyhd8ed1ab_3.conda
   sha256: e2cc03b3cbabc543c042579cd21fd99cf37d6d0c009f62eefc4e577704a5a154
   md5: 1f7482562f2082f1b2abf8a3e2a41b63
@@ -7590,8 +7590,8 @@ packages:
   timestamp: 1734664660064
 - pypi: .
   name: simplecv
-  version: 0.3.0
-  sha256: 52a4e77533d1895ea9acfaa2b0d3e80f9f40f91bef3f398f214d4b31e52cc0d5
+  version: 0.3.1
+  sha256: 0454ac69ad88d50b8ad6d4c741e6fffe269d444e1374634368f8f6a3cccccdc2
   requires_dist:
   - jaxtyping>=0.2.33
   - beartype>=0.19.0

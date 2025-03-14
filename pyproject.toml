@@ -34,6 +34,19 @@ view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path dat
     "_download-example-polycam-data",
 ], description = "View example polycam data" }
 
+[tool.pixi.tasks.view-assembly101-data]
+cmd = """
+    python tools/view_exoego.py \
+        --root-directory /mnt/12tbdrive/data/assembly101-sample/ \
+        --sequence-name nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345 \
+        --dataset assembly101
+    """
+description = "View example assembly101 data"
+
+[tool.pixi.tasks.view-hocap-data]
+cmd = "python tools/view_exoego.py"
+description = "View example hocap data"
+
 [tool.pixi.tasks._download-example-polycam-data]
 cmd = """
     test -e data/example-room-scan-poly.zip
@@ -71,7 +84,7 @@ einops = ">=0.8.0,<0.9"
 icecream = ">=2.1.3,<3"
 py-opencv = ">=4.10.0,<5"
 pyserde = ">=0.20.0,<0.21"
-rerun-sdk = ">=0.21.0,<0.22"
+rerun-sdk = ">=0.22.0,<0.23"
 tyro = ">=0.9.1,<0.10"
 tqdm = ">=4.67.1,<5"
 huggingface_hub = ">=0.27.1,<0.28"
@@ -91,6 +104,7 @@ ego = { features = ["ego"], no-default-feature = true }
 
 
 [tool.ruff]
+line-length = 150
 select = [
     # pycodestyle
     "E",

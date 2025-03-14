@@ -9,7 +9,8 @@ from numpy import ndarray
 
 from simplecv.camera_parameters import PinholeParameters
 
-def get_safe_application_id():
+
+def get_safe_application_id() -> str:
     """Get application ID safely, with fallback if __main__.__file__ doesn't exist"""
     try:
         main = sys.modules.get("__main__")
@@ -18,6 +19,7 @@ def get_safe_application_id():
     except Exception:
         pass
     return "rerun-application"  # Default fallback
+
 
 @dataclass
 class RerunTyroConfig:
@@ -101,7 +103,9 @@ def log_pinhole(
     )
 
 
-def log_video(video_path: Path, video_log_path: Path) -> Int[ndarray, "num_frames"]:
+def log_video(
+    video_path: Path, video_log_path: Path, timeline: str = "video_time"
+) -> Int[ndarray, "num_frames"]:
     """
     Logs a video asset and its frame timestamps.
 
@@ -121,12 +125,9 @@ def log_video(video_path: Path, video_log_path: Path) -> Int[ndarray, "num_frame
         video_asset.read_frame_timestamps_ns()
     )
     rr.send_columns(
-        str(video_log_path),
+        f"{video_log_path}",
         # Note timeline values don't have to be the same as the video timestamps.
-        times=[rr.TimeNanosColumn("video_time", frame_timestamps_ns)],
-        components=[
-            rr.VideoFrameReference.indicator(),
-            rr.components.VideoTimestamp.nanoseconds(frame_timestamps_ns),
-        ],
+        indexes=[rr.TimeNanosColumn(timeline, frame_timestamps_ns)],
+        columns=rr.VideoFrameReference.columns_nanoseconds(frame_timestamps_ns),
     )
     return frame_timestamps_ns
