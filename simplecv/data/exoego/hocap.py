@@ -236,9 +236,15 @@ class HOCapSequence(BaseExoEgoSequence):
         for exo_cam in tqdm(self.exo_cam_list, desc="Loading videos"):
             img_dir: Path = sequence_path / exo_cam.name
             assert img_dir.exists(), f"Path {img_dir} does not exist."
-            video_path: Path = create_temp_video_file(
-                img_dir, fps=30, quality="low", image_extension="jpg"
-            )
+            video_path: Path = img_dir / "output.mp4"
+            if not video_path.exists():
+                video_path: Path = create_temp_video_file(
+                    img_dir,
+                    fps=30,
+                    quality="low",
+                    image_extension="jpg",
+                    save_file=False,
+                )
 
             video_path_list.append(video_path)
         return video_path_list

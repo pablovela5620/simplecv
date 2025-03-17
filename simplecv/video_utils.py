@@ -11,6 +11,7 @@ def create_temp_video_file(
     quality: Literal["low", "medium", "high", "max"] = "low",
     delete_on_exit: bool = True,
     image_extension: Literal["jpg", "png"] = "jpg",  # jpg or png
+    save_file: bool = False,
 ) -> Path:
     """
     Create a temporary H.264 video file using NVIDIA GPU acceleration.
@@ -36,12 +37,15 @@ def create_temp_video_file(
     preset, cq = quality_settings[quality]
 
     # Create a temporary file with .mp4 extension
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
-        output_path = Path(temp_file.name)
+    if not save_file:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
+            output_path = Path(temp_file.name)
 
-    # If requested, register for deletion when program exits
-    if delete_on_exit:
-        atexit.register(lambda p: p.unlink(missing_ok=True), output_path)
+        # If requested, register for deletion when program exits
+        if delete_on_exit:
+            atexit.register(lambda p: p.unlink(missing_ok=True), output_path)
+    else:
+        output_path: Path = image_directory / "output.mp4"
 
     # Build ffmpeg command for NVIDIA hardware encoding
     cmd: list[str] = [
