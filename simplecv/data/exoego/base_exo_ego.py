@@ -13,6 +13,12 @@ from simplecv.video_io import MultiVideoReader
 
 
 @dataclass
+class ManoStack:
+    betas: Float32[ndarray, "10"]  # only a single set for all frames and hands
+    poses: Float32[ndarray, "num_frames 2 51"]  # 2 hands 51 angles (3*17)
+
+
+@dataclass
 class ExoData:
     cam_params_list: list[PinholeParameters]
     bgr_list: BGRList
@@ -24,6 +30,7 @@ class ExoData:
 class ExoBatchData:
     uv_stack_dict: dict[str, Float32[ndarray, "num_frames 2 21 2"]]
     xyz_stack: Float32[ndarray, "num_frames 2 21 3"]
+    mano_stack: ManoStack | None = None
 
 
 class BaseExoEgoSequence(ABC):

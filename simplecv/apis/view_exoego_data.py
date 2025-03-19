@@ -27,10 +27,10 @@ np.set_printoptions(suppress=True)
 class VisualzeConfig:
     rr_config: RerunTyroConfig
     dataset: Literal["hocap", "assembly101"] = "hocap"
-    root_directory: Path = Path("/mnt/12tbdrive/data/HO-cap/datasets")
-    subject_id: SubjectIDs | None = "6"  # "6"8
-    sequence_name: str = "20231025_111357"  # "20231025_111357"20231024_180733
-    num_videos_to_log: Literal[4, 8] = 4
+    root_directory: Path = Path("/mnt/12tbdrive/data/HO-cap/sample")
+    subject_id: SubjectIDs | None = "8"
+    sequence_name: str = "20231024_180733"
+    num_videos_to_log: Literal[4, 8] = 8
     log_depths: bool = False
     send_as_batch: bool = True
 
@@ -115,7 +115,7 @@ def create_blueprint(
 def log_exo_ego_sequence_batch(
     sequence: BaseExoEgoSequence,
     *,
-    shortest_timestamp,
+    shortest_timestamp: Int[ndarray, "num_frames"],
     parent_log_path: Path,
     timeline: str,
     log_depth: bool = True,
@@ -207,7 +207,7 @@ def log_exo_ego_sequence_batch(
 def log_exo_ego_sequence_incremental(
     sequence: BaseExoEgoSequence,
     *,
-    shortest_timestamp,
+    shortest_timestamp: Int[ndarray, "num_frames"],
     parent_log_path: Path,
     timeline: str,
     log_img: bool = False,

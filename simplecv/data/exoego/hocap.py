@@ -13,7 +13,12 @@ from serde.yaml import from_yaml
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
+from simplecv.data.exoego.base_exo_ego import (
+    BaseExoEgoSequence,
+    ExoBatchData,
+    ExoData,
+    ManoStack,
+)
 from simplecv.data.exoego.skeleton.mediapipe import (
     MEDIAPIPE_ID2NAME,
     MEDIAPIPE_IDS,
@@ -127,6 +132,11 @@ class HOCapIntrinsicsData:
     depth2color: Float32[ndarray, "..."] | None = None
 
 
+@serde
+class CalibratedMano:
+    betas: Float32[ndarray, "10"]
+
+
 class HOCapSequence(BaseExoEgoSequence):
     def __init__(
         self,
@@ -223,7 +233,12 @@ class HOCapSequence(BaseExoEgoSequence):
             uv_stack_dict[exo_cam.name] = uv_stack
 
         xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_list)
-        return ExoBatchData(uv_stack_dict=uv_stack_dict, xyz_stack=xyz_stack)
+        mano_stack: ManoStack = self.load_mano_poses(
+            data_path, sequence_name, subject_id
+        )
+        return ExoBatchData(
+            uv_stack_dict=uv_stack_dict, xyz_stack=xyz_stack, mano_stack=mano_stack
+        )
 
     def load_video_paths(
         self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
@@ -276,6 +291,30 @@ class HOCapSequence(BaseExoEgoSequence):
             depth_paths_list.append(frame_depth_dict)
 
         return depth_paths_list
+
+    def load_mano_poses(
+        self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
+    ) -> ManoStack:
+        subject_mano_yaml: Path = (
+            data_path / "calibration" / "mano" / f"subject_{subject_id}.yaml"
+        )
+        assert subject_mano_yaml.exists(), f"Path {subject_mano_yaml} does not exist."
+        # load yaml file to str
+        with open(subject_mano_yaml) as file:
+            subject_mano_str: str = file.read()
+
+        subject_mano: CalibratedMano = from_yaml(CalibratedMano, subject_mano_str)
+        poses_path: Path = data_path / "poses" / f"subject_{subject_id}" / sequence_name
+        assert poses_path.exists(), f"Path {poses_path} does not exist."
+        mano_poses: Path = poses_path / "poses_m.npy"
+        # 0 for right hand, 1 for left hand
+        mano_poses: Float32[ndarray, "num_sides num_frames 51"] = np.load(mano_poses)
+        # permute to num_frames num_sides 51
+        mano_poses: Float32[ndarray, "num_frames num_sides 51"] = np.transpose(
+            mano_poses, (1, 0, 2)
+        )
+
+        return ManoStack(betas=subject_mano.betas, poses=mano_poses)
 
     def load_exo_cameras(
         self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
