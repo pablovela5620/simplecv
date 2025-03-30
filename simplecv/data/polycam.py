@@ -226,11 +226,13 @@ def validate_zip(zip_path: Path) -> bool:
 
 
 def find_keyframes_dir(extract_dir: Path) -> Path | None:
+    # Skip __MACOSX metadata cache
     for path in extract_dir.rglob("*"):
+        if "__MACOSX" in path.parts:
+            continue
         if path.is_dir() and path.name == "keyframes":
             return path
     return None
-
 
 def load_polycam_data(polycam_zip_or_directory_path: Path) -> PolycamDataset:
     extract_dir: Path = polycam_zip_or_directory_path.with_suffix("")
