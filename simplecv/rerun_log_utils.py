@@ -46,16 +46,16 @@ class RerunTyroConfig:
         rec: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
 
         if self.serve:
-            rec.serve()
+            rr.serve_web()
         elif self.connect:
             # Send logging data to separate `rerun` process.
             # You can omit the argument to connect to the default address,
             # which is `127.0.0.1:9876`.
-            rec.connect()
+            rr.connect_tcp()
         elif self.save is not None:
-            rec.save(self.save)
+            rr.save(self.save)
         elif not self.headless:
-            rec.spawn()
+            rr.spawn()
 
 
 def log_pinhole(
@@ -103,9 +103,7 @@ def log_pinhole(
     )
 
 
-def log_video(
-    video_path: Path, video_log_path: Path, timeline: str = "video_time"
-) -> Int[ndarray, "num_frames"]:
+def log_video(video_path: Path, video_log_path: Path, timeline: str = "video_time") -> Int[ndarray, "num_frames"]:
     """
     Logs a video asset and its frame timestamps.
 

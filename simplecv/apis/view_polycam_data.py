@@ -80,14 +80,12 @@ def create_blueprint(parent_log_path: Path) -> rrb.Blueprint:
 
 
 def view_polycam_data(config: PolyViewConfig) -> None:
-    polycam_dataset: PolycamDataset = load_polycam_data(
-        polycam_zip_or_directory_path=config.polycam_zip_path
-    )
+    polycam_dataset: PolycamDataset = load_polycam_data(polycam_zip_or_directory_path=config.polycam_zip_path)
 
     depth_fuser = Open3DFuser(fusion_resolution=0.04, max_fusion_depth=3.0)
 
     parent_path: Path = Path("world")
-    rr.log("/", rr.ViewCoordinates.RUB, timeless=True)
+    rr.log("/", rr.ViewCoordinates.RUB, static=True)
     blueprint: rrb.Blueprint = create_blueprint(parent_log_path=parent_path)
     rr.send_blueprint(blueprint)
 
@@ -97,9 +95,7 @@ def view_polycam_data(config: PolyViewConfig) -> None:
         rr.set_time_sequence("timestep", idx)
 
         # filter depthmaps based on confidence, only keep with max confidence
-        polycam_data.depth_hw[
-            polycam_data.confidence_hw != DepthConfidenceLevel.HIGH
-        ] = 0
+        polycam_data.depth_hw[polycam_data.confidence_hw != DepthConfidenceLevel.HIGH] = 0
 
         depth_fuser.fuse_frames(
             polycam_data.depth_hw,
