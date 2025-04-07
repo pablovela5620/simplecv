@@ -14,7 +14,7 @@ dependencies = [
     "pyserde>=0.20.0",
     "rerun-sdk>=0.22.1",
     "tyro>=0.9.1",
-    "tqdm >=4.67",
+    "tqdm",
     "hf-transfer>=0.1.9",
 ]
 
