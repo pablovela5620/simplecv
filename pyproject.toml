@@ -46,6 +46,7 @@ description = "View example assembly101 data"
 [tool.pixi.tasks.view-hocap-data]
 cmd = "python tools/view_exoego.py"
 description = "View example hocap data"
+depends-on = ["_download-hocap-sample"]
 
 [tool.pixi.tasks._download-example-polycam-data]
 cmd = """
@@ -70,6 +71,21 @@ cmd = """
     """
 outputs = ["data/412-hand.zip"]
 description = "Downloads an example easymocap dataset from huggingface, this may take a while"
+
+[tool.pixi.tasks._download-hocap-sample]
+cmd = """
+    test -e data/hocap/sample.zip \
+    && test -e data/hocap/sample \
+    || (
+        mkdir -p data/hocap/ \
+        && huggingface-cli download pablovela5620/hocap-sample \
+        sample.zip --repo-type dataset \
+        --local-dir data/hocap/ \
+        && unzip -o data/hocap/sample.zip -d data/hocap/
+    )
+    """
+outputs = ["data/hocap/sample.zip", "data/hocap/sample"]
+description = "Downloads and extracts an example polycam dataset from huggingface, this may take a while"
 
 [tool.pixi.pypi-dependencies]
 simplecv = { path = ".", editable = true }
