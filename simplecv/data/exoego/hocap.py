@@ -52,15 +52,9 @@ class ImageLabel(TypedDict):
     """Structure of the label data from npz files."""
 
     cam_K: Float32[ndarray, "3 3"]  # Camera intrinsic matrix
-    obj_poses: Float32[
-        ndarray, "num_objs 4 4"
-    ]  # Object poses as 4x4 transformation matrices
-    hand_joints_3d: Float32[
-        ndarray, "2 21 3"
-    ]  # 3D hand joint coordinates (left/right hands)
-    hand_joints_2d: Int[
-        ndarray, "2 21 2"
-    ]  # 2D hand joint coordinates as int64 (left/right hands)
+    obj_poses: Float32[ndarray, "num_objs 4 4"]  # Object poses as 4x4 transformation matrices
+    hand_joints_3d: Float32[ndarray, "2 21 3"]  # 3D hand joint coordinates (left/right hands)
+    hand_joints_2d: Int[ndarray, "2 21 2"]  # 2D hand joint coordinates as int64 (left/right hands)
     seg_mask: UInt8[ndarray, "480 640"]  # Segmentation mask
     obj_class_inds: Int[ndarray, "num_objs"]  # Object class indices as int64
     obj_class_names: ndarray  # Object class names as strings
@@ -72,9 +66,7 @@ class HOCapExtrinsicsData:
 
     extrinsics: dict[CameraIDs, Float32[ndarray, "..."]]
     rs_master: str
-    world_T_cam_dict: dict[CameraIDs, Float32[ndarray, "4 4"]] = field(
-        default_factory=dict
-    )
+    world_T_cam_dict: dict[CameraIDs, Float32[ndarray, "4 4"]] = field(default_factory=dict)
 
     def __post_init__(self):
         # convert extrinsics to 3x4 matrices
@@ -108,9 +100,7 @@ class HOCapIntrinsics:
     ppx: float
     ppy: float
     coeffs: Float32[ndarray, "..."] | None = None
-    k_33: Float32[ndarray, "3 3"] = field(
-        default_factory=lambda: np.eye(3, dtype=np.float32)
-    )
+    k_33: Float32[ndarray, "3 3"] = field(default_factory=lambda: np.eye(3, dtype=np.float32))
 
     def __post_init__(self) -> None:
         # fmt: off
@@ -146,9 +136,7 @@ class HOCapSequence(BaseExoEgoSequence):
         load_labels: bool = False,
     ) -> None:
         super().__init__(data_path, sequence_name, subject_id, load_labels)
-        self._depth_paths: list[dict[ExoCameraIDs, Path]] = self.load_depth_paths(
-            data_path, sequence_name, subject_id
-        )
+        self._depth_paths: list[dict[ExoCameraIDs, Path]] = self.load_depth_paths(data_path, sequence_name, subject_id)
 
     def __len__(self) -> int:
         assert len(self.video_path_list) > 0, "No videos found."
@@ -158,11 +146,14 @@ class HOCapSequence(BaseExoEgoSequence):
     def __iter__(self) -> Generator[ExoData, None, None]:
         for idx in range(len(self)):
             bgr_list: list[UInt8[ndarray, "480 640 3"]] = self.exo_video_readers[idx]
-            xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
-            uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
-                cam_name: uv_stack[idx]
-                for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
-            }
+            if self.load_labels:
+                xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
+                uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
+                    cam_name: uv_stack[idx] for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
+                }
+            else:
+                xyz = None
+                uv_dict = None
             yield ExoData(
                 cam_params_list=self.exo_cam_list,
                 bgr_list=bgr_list,
@@ -170,23 +161,15 @@ class HOCapSequence(BaseExoEgoSequence):
                 uv_dict=uv_dict,
             )
 
-    def load_exo_batch_data(
-        self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
-    ) -> ExoBatchData:
-        label_path: Path = (
-            data_path / "labels" / f"subject_{subject_id}" / sequence_name
-        )
+    def load_exo_batch_data(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> ExoBatchData:
+        label_path: Path = data_path / "labels" / f"subject_{subject_id}" / sequence_name
         assert label_path.exists(), f"Path {label_path} does not exist."
 
         xyz_list: list[Float32[ndarray, "2 21 3"]] = []
         uv_stack_dict: dict[str, Float32[ndarray, "num_frames 2 21 2"]] = {}
-        for cam_idx, exo_cam in enumerate(
-            tqdm(self.exo_cam_list, desc="Loading 3D labels")
-        ):
+        for cam_idx, exo_cam in enumerate(tqdm(self.exo_cam_list, desc="Loading 3D labels")):
             camera_label_path: Path = label_path / exo_cam.name
-            assert camera_label_path.exists(), (
-                f"Path {camera_label_path} does not exist."
-            )
+            assert camera_label_path.exists(), f"Path {camera_label_path} does not exist."
             npz_paths: list[Path] = sorted(camera_label_path.glob("*.npz"))
             uv_list: list[Float32[ndarray, "2 21 2"]] = []
             # for now only load the 2d + 3d hand joints
@@ -198,8 +181,8 @@ class HOCapSequence(BaseExoEgoSequence):
                 if cam_idx == 0:
                     xyz_cam: Float32[ndarray, "2 21 3"] = npz_data["hand_joints_3d"]
                     # convert to world coordinates
-                    world_T_cam: Float32[ndarray, "4 4"] = (
-                        exo_cam.extrinsics.world_T_cam.astype(np.float32)
+                    world_T_cam: Float32[ndarray, "4 4"] = exo_cam.extrinsics.world_T_cam.astype(
+                        np.float32
                     )  # means camera to world, or world from cam
 
                     # Assuming hand_joints_3d_cam.shape == (2, 21, 3) and world_T_cam.shape == (4, 4)
@@ -208,41 +191,27 @@ class HOCapSequence(BaseExoEgoSequence):
                         (*xyz_cam.shape[:-1], 1),
                         dtype=xyz_cam.dtype,
                     )
-                    xyz_cam_homogeneous: Float32[ndarray, "2 21 4"] = np.concatenate(
-                        [xyz_cam, ones], axis=-1
-                    )
+                    xyz_cam_homogeneous: Float32[ndarray, "2 21 4"] = np.concatenate([xyz_cam, ones], axis=-1)
 
                     # filger out -1 (not detected) values
-                    xyz_cam_homogeneous = np.where(
-                        xyz_cam_homogeneous == -1, np.nan, xyz_cam_homogeneous
-                    )
+                    xyz_cam_homogeneous = np.where(xyz_cam_homogeneous == -1, np.nan, xyz_cam_homogeneous)
 
                     # Transform all joints at once using matrix multiplication.
                     # The multiplication is broadcast over the first two dimensions.
-                    xyz_world_homogeneous: Float32[ndarray, "2 21 4"] = (
-                        xyz_cam_homogeneous @ world_T_cam.T
-                    )
+                    xyz_world_homogeneous: Float32[ndarray, "2 21 4"] = xyz_cam_homogeneous @ world_T_cam.T
 
                     # Extract the 3D world coordinates (ignore the homogeneous component)
-                    xyz_world: Float32[ndarray, "2 21 3"] = xyz_world_homogeneous[
-                        ..., :3
-                    ]
+                    xyz_world: Float32[ndarray, "2 21 3"] = xyz_world_homogeneous[..., :3]
                     xyz_list.append(xyz_world)
 
             uv_stack: Float32[ndarray, "num_frames 2 21 2"] = np.stack(uv_list)
             uv_stack_dict[exo_cam.name] = uv_stack
 
         xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_list)
-        mano_stack: ManoStack = self.load_mano_poses(
-            data_path, sequence_name, subject_id
-        )
-        return ExoBatchData(
-            uv_stack_dict=uv_stack_dict, xyz_stack=xyz_stack, mano_stack=mano_stack
-        )
+        mano_stack: ManoStack = self.load_mano_poses(data_path, sequence_name, subject_id)
+        return ExoBatchData(uv_stack_dict=uv_stack_dict, xyz_stack=xyz_stack, mano_stack=mano_stack)
 
-    def load_video_paths(
-        self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
-    ) -> list[Path]:
+    def load_video_paths(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> list[Path]:
         sequence_path: Path = data_path / f"subject_{subject_id}" / sequence_name
         assert sequence_path.exists(), f"Path {sequence_path} does not exist."
 
@@ -292,12 +261,8 @@ class HOCapSequence(BaseExoEgoSequence):
 
         return depth_paths_list
 
-    def load_mano_poses(
-        self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
-    ) -> ManoStack:
-        subject_mano_yaml: Path = (
-            data_path / "calibration" / "mano" / f"subject_{subject_id}.yaml"
-        )
+    def load_mano_poses(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> ManoStack:
+        subject_mano_yaml: Path = data_path / "calibration" / "mano" / f"subject_{subject_id}.yaml"
         assert subject_mano_yaml.exists(), f"Path {subject_mano_yaml} does not exist."
         # load yaml file to str
         with open(subject_mano_yaml) as file:
@@ -310,15 +275,11 @@ class HOCapSequence(BaseExoEgoSequence):
         # 0 for right hand, 1 for left hand
         mano_poses: Float32[ndarray, "num_sides num_frames 51"] = np.load(mano_poses)
         # permute to num_frames num_sides 51
-        mano_poses: Float32[ndarray, "num_frames num_sides 51"] = np.transpose(
-            mano_poses, (1, 0, 2)
-        )
+        mano_poses: Float32[ndarray, "num_frames num_sides 51"] = np.transpose(mano_poses, (1, 0, 2))
 
         return ManoStack(betas=subject_mano.betas, poses=mano_poses)
 
-    def load_exo_cameras(
-        self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
-    ) -> list[PinholeParameters]:
+    def load_exo_cameras(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> list[PinholeParameters]:
         calibration_path: Path = data_path / "calibration"
         extrinsis_path: Path = calibration_path / "extrinsics"
         intrinsics_path: Path = calibration_path / "intrinsics"
@@ -333,9 +294,7 @@ class HOCapSequence(BaseExoEgoSequence):
         with open(extrinsics_yaml) as file:
             extrinsics_str: str = file.read()
 
-        extri_hocap: HOCapExtrinsicsData = from_yaml(
-            HOCapExtrinsicsData, extrinsics_str
-        )
+        extri_hocap: HOCapExtrinsicsData = from_yaml(HOCapExtrinsicsData, extrinsics_str)
 
         hocap_intri_list: list[HOCapIntrinsicsData] = []
         for intrinsics_yaml in intrinsics_path.glob("*.yaml"):
@@ -363,18 +322,10 @@ class HOCapSequence(BaseExoEgoSequence):
                         height=hocap_intri.color.height,
                     )
                     # For other cameras, print their serial and extrinsics if available
-                    world_T_cam: Float32[ndarray, "4 4"] = (
-                        extri_hocap.world_T_cam_dict.get(hocap_intri.serial)
-                    )
+                    world_T_cam: Float32[ndarray, "4 4"] = extri_hocap.world_T_cam_dict.get(hocap_intri.serial)
                     # need to do some stuff to make this
-                    extri = Extrinsics(
-                        world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3]
-                    )
-                    exo_cam_list.append(
-                        PinholeParameters(
-                            name=hocap_intri.serial, intrinsics=intri, extrinsics=extri
-                        )
-                    )
+                    extri = Extrinsics(world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3])
+                    exo_cam_list.append(PinholeParameters(name=hocap_intri.serial, intrinsics=intri, extrinsics=extri))
 
         return exo_cam_list
 

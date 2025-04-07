@@ -22,8 +22,8 @@ class ManoStack:
 class ExoData:
     cam_params_list: list[PinholeParameters]
     bgr_list: BGRList
-    xyz: Float32[ndarray, "2 21 3"]
-    uv_dict: dict[str, Float32[ndarray, "2 21 2"]]
+    xyz: Float32[ndarray, "2 21 3"] | None
+    uv_dict: dict[str, Float32[ndarray, "2 21 2"]] | None
 
 
 @dataclass
@@ -41,28 +41,23 @@ class BaseExoEgoSequence(ABC):
         subject_id: str | None = None,
         load_labels: bool = False,
     ) -> None:
-        self._exo_cam_list: list[PinholeParameters] = self.load_exo_cameras(
-            data_path, sequence_name, subject_id
-        )
+        self._exo_cam_list: list[PinholeParameters] = self.load_exo_cameras(data_path, sequence_name, subject_id)
         self.video_path_list: list[Path] = self.load_video_paths(
             data_path=data_path, sequence_name=sequence_name, subject_id=subject_id
         )
         self.exo_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self.video_path_list]
         )
-        if load_labels:
-            self.exo_batch_data: ExoBatchData = self.load_exo_batch_data(
-                data_path, sequence_name, subject_id
-            )
+        self.load_labels = load_labels
+        if self.load_labels:
+            self.exo_batch_data: ExoBatchData = self.load_exo_batch_data(data_path, sequence_name, subject_id)
 
     @abstractmethod
     def __iter__(self) -> Generator[ExoData, None, None]:
         pass
 
     @abstractmethod
-    def load_video_paths(
-        self, data_path: Path, sequence_name: str, subject_id: str | None = None
-    ) -> list[Path]:
+    def load_video_paths(self, data_path: Path, sequence_name: str, subject_id: str | None = None) -> list[Path]:
         """Load the paths to the video files."""
         pass
 
@@ -73,9 +68,7 @@ class BaseExoEgoSequence(ABC):
         pass
 
     @abstractmethod
-    def load_exo_batch_data(
-        self, data_path: Path, sequence_name: str, subject_id: str | None = None
-    ) -> ExoBatchData:
+    def load_exo_batch_data(self, data_path: Path, sequence_name: str, subject_id: str | None = None) -> ExoBatchData:
         """Load the exocentric data for a sequence."""
         pass
 

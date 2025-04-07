@@ -27,12 +27,13 @@ np.set_printoptions(suppress=True)
 class VisualzeConfig:
     rr_config: RerunTyroConfig
     dataset: Literal["hocap", "assembly101"] = "hocap"
-    root_directory: Path = Path("/mnt/12tbdrive/data/HO-cap/sample")
+    root_directory: Path = Path("data/hocap/sample")
     subject_id: SubjectIDs | None = "8"
     sequence_name: str = "20231024_180733"
     num_videos_to_log: Literal[4, 8] = 8
     log_depths: bool = False
     send_as_batch: bool = True
+    load_labels: bool = True
 
 
 def set_pose_annotation_context(sequence: BaseExoEgoSequence) -> None:
@@ -43,16 +44,14 @@ def set_pose_annotation_context(sequence: BaseExoEgoSequence) -> None:
                 rr.ClassDescription(
                     info=rr.AnnotationInfo(id=0, label="Left Hand", color=(255, 0, 0)),
                     keypoint_annotations=[
-                        rr.AnnotationInfo(id=id, label=name)
-                        for id, name in sequence.hand_id2name.items()
+                        rr.AnnotationInfo(id=id, label=name) for id, name in sequence.hand_id2name.items()
                     ],
                     keypoint_connections=sequence.hand_links,
                 ),
                 rr.ClassDescription(
                     info=rr.AnnotationInfo(id=1, label="Right Hand", color=(0, 0, 255)),
                     keypoint_annotations=[
-                        rr.AnnotationInfo(id=id, label=name)
-                        for id, name in sequence.hand_id2name.items()
+                        rr.AnnotationInfo(id=id, label=name) for id, name in sequence.hand_id2name.items()
                     ],
                     keypoint_connections=sequence.hand_links,
                 ),
@@ -62,9 +61,7 @@ def set_pose_annotation_context(sequence: BaseExoEgoSequence) -> None:
     )
 
 
-def create_blueprint(
-    exo_video_log_paths: list[Path], num_videos_to_log: Literal[4, 8] = 8
-) -> rrb.Blueprint:
+def create_blueprint(exo_video_log_paths: list[Path], num_videos_to_log: Literal[4, 8] = 8) -> rrb.Blueprint:
     active_tab: int = 0  # 0 for video, 1 for images
     main_view = rrb.Vertical(
         contents=[
@@ -134,9 +131,7 @@ def log_exo_ego_sequence_batch(
         total=2,
     )
     for hand_idx, (hand_side, color, class_id) in pbar:
-        xyz_stack: Float32[ndarray, "num_frames 21 3"] = exo_batch_data.xyz_stack[
-            :, hand_idx, ...
-        ]
+        xyz_stack: Float32[ndarray, "num_frames 21 3"] = exo_batch_data.xyz_stack[:, hand_idx, ...]
         rr.log(
             hand_side,
             rr.Points3D.from_fields(
@@ -150,9 +145,7 @@ def log_exo_ego_sequence_batch(
 
         rr.send_columns(
             hand_side,
-            indexes=[
-                rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(sequence)])
-            ],
+            indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(sequence)])],
             columns=[
                 *rr.Points3D.columns(
                     positions=rearrange(
@@ -164,9 +157,7 @@ def log_exo_ego_sequence_batch(
         )
         for exo_cam in sequence.exo_cam_list:
             image_log_path: Path = parent_log_path / exo_cam.name / "pinhole" / "video"
-            uv_stack: Float32[ndarray, "num_frames 21 2"] = (
-                exo_batch_data.uv_stack_dict[exo_cam.name][:, hand_idx, ...]
-            )
+            uv_stack: Float32[ndarray, "num_frames 21 2"] = exo_batch_data.uv_stack_dict[exo_cam.name][:, hand_idx, ...]
             # filter batch with invalid values
             uv_stack[uv_stack == -1] = np.nan
             rr.log(
@@ -182,9 +173,7 @@ def log_exo_ego_sequence_batch(
 
             rr.send_columns(
                 f"{image_log_path}/{hand_side}",
-                indexes=[
-                    rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(sequence)])
-                ],
+                indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(sequence)])],
                 columns=[
                     *rr.Points2D.columns(
                         positions=rearrange(
@@ -237,16 +226,10 @@ def log_exo_ego_sequence_incremental(
                     show_labels=False,
                 ),
             )
-            for cam_param, bgr in zip(
-                exo_data.cam_params_list, exo_data.bgr_list, strict=True
-            ):
-                uv: Float32[ndarray, "21 2"] = exo_data.uv_dict[cam_param.name][
-                    hand_idx
-                ]
+            for cam_param, bgr in zip(exo_data.cam_params_list, exo_data.bgr_list, strict=True):
+                uv: Float32[ndarray, "21 2"] = exo_data.uv_dict[cam_param.name][hand_idx]
                 uv[uv == -1] = np.nan
-                image_log_path: Path = (
-                    parent_log_path / cam_param.name / "pinhole" / "video"
-                )
+                image_log_path: Path = parent_log_path / cam_param.name / "pinhole" / "video"
                 rr.log(
                     f"{image_log_path}/{hand_side}",
                     rr.Points2D(
@@ -274,18 +257,14 @@ def log_depths(
 ) -> None:
     depth_paths: list[dict[str, Path]] | None = sequence.depth_paths
     if depth_paths is not None:
-        for idx, depths_dict in enumerate(
-            tqdm(depth_paths, desc="Logging depth images")
-        ):
+        for idx, depths_dict in enumerate(tqdm(depth_paths, desc="Logging depth images")):
             rr.set_time_nanos(timeline=timeline, nanos=shortest_timestamp[idx])
             fuser = Open3DFuser(fusion_resolution=0.01, max_fusion_depth=1.25)
             bgr_list = sequence.exo_video_readers[idx]
             for exo_cam, bgr in zip(sequence.exo_cam_list, bgr_list, strict=True):
                 depth_path = depths_dict[exo_cam.name]
                 assert depth_path.exists(), f"Path {depth_path} does not exist."
-                depth_image: UInt16[np.ndarray, "480 640"] = cv2.imread(
-                    str(depth_path), cv2.IMREAD_ANYDEPTH
-                )
+                depth_image: UInt16[np.ndarray, "480 640"] = cv2.imread(str(depth_path), cv2.IMREAD_ANYDEPTH)
                 rgb_hw3 = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 # rr.log(
                 #     f"{parent_log_path / exo_cam.name / 'pinhole' / 'depth'}",
@@ -322,14 +301,14 @@ def visualize_exo_ego(config: VisualzeConfig):
                 data_path=config.root_directory,
                 sequence_name=config.sequence_name,
                 subject_id=config.subject_id,
-                load_labels=True,
+                load_labels=config.load_labels,
             )
         case "assembly101":
             sequence: Assembely101Sequence = Assembely101Sequence(
                 data_path=config.root_directory,
                 sequence_name=config.sequence_name,
                 subject_id=None,
-                load_labels=True,
+                load_labels=config.load_labels,
             )
 
     set_pose_annotation_context(sequence)
@@ -340,16 +319,10 @@ def visualize_exo_ego(config: VisualzeConfig):
 
     exo_video_readers: MultiVideoReader = sequence.exo_video_readers
     exo_video_files: list[Path] = exo_video_readers.video_paths
-    exo_cam_log_paths: list[Path] = [
-        parent_log_path / exo_cam.name for exo_cam in sequence.exo_cam_list
-    ]
-    exo_video_log_paths: list[Path] = [
-        cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths
-    ]
+    exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in sequence.exo_cam_list]
+    exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
-    blueprint: rrb.Blueprint = create_blueprint(
-        exo_video_log_paths, num_videos_to_log=config.num_videos_to_log
-    )
+    blueprint: rrb.Blueprint = create_blueprint(exo_video_log_paths, num_videos_to_log=config.num_videos_to_log)
     rr.send_blueprint(blueprint)
 
     # log stationary exo cameras and video assets
@@ -364,9 +337,7 @@ def visualize_exo_ego(config: VisualzeConfig):
         )
 
     all_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
-    for video_file, video_log_path in zip(
-        exo_video_files, exo_video_log_paths, strict=True
-    ):
+    for video_file, video_log_path in zip(exo_video_files, exo_video_log_paths, strict=True):
         assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
         # Log video asset which is referred to by frame references.
         frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(  # noqa: UP037
@@ -380,20 +351,21 @@ def visualize_exo_ego(config: VisualzeConfig):
         f"Length of timestamps {len(shortest_timestamp)} and sequence {len(sequence)} do not match"
     )
 
-    if config.send_as_batch:
-        log_exo_ego_sequence_batch(
-            sequence,
-            shortest_timestamp=shortest_timestamp,
-            parent_log_path=parent_log_path,
-            timeline=timeline,
-            log_depth=config.log_depths,
-        )
-    else:
-        log_exo_ego_sequence_incremental(
-            sequence,
-            shortest_timestamp=shortest_timestamp,
-            parent_log_path=parent_log_path,
-            timeline=timeline,
-        )
+    if config.load_labels:
+        if config.send_as_batch:
+            log_exo_ego_sequence_batch(
+                sequence,
+                shortest_timestamp=shortest_timestamp,
+                parent_log_path=parent_log_path,
+                timeline=timeline,
+                log_depth=config.log_depths,
+            )
+        else:
+            log_exo_ego_sequence_incremental(
+                sequence,
+                shortest_timestamp=shortest_timestamp,
+                parent_log_path=parent_log_path,
+                timeline=timeline,
+            )
 
     print(f"Time taken to load data: {timer() - start_time:.2f} seconds")
