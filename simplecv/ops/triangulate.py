@@ -5,9 +5,9 @@ from numpy import ndarray
 
 
 def projectN3(
-    kpts3d: Float[ndarray, "n_views n_kpts 4"],
+    kpts3d: Float[ndarray, "n_kpts 4"],
     Pall: Float[ndarray, "n_views 3 4"],
-) -> Float[ndarray, "nViews nJoints 3"]:
+) -> Float[ndarray, "n_views nJoints 3"]:
     nViews: int = len(Pall)
     # convert to homogenous
     kp3d = np.hstack((kpts3d[:, :3], np.ones((kpts3d.shape[0], 1))))
