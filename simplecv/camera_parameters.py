@@ -41,33 +41,24 @@ class Extrinsics:
     def compute_transformation_matrices(self) -> None:
         # If world-to-camera is provided, compute the transformation matrix and its inverse
         if self.world_R_cam is not None and self.world_t_cam is not None:
-            self.world_T_cam: Float[ndarray, "4 4"] = (
-                self.compose_transformation_matrix(self.world_R_cam, self.world_t_cam)
+            self.world_T_cam: Float[ndarray, "4 4"] = self.compose_transformation_matrix(
+                self.world_R_cam, self.world_t_cam
             )
             self.cam_T_world: Float[ndarray, "4 4"] = np.linalg.inv(self.world_T_cam)
             # Extract camera-to-world rotation and translation from the inverse matrix
-            self.cam_R_world, self.cam_t_world = self.decompose_transformation_matrix(
-                self.cam_T_world
-            )
+            self.cam_R_world, self.cam_t_world = self.decompose_transformation_matrix(self.cam_T_world)
         # If camera-to-world is provided, compute the transformation matrix and its inverse
         elif self.cam_R_world is not None and self.cam_t_world is not None:
-            self.cam_T_world: Float[ndarray, "4 4"] = (
-                self.compose_transformation_matrix(self.cam_R_world, self.cam_t_world)
+            self.cam_T_world: Float[ndarray, "4 4"] = self.compose_transformation_matrix(
+                self.cam_R_world, self.cam_t_world
             )
             self.world_T_cam: Float[ndarray, "4 4"] = np.linalg.inv(self.cam_T_world)
             # Extract world-to-camera rotation and translation from the inverse matrix
-            self.world_R_cam, self.world_t_cam = self.decompose_transformation_matrix(
-                self.world_T_cam
-            )
+            self.world_R_cam, self.world_t_cam = self.decompose_transformation_matrix(self.world_T_cam)
         else:
-            raise ValueError(
-                "Either world-to-camera or camera-to-world rotation and translation "
-                "must be provided."
-            )
+            raise ValueError("Either world-to-camera or camera-to-world rotation and translation must be provided.")
 
-    def compose_transformation_matrix(
-        self, R: Float[ndarray, "3 3"], t: Float[ndarray, "3"]
-    ) -> Float[ndarray, "4 4"]:
+    def compose_transformation_matrix(self, R: Float[ndarray, "3 3"], t: Float[ndarray, "3"]) -> Float[ndarray, "4 4"]:
         Rt: Float[ndarray, "3 4"] = np.hstack([R, rearrange(t, "c -> c 1")])
         T: Float[ndarray, "4 4"] = np.vstack([Rt, np.array([0, 0, 0, 1])])
         return T
@@ -129,9 +120,7 @@ class PinholeParameters:
 
     def compute_projection_matrix(self) -> None:
         # Compute the projection matrix using k_matrix and world_T_cam
-        self.projection_matrix: Float[ndarray, "3 4"] = (
-            self.intrinsics.k_matrix @ self.extrinsics.cam_T_world[:3, :]
-        )
+        self.projection_matrix: Float[ndarray, "3 4"] = self.intrinsics.k_matrix @ self.extrinsics.cam_T_world[:3, :]
 
 
 @dataclass
@@ -151,9 +140,7 @@ class Fisheye62Parameters:
 
     def compute_projection_matrix(self) -> None:
         # Compute the projection matrix using k_matrix and world_T_cam
-        self.projection_matrix: Float[ndarray, "3 4"] = (
-            self.intrinsics.k_matrix @ self.extrinsics.cam_T_world[:3, :]
-        )
+        self.projection_matrix: Float[ndarray, "3 4"] = self.intrinsics.k_matrix @ self.extrinsics.cam_T_world[:3, :]
 
 
 def to_homogeneous(
@@ -168,9 +155,7 @@ def to_homogeneous(
     Returns:
         Float[np.ndarray, "num_points 4"]: A numpy array containing the homogeneous coordinates of the points.
     """
-    ones_column: Float[ndarray, "num_points 1"] = np.ones(
-        (points.shape[0], 1), dtype=points.dtype
-    )
+    ones_column: Float[ndarray, "num_points 1"] = np.ones((points.shape[0], 1), dtype=points.dtype)
     return np.hstack([points, ones_column])
 
 
@@ -190,9 +175,7 @@ def from_homogeneous(
     return points[:, :3]
 
 
-def rescale_intri(
-    camera_intrinsics: Intrinsics, *, target_width: int, target_height: int
-) -> Intrinsics:
+def rescale_intri(camera_intrinsics: Intrinsics, *, target_width: int, target_height: int) -> Intrinsics:
     """
     Rescales the input image and intrinsic matrix by a given scale factor.
 
@@ -328,26 +311,18 @@ def fisheye_projection(
     points_3d_world: Float[ndarray, "num_points 3"], camera: Fisheye62Parameters
 ) -> Float[ndarray, "num_points 2"]:
     # world to camera
-    points_3d_hom_world: Float[ndarray, "num_points 4"] = to_homogeneous(
-        points_3d_world
-    )
-    points_3d_hom_cam: Float[ndarray, "num_points 4"] = (
-        camera.extrinsics.cam_T_world @ points_3d_hom_world.T
-    ).T
+    points_3d_hom_world: Float[ndarray, "num_points 4"] = to_homogeneous(points_3d_world)
+    points_3d_hom_cam: Float[ndarray, "num_points 4"] = (camera.extrinsics.cam_T_world @ points_3d_hom_world.T).T
     points_3d_cam: Float[ndarray, "num_points 3"] = from_homogeneous(points_3d_hom_cam)
     # camera to image
-    points_2d_undist: Float[ndarray, "num_points 2"] = arctan_projection(
-        points_3d_cam, camera.intrinsics.k_matrix
-    )
+    points_2d_undist: Float[ndarray, "num_points 2"] = arctan_projection(points_3d_cam, camera.intrinsics.k_matrix)
     # normalize points for distortion
     points_2d_undist[:, 0] -= camera.intrinsics.cx
     points_2d_undist[:, 1] -= camera.intrinsics.cy
     points_2d_undist[:, 0] /= camera.intrinsics.fl_x
     points_2d_undist[:, 1] /= camera.intrinsics.fl_y
 
-    points_2d_distorted = apply_radial_tangential_distortion(
-        camera.distortion, points_2d_undist
-    )
+    points_2d_distorted = apply_radial_tangential_distortion(camera.distortion, points_2d_undist)
 
     # denormalize points after applying distortion
     points_2d_distorted[:, 0] *= camera.intrinsics.fl_x
@@ -360,16 +335,10 @@ def fisheye_projection(
         points_2d_distorted[:, 0] >= camera.intrinsics.width,
         points_2d_distorted[:, 1] >= camera.intrinsics.height,
     )
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(
-        out_of_bounds, points_2d_distorted[:, 0] < 0
-    )
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(
-        out_of_bounds, points_2d_distorted[:, 1] < 0
-    )
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 0] < 0)
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 1] < 0)
     # make sure points are in front of camera
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(
-        out_of_bounds, points_3d_cam[:, 2] < 0
-    )
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_3d_cam[:, 2] < 0)
 
     # if out of bounds, set to -1
     points_2d_distorted[out_of_bounds, :] = np.nan
