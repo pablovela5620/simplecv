@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import open3d as o3d
 import tqdm
-from jaxtyping import Float32
+from jaxtyping import Float32, UInt8
 from serde import field as serde_field
 from serde import serde
 from serde.json import to_json
@@ -57,6 +57,7 @@ def save_to_nerfstudio(
     bgr_list: BGRList,
     pinhole_param_list: list[PinholeParameters],
     pointcloud: o3d.geometry.PointCloud,
+    masks_list: list[UInt8] | None = None,
 ):
     """
     Save keyframes to NerfStudio format
@@ -71,13 +72,17 @@ def save_to_nerfstudio(
     images_dir = ns_save_path / "images"
     images_dir.mkdir(exist_ok=True)
 
+    # create a directory for masks if they are provided
+    if masks_list is not None:
+        masks_dir = ns_save_path / "masks"
+        masks_dir.mkdir(exist_ok=True)
+
     ns_frames_list = []
 
-    pbar = tqdm.tqdm(
-        zip(bgr_list, pinhole_param_list, strict=True),
-        desc="Saving Images",
-    )
-    for i, (bgr_img, pinhole_param) in enumerate(pbar):
+    assert len(bgr_list) == len(pinhole_param_list)
+    for i in tqdm.tqdm(range(len(bgr_list)), desc="Saving frames", unit="frame"):
+        bgr_img: np.ndarray = bgr_list[i]
+        pinhole_param: PinholeParameters = pinhole_param_list[i]
         h, w, _ = bgr_img.shape
         extrinsics: Extrinsics = pinhole_param.extrinsics
 
@@ -86,6 +91,13 @@ def save_to_nerfstudio(
         image_path: Path = images_dir / image_filename
         cv2.imwrite(str(image_path), bgr_img)
         relative_image_path = f"images/{image_filename}"
+
+        if masks_list is not None:
+            mask: np.ndarray = masks_list[i] * 255  # Convert boolean mask to uint8
+            # Save the mask with zero-padded numbering
+            mask_filename: str = f"mask_{i + 1:05d}.png"
+            mask_path: Path = masks_dir / mask_filename
+            cv2.imwrite(str(mask_path), mask)
 
         # in RDF (OpenCV) Format
         world_T_cam_cv: Float32[np.ndarray, "4 4"] = extrinsics.world_T_cam.astype(np.float32)
