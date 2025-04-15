@@ -57,7 +57,7 @@ def save_to_nerfstudio(
     bgr_list: BGRList,
     pinhole_param_list: list[PinholeParameters],
     pointcloud: o3d.geometry.PointCloud,
-    masks_list: list[UInt8] | None = None,
+    masks_list: list[UInt8[np.ndarray, "h w"]] | None = None,
 ):
     """
     Save keyframes to NerfStudio format
