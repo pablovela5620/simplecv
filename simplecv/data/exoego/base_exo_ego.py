@@ -53,8 +53,13 @@ class BaseExoEgoSequence(ABC):
         if self.load_labels:
             self.exo_batch_data: ExoBatchData = self.load_exo_batch_data(data_path, sequence_name, subject_id)
 
-    @abstractmethod
     def __iter__(self) -> Generator[ExoData, None, None]:
+        for idx in range(len(self)):
+            # Yield the result of __getitem__ for iteration
+            yield self[idx]
+
+    @abstractmethod
+    def __getitem__(self, idx: int) -> ExoData:
         pass
 
     @abstractmethod
