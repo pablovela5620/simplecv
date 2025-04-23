@@ -13,7 +13,7 @@ from jaxtyping import Float32, Int, UInt16
 from numpy import ndarray
 from tqdm import tqdm
 
-from simplecv.data.exoego.assembly_101 import Assembely101Sequence
+from simplecv.data.exoego.assembly_101 import Assembly101Sequence
 from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
 from simplecv.data.exoego.hocap import ExoCameraIDs, HOCapSequence, SubjectIDs
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
@@ -304,7 +304,7 @@ def visualize_exo_ego(config: VisualzeConfig):
                 load_labels=config.load_labels,
             )
         case "assembly101":
-            sequence: Assembely101Sequence = Assembely101Sequence(
+            sequence: Assembly101Sequence = Assembly101Sequence(
                 data_path=config.root_directory,
                 sequence_name=config.sequence_name,
                 subject_id=None,

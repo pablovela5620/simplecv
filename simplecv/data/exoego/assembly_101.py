@@ -96,18 +96,14 @@ def load_ego_cameras(
 
     all_calib_dict: dict = train_assembly_hands_dict["calibration"]
     # assume that all cameras have the same intrinsics for each capture, so only get a single one
-    instrinsics_dict: dict[str, list[list[float]]] = next(
-        iter(all_calib_dict.values())
-    )["intrinsics"]
+    instrinsics_dict: dict[str, list[list[float]]] = next(iter(all_calib_dict.values()))["intrinsics"]
 
     pinhole_list: list[PinholeParameters] = []
 
     cam_name: str
     exo_camera: Float32[ndarray, "4 4"]
     for cam_name, exo_camera in asdict(exo_raw_extri).items():
-        intri: Float32[ndarray, "3 3"] = np.array(
-            instrinsics_dict[f"{cam_name}_rgb"], dtype=np.float32
-        )
+        intri: Float32[ndarray, "3 3"] = np.array(instrinsics_dict[f"{cam_name}_rgb"], dtype=np.float32)
         intri = Intrinsics(
             camera_conventions="RDF",
             fl_x=float(intri[0, 0]),
@@ -131,7 +127,7 @@ def load_ego_cameras(
     return pinhole_list
 
 
-class Assembely101Sequence(BaseExoEgoSequence):
+class Assembly101Sequence(BaseExoEgoSequence):
     def __init__(
         self,
         data_path: Path,
@@ -152,8 +148,7 @@ class Assembely101Sequence(BaseExoEgoSequence):
             bgr_list: list[UInt8[ndarray, "H W 3"]] = self.exo_video_readers[idx]
             xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
             uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
-                cam_name: uv_stack[idx]
-                for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
+                cam_name: uv_stack[idx] for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
             }
             yield ExoData(
                 cam_params_list=self.exo_cam_list,
@@ -162,18 +157,12 @@ class Assembely101Sequence(BaseExoEgoSequence):
                 uv_dict=uv_dict,
             )
 
-    def load_video_paths(
-        self, data_path: Path, sequence_name: str, subject_id: str | None = None
-    ) -> list[Path]:
+    def load_video_paths(self, data_path: Path, sequence_name: str, subject_id: str | None = None) -> list[Path]:
         """Load the paths to the video files."""
         video_dir: Path = data_path / "videos" / self.encoding / sequence_name
         assert video_dir.exists(), f"Directory {video_dir} does not exist"
         exo_video_files: list[Path] = sorted(
-            [
-                file
-                for file in video_dir.iterdir()
-                if file.is_file() and not file.name.startswith("HMC")
-            ]
+            [file for file in video_dir.iterdir() if file.is_file() and not file.name.startswith("HMC")]
         )
 
         return exo_video_files
@@ -182,31 +171,19 @@ class Assembely101Sequence(BaseExoEgoSequence):
         self, data_path: Path, sequence_name: str, subject_id: str | None = None
     ) -> list[PinholeParameters]:
         extrinsics_exo_path: Path = (
-            data_path
-            / "assembly101_camera_and_hand_poses"
-            / "camera_extrinsics_fixed"
-            / f"{sequence_name}.json"
+            data_path / "assembly101_camera_and_hand_poses" / "camera_extrinsics_fixed" / f"{sequence_name}.json"
         )
-        assert extrinsics_exo_path.exists(), (
-            f"File {extrinsics_exo_path} does not exist"
-        )
+        assert extrinsics_exo_path.exists(), f"File {extrinsics_exo_path} does not exist"
         assembly_hands_annotation_path: Path = data_path / "assembly-hands"
         train_assembly_hands_json: Path = (
-            assembly_hands_annotation_path
-            / "annotations"
-            / "train"
-            / "assemblyhands_train_exo_calib_v1-1.json"
+            assembly_hands_annotation_path / "annotations" / "train" / "assemblyhands_train_exo_calib_v1-1.json"
         )
-        assert train_assembly_hands_json.exists(), (
-            f"File {train_assembly_hands_json} does not exist"
-        )
+        assert train_assembly_hands_json.exists(), f"File {train_assembly_hands_json} does not exist"
         with open(extrinsics_exo_path) as f:
             extrinsics_fixed = json.load(f)
 
         # load videos to get height and width
-        video_paths: list[Path] = self.load_video_paths(
-            data_path, sequence_name, subject_id
-        )
+        video_paths: list[Path] = self.load_video_paths(data_path, sequence_name, subject_id)
         # sort extrinsics_fixed by camera name
         extrinsics_fixed = dict(sorted(extrinsics_fixed.items()))
         exo_mv_video_reader = MultiVideoReader(video_paths)
@@ -218,18 +195,14 @@ class Assembely101Sequence(BaseExoEgoSequence):
 
         all_calib_dict: dict = train_assembly_hands_dict["calibration"]
         # assume that all cameras have the same intrinsics for each capture, so only get a single one
-        instrinsics_dict: dict[str, list[list[float]]] = next(
-            iter(all_calib_dict.values())
-        )["intrinsics"]
+        instrinsics_dict: dict[str, list[list[float]]] = next(iter(all_calib_dict.values()))["intrinsics"]
 
         pinhole_list: list[PinholeParameters] = []
 
         cam_name: str
         exo_camera: Float32[ndarray, "4 4"]
         for cam_name, exo_camera in asdict(exo_raw_extri).items():
-            intri: Float32[ndarray, "3 3"] = np.array(
-                instrinsics_dict[f"{cam_name}_rgb"], dtype=np.float32
-            )
+            intri: Float32[ndarray, "3 3"] = np.array(instrinsics_dict[f"{cam_name}_rgb"], dtype=np.float32)
             intri = Intrinsics(
                 camera_conventions="RDF",
                 fl_x=float(intri[0, 0]),
@@ -253,33 +226,20 @@ class Assembely101Sequence(BaseExoEgoSequence):
         pinhole_list = list(sorted(pinhole_list, key=lambda x: x.name))
         return pinhole_list
 
-    def load_exo_batch_data(
-        self, data_path: Path, sequence_name: str, subject_id: str | None = None
-    ) -> ExoBatchData:
+    def load_exo_batch_data(self, data_path: Path, sequence_name: str, subject_id: str | None = None) -> ExoBatchData:
         """Load the exocentric data for a sequence."""
-        uv_json_path: Path = (
-            data_path
-            / "assembly101_camera_and_hand_poses"
-            / "landmarks2D"
-            / f"{sequence_name}.json"
-        )
+        uv_json_path: Path = data_path / "assembly101_camera_and_hand_poses" / "landmarks2D" / f"{sequence_name}.json"
         assert data_path.exists(), f"File {data_path} does not exist"
 
         with open(uv_json_path) as f:
-            all_uv_raw_dict: dict[str, dict[str, dict[str, list[list[float]]]]] = (
-                json.loads(f.read())
-            )
+            all_uv_raw_dict: dict[str, dict[str, dict[str, list[list[float]]]]] = json.loads(f.read())
 
         uv_stack_dict: dict[str, Float32[ndarray, "num_frames 2 21 2"]]
         # sort all_2d_landmarks by frame number
-        all_uv_raw_dict = dict(
-            sorted(all_uv_raw_dict.items(), key=lambda item: int(item[0]))
-        )
+        all_uv_raw_dict = dict(sorted(all_uv_raw_dict.items(), key=lambda item: int(item[0])))
         uv_stack_dict = {}  # Initialize the dictionary first
 
-        for cam_name in tqdm(
-            [exo_cam.name for exo_cam in self.exo_cam_list], desc="Processing cameras"
-        ):
+        for cam_name in tqdm([exo_cam.name for exo_cam in self.exo_cam_list], desc="Processing cameras"):
             uv_list: list[Float32[ndarray, "num_frames 2 21 2"]] = []
             for uv_dict in tqdm(
                 all_uv_raw_dict.values(),
@@ -295,18 +255,11 @@ class Assembely101Sequence(BaseExoEgoSequence):
                     )
                 )
 
-            uv_final_stack: Float32[ndarray, "num_frames 2 21 2"] = np.stack(
-                uv_list, axis=0
-            )
+            uv_final_stack: Float32[ndarray, "num_frames 2 21 2"] = np.stack(uv_list, axis=0)
             uv_stack_dict[cam_name] = uv_final_stack
 
         ### Load 3D keypoints ###
-        xyz_json_path: Path = (
-            data_path
-            / "assembly101_camera_and_hand_poses"
-            / "landmarks3D"
-            / f"{sequence_name}.json"
-        )
+        xyz_json_path: Path = data_path / "assembly101_camera_and_hand_poses" / "landmarks3D" / f"{sequence_name}.json"
         assert xyz_json_path.exists(), f"File {xyz_json_path} does not exist"
         with open(xyz_json_path) as f:
             all_xyz_dict: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
@@ -321,14 +274,10 @@ class Assembely101Sequence(BaseExoEgoSequence):
         xyz_stack_list: list[Float32[ndarray, "2 21 3"]] = []
         for frame_number, _ in enumerate(tqdm(all_xyz_dict)):
             keypoints: Hand3DKeypoints = all_xyz_dict[frame_number]
-            xyz_stack_list.append(
-                np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32)
-            )
+            xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
 
         # Concatenate keypoints from all frames vertically to get a (num_frames 21, 3) array.
-        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(
-            xyz_stack_list, axis=0
-        )
+        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
         return ExoBatchData(uv_stack_dict=uv_stack_dict, xyz_stack=xyz_stack)
 
     @property
