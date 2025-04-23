@@ -145,21 +145,23 @@ class HOCapSequence(BaseExoEgoSequence):
 
     def __iter__(self) -> Generator[ExoData, None, None]:
         for idx in range(len(self)):
-            bgr_list: list[UInt8[ndarray, "480 640 3"]] = self.exo_video_readers[idx]
-            if self.load_labels:
-                xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
-                uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
-                    cam_name: uv_stack[idx] for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
-                }
-            else:
-                xyz = None
-                uv_dict = None
-            yield ExoData(
-                cam_params_list=self.exo_cam_list,
-                bgr_list=bgr_list,
-                xyz=xyz,
-                uv_dict=uv_dict,
-            )
+            # Yield the result of __getitem__ for iteration
+            yield self[idx]
+
+    def __getitem__(self, idx: int) -> ExoData:
+        if not 0 <= idx < len(self):
+            raise IndexError(f"Index {idx} out of range for sequence of length {len(self)}")
+
+        bgr_list: list[UInt8[ndarray, "480 640 3"]] = self.exo_video_readers[idx]
+        if self.load_labels:
+            xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
+            uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
+                cam_name: uv_stack[idx] for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
+            }
+        else:
+            xyz = None
+            uv_dict = None
+        return ExoData(cam_params_list=self.exo_cam_list, bgr_list=bgr_list, xyz=xyz, uv_dict=uv_dict)
 
     def load_exo_batch_data(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> ExoBatchData:
         label_path: Path = data_path / "labels" / f"subject_{subject_id}" / sequence_name

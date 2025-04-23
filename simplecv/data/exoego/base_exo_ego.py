@@ -22,6 +22,7 @@ class ManoStack:
 class ExoData:
     cam_params_list: list[PinholeParameters]
     bgr_list: BGRList
+    # assumes left | right hand
     xyz: Float32[ndarray, "2 21 3"] | None
     uv_dict: dict[str, Float32[ndarray, "2 21 2"]] | None
 
