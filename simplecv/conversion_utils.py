@@ -94,8 +94,9 @@ def save_to_nerfstudio(
 
         if masks_list is not None:
             mask: np.ndarray = masks_list[i] * 255  # Convert boolean mask to uint8
-            # Save the mask with zero-padded numbering
-            mask_filename: str = f"mask_{i + 1:05d}.png"
+            # Save the mask with zero-padded numbering, also make sure to use the same filename as the image
+            # to ensure they are paired correctly (in particular with brush)
+            mask_filename: str = f"frame_{i + 1:05d}.png"
             mask_path: Path = masks_dir / mask_filename
             cv2.imwrite(str(mask_path), mask)
 
