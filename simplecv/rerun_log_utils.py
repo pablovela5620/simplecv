@@ -51,7 +51,7 @@ class RerunTyroConfig:
             # Send logging data to separate `rerun` process.
             # You can omit the argument to connect to the default address,
             # which is `127.0.0.1:9876`.
-            rr.connect_tcp()
+            rr.connect_grpc(flush_timeout_sec=None)
         elif self.save is not None:
             rr.save(self.save)
         elif not self.headless:
