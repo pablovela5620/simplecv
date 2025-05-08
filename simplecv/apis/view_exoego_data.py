@@ -16,6 +16,7 @@ from tqdm import tqdm
 from simplecv.data.exoego.assembly_101 import Assembly101Sequence
 from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
 from simplecv.data.exoego.hocap import ExoCameraIDs, HOCapSequence, SubjectIDs
+from simplecv.data.exoego.multicam import MulticamSequence
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
@@ -26,7 +27,7 @@ np.set_printoptions(suppress=True)
 @dataclass
 class VisualzeConfig:
     rr_config: RerunTyroConfig
-    dataset: Literal["hocap", "assembly101"] = "hocap"
+    dataset: Literal["hocap", "assembly101", "multicam"] = "hocap"
     root_directory: Path = Path("data/hocap/sample")
     subject_id: SubjectIDs | None = "8"
     sequence_name: str = "20231024_180733"
@@ -311,6 +312,14 @@ def visualize_exo_ego(config: VisualzeConfig):
                 load_labels=config.load_labels,
             )
 
+        case "multicam":
+            sequence: MulticamSequence = MulticamSequence(
+                data_path=config.root_directory,
+                sequence_name=config.sequence_name,
+                subject_id=None,
+                load_labels=config.load_labels,
+            )
+
     set_pose_annotation_context(sequence)
     rr.log("/", sequence.world_coordinate_system, static=True)
 
@@ -328,7 +337,16 @@ def visualize_exo_ego(config: VisualzeConfig):
     # log stationary exo cameras and video assets
     for exo_cam in sequence.exo_cam_list:
         cam_log_path: Path = parent_log_path / exo_cam.name
-        image_plane_distance: float = 0.1 if config.dataset == "hocap" else 100.0
+        match config.dataset:
+            case "hocap":
+                image_plane_distance = 0.1
+            case "assembly101":
+                image_plane_distance = 100.0
+            case "multicam":
+                image_plane_distance = 25.0
+            case _:
+                # Default or error case, though Literal type hint should prevent this
+                raise ValueError(f"Unexpected dataset value: {config.dataset}")
         log_pinhole(
             camera=exo_cam,
             cam_log_path=cam_log_path,
