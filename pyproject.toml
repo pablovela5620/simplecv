@@ -92,7 +92,7 @@ simplecv = { path = ".", editable = true }
 
 
 [tool.pixi.dependencies]
-python = ">=3.11"
+python = "==3.12"
 jaxtyping = ">=0.2.33,<0.3"
 beartype = ">=0.19.0,<0.20"
 numpy = ">=2.0"
