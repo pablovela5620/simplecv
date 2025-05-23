@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from simplecv.data.exoego.assembly_101 import Assembly101Sequence
 from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
-from simplecv.data.exoego.hocap import ExoCameraIDs, HOCapSequence, SubjectIDs
+from simplecv.data.exoego.hocap import HOCapSequence, SubjectIDs
 from simplecv.data.exoego.multicam import MulticamSequence
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video

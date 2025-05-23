@@ -58,8 +58,10 @@ class MulticamSequence(BaseExoEgoSequence):
             uv_dict = None
         return ExoData(cam_params_list=self.exo_cam_list, bgr_list=bgr_list, xyz=xyz, uv_dict=uv_dict)
 
-    def load_exo_batch_data(self, data_path: Path, sequence_name: str, subject_id: str) -> ExoBatchData:
-        raise NotImplementedError("load_exo_batch_data is not implemented for MulticamSequence")
+    def load_exo_batch_data(self, data_path: Path, sequence_name: str, subject_id: str | None) -> ExoBatchData:
+        raise NotImplementedError(
+            "load_exo_batch_data is not implemented for MulticamSequence, use --no-load-labels flag"
+        )
 
     def load_video_paths(self, data_path: Path, sequence_name: str, subject_id: str | None = None) -> list[Path]:
         videos_dir: Path = data_path / sequence_name / "multicam-videos"
