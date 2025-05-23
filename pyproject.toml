@@ -37,11 +37,12 @@ view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path dat
 [tool.pixi.tasks.view-assembly101-data]
 cmd = """
     python tools/view_exoego.py \
-        --root-directory /mnt/12tbdrive/data/assembly101-sample/ \
+        --root-directory data/assembly101-sample \
         --sequence-name nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345 \
         --dataset assembly101
     """
 description = "View example assembly101 data"
+depends-on = ["_download-assembly101-sample"]
 
 [tool.pixi.tasks.view-hocap-data]
 cmd = "python tools/view_exoego.py"
@@ -86,6 +87,17 @@ cmd = """
     """
 outputs = ["data/hocap/sample.zip", "data/hocap/sample"]
 description = "Downloads and extracts an example polycam dataset from huggingface, this may take a while"
+
+[tool.pixi.tasks._download-assembly101-sample]
+cmd = """
+test -e data/assembly101-sample \
+  || (huggingface-cli download pablovela5620/Assembly101-Sample \
+    --repo-type dataset \
+    --include "assembly101-sample/**" \
+    --local-dir data/)
+"""
+outputs = ["data/assembly101-sample"]
+description = "Downloads an example assembly101 dataset from huggingface"
 
 [tool.pixi.pypi-dependencies]
 simplecv = { path = ".", editable = true }
