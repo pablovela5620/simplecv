@@ -21,6 +21,32 @@ def projectN3(
     return kp2ds
 
 
+def proj_3d_vectorized(
+    xyz_hom: Float[ndarray, "n_frames n_joints 4"], P: Float[ndarray, "n_views 3 4"]
+) -> Float[ndarray, "n_frames n_views n_joints 2"]:
+    """
+    Projects 3D points to 2D using the projection matrix for a batch of frames and views.
+
+    xyz_hom: [n_frames, 21, 4] [x, y, z, 1]
+    P: [n_views, 3, 4] (projection matrix - includes extrensic (R, t) and intrinsic (K))
+
+    return kp2d: [n_frames, n_views, n_joints, 2] (squeeze out if 1)
+    """
+    # rearrange for batch matrix multiplication
+    xyz_hom: Float[ndarray, "n_frames 1 4 n_joints"] = rearrange(
+        xyz_hom, "n_frames n_joints xyz_hom -> n_frames 1 xyz_hom n_joints"
+    )
+    P: Float[ndarray, "1 n_views 3 4"] = rearrange(P, "n_views n m -> 1 n_views n m")
+
+    # [1 n_views, 3, 4] @ [n_frames, 1, 4, 21] -> [n_frames, n_views, 3, 21]
+    uv_hom: Float[ndarray, "n_frames n_views 3 n_joints"] = P @ xyz_hom
+    uv_hom = rearrange(uv_hom, "n_frames n_views xyz_hom n_joints -> n_frames n_views n_joints xyz_hom")
+    # convert back from homogeneous coordinates
+    uv: Float[ndarray, "n_frames n_views n_joints 2"] = uv_hom[..., :2] / uv_hom[..., 2:]
+
+    return uv
+
+
 def batch_triangulate(
     keypoints_2d: Float[ndarray, "nViews nJoints 3"],
     projection_matrices: Float[ndarray, "nViews 3 4"],
@@ -36,9 +62,7 @@ def batch_triangulate(
     valid_joints = np.where(visibility_count >= min_views)[0]
 
     # Filter keypoints by valid joints
-    filtered_keypoints: Float[ndarray, "nViews nJoints 3"] = keypoints_2d[
-        :, valid_joints
-    ]
+    filtered_keypoints: Float[ndarray, "nViews nJoints 3"] = keypoints_2d[:, valid_joints]
     conf3d = filtered_keypoints[:, :, -1].sum(axis=0) / visibility_count[valid_joints]
 
     P0: Float[ndarray, "1 nViews 4"] = projection_matrices[None, :, 0, :]
@@ -46,20 +70,14 @@ def batch_triangulate(
     P2: Float[ndarray, "1 nViews 4"] = projection_matrices[None, :, 2, :]
 
     # x-coords homogenous
-    u: Float[ndarray, "nJoints nViews 1"] = rearrange(
-        filtered_keypoints[..., 0], "c j -> j c 1"
-    )
+    u: Float[ndarray, "nJoints nViews 1"] = rearrange(filtered_keypoints[..., 0], "c j -> j c 1")
     uP2: Float[ndarray, "nJoints nViews 4"] = u * P2
 
     # y-coords homogenous
-    v: Float[ndarray, "nJoints nViews 1"] = rearrange(
-        filtered_keypoints[..., 1], "c j -> j c 1"
-    )
+    v: Float[ndarray, "nJoints nViews 1"] = rearrange(filtered_keypoints[..., 1], "c j -> j c 1")
     vP2: Float[ndarray, "nJoints nViews 4"] = v * P2
 
-    confidences: Float[ndarray, "nJoints nViews 1"] = rearrange(
-        filtered_keypoints[..., 2], "c j -> j c 1"
-    )
+    confidences: Float[ndarray, "nJoints nViews 1"] = rearrange(filtered_keypoints[..., 2], "c j -> j c 1")
 
     Au: Float[ndarray, "nJoints nViews 4"] = confidences * (uP2 - P0)
     Av: Float[ndarray, "nJoints nViews 4"] = confidences * (vP2 - P1)
