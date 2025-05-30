@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from timeit import default_timer as timer
 from typing import Literal
 
 import h5py
@@ -106,7 +107,6 @@ def parse_hdf5_file(hdf5_path: Path, video_path: Path) -> EgoDataSequence:
     h5py_file = h5py.File(f"{hdf5_path}", "r")
     # contains intrinsics that are right now manually set
     # camera = h5py_file["camera"]
-    confidences = h5py_file["confidences"]
     transforms = h5py_file["transforms"]
 
     joints_list: list[Float32[ndarray, "n_frames 3"]] = []
@@ -117,13 +117,21 @@ def parse_hdf5_file(hdf5_path: Path, video_path: Path) -> EgoDataSequence:
 
     joints_xyz: Float32[ndarray, "n_frames 68 3"] = np.stack(joints_list, axis=1)
 
-    conf_list: list[Float32[ndarray, "n_frames 3"]] = []
-    for joint_name in AVP_ID2NAME.values():
-        conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]  # noqa: UP037
-        conf_list.append(conf)
+    try:
+        confidences = h5py_file["confidences"]
+        conf_list: list[Float32[ndarray, "n_frames 3"]] = []
+        for joint_name in AVP_ID2NAME.values():
+            conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]  # noqa: UP037
+            conf_list.append(conf)
 
-    conf_stack: Float32[ndarray, "n_frames 68"] = np.stack(conf_list, axis=1)
-    conf_stack: Float32[ndarray, "n_frames 68 1"] = rearrange(conf_stack, "n_frames n_joints -> n_frames n_joints 1")
+        conf_stack: Float32[ndarray, "n_frames 68"] = np.stack(conf_list, axis=1)
+        conf_stack: Float32[ndarray, "n_frames 68 1"] = rearrange(
+            conf_stack, "n_frames n_joints -> n_frames n_joints 1"
+        )
+    except KeyError:
+        conf_stack: Float32[ndarray, "n_frames 68 1"] = np.ones(
+            (joints_xyz.shape[0], joints_xyz.shape[1], 1), dtype=np.float32
+        )  # default confidence of 1.0 for all joints
 
     # there are some problems with the intrinsics files in hdf5, they're always the same so set to a default
     # fmt: off
@@ -148,10 +156,16 @@ def parse_hdf5_file(hdf5_path: Path, video_path: Path) -> EgoDataSequence:
         )
         pinhole_list.append(pinhole)
 
+    llm_description: str = f"# Task Description:\n{h5py_file.attrs['llm_description']}"
+    # check if this key exists, if not, set a default value
+    try:
+        llm_description2: str = f"# Reversible Task Description:\n{h5py_file.attrs['llm_description2']}"
+    except KeyError:
+        llm_description2 = ""
     ego_sequence = EgoDataSequence(
         video_path=video_path,
         pinhole_list=pinhole_list,
-        llm_description=h5py_file.attrs["llm_description"],
+        llm_description=f"{llm_description}\n{llm_description2}",
         xyz_stack=joints_xyz,
         conf_stack=conf_stack,
     )
@@ -160,6 +174,7 @@ def parse_hdf5_file(hdf5_path: Path, video_path: Path) -> EgoDataSequence:
 
 def view_ego(config: ViewEgoConfig) -> None:
     print("Starting ego data viewer...")
+    start = timer()
     sequence_path: Path = config.root_directory / config.sequence_name
     assert sequence_path.exists(), f"Sequence path {sequence_path} does not exist."
     video_paths = sorted(sequence_path.glob("*.mp4"))
@@ -187,7 +202,7 @@ def view_ego(config: ViewEgoConfig) -> None:
             rrb.Vertical(
                 rrb.TextDocumentView(origin="llm_description"),
                 rrb.Spatial2DView(origin=video_log_path),
-                row_shares=[1, 10],
+                row_shares=[3, 10],
             ),
             column_shares=[2, 1],
         ),
@@ -202,6 +217,11 @@ def view_ego(config: ViewEgoConfig) -> None:
     frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(  # noqa: UP037
         new_video_path, video_log_path=video_log_path, timeline=timeline
     )
+
+    rr.log(
+        "llm_description", rr.TextDocument(text=ego_sequence.llm_description, media_type="text/markdown"), static=True
+    )
+
     if config.send_as_batch:
         log_batched(
             parent_log_path=parent_log_path,
@@ -216,6 +236,7 @@ def view_ego(config: ViewEgoConfig) -> None:
             frame_timestamps_ns=frame_timestamps_ns,
             ego_sequence=ego_sequence,
         )
+    print(f"Data logged in {timer() - start:.2f} seconds.")
 
 
 def log_batched(
@@ -309,7 +330,6 @@ def log_incremental(
     conf_stack: Float32[ndarray, "n_frames 68 1"] = ego_sequence.conf_stack
     all_colors_stack: UInt8[ndarray, "n_frames 68 3"] = confidence_scores_to_rgb(confidence_scores=conf_stack)
 
-    rr.log("llm_description", rr.TextDocument(text=ego_sequence.llm_description), static=True)
     for ts_idx, (ts, pinhole) in enumerate(
         tqdm(
             zip(frame_timestamps_ns, ego_sequence.pinhole_list, strict=True),
