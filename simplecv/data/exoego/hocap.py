@@ -24,7 +24,7 @@ from simplecv.data.exoego.skeleton.mediapipe import (
     MEDIAPIPE_IDS,
     MEDIAPIPE_LINKS,
 )
-from simplecv.video_utils import create_temp_video_file
+from simplecv.video_utils import create_temp_video_from_img_dir
 
 # External (exo) cameras are identified by numerical IDs
 ExoCameraIDs = Literal[
@@ -224,7 +224,7 @@ class HOCapSequence(BaseExoEgoSequence):
             assert img_dir.exists(), f"Path {img_dir} does not exist."
             video_path: Path = img_dir / "output.mp4"
             if not video_path.exists():
-                video_path: Path = create_temp_video_file(
+                video_path: Path = create_temp_video_from_img_dir(
                     img_dir,
                     fps=30,
                     quality="low",

@@ -126,9 +126,14 @@ python-dateutil = ">=2.9.0,<3"
 [tool.pixi.feature.ego.pypi-dependencies]
 ego4d = ">=1.7.3,<2"
 
+[tool.pixi.feature.ego-dex.dependencies]
+hdf5 = ">=1.14.4,<2"
+h5py = ">=3.12.1,<4"
+
 [tool.pixi.environments]
 # Create a custom environment which only has the `ego` feature (numpy isn't part of that env).
 ego = { features = ["ego"], no-default-feature = true }
+ego-dex = { features = ["ego-dex"] }
 
 
 [tool.ruff]
