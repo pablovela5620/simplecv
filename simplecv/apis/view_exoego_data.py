@@ -13,10 +13,12 @@ from jaxtyping import Float32, Int, UInt16
 from numpy import ndarray
 from tqdm import tqdm
 
+from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.exoego.assembly_101 import Assembly101Sequence
 from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
 from simplecv.data.exoego.hocap import HOCapSequence, SubjectIDs
 from simplecv.data.exoego.multicam import MulticamSequence
+from simplecv.ops.triangulate import projectN3
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
@@ -207,8 +209,17 @@ def log_exo_ego_sequence_incremental(
         zip(shortest_timestamp, sequence, strict=True),
         total=len(shortest_timestamp),
     )
-    for timestamp, exo_data in pbar:
+    for ts_idx, (timestamp, exo_data) in enumerate(pbar):
         rr.set_time_nanos(timeline=timeline, nanos=timestamp)
+        # # log ego cameras
+        # current_ego_cam: PinholeParameters = sequence._ego_data[ts_idx]
+        # log_pinhole(
+        #     camera=current_ego_cam,
+        #     cam_log_path=parent_log_path / current_ego_cam.name,
+        #     image_plane_distance=0.1,
+        #     static=False,
+        # )
+
         # log 3d keypoints
         for hand_idx, (hand_side, color, class_id) in enumerate(
             (
@@ -227,6 +238,25 @@ def log_exo_ego_sequence_incremental(
                     show_labels=False,
                 ),
             )
+            # # log 2d keypoints in ego cameras
+            # xyz_hom: Float32[ndarray, "21 4"] = np.hstack((xyz, np.ones((21, 1)))).astype(np.float32)
+            # P_ego: Float32[ndarray, "3 4"] = current_ego_cam.projection_matrix.astype(np.float32)
+            # P_ego: Float32[ndarray, "1 3 4"] = rearrange(P_ego, "n m -> 1 n m")
+            # uvc_ego: Float32[ndarray, "1 21 3"] = projectN3(xyz_hom, P_ego).astype(np.float32)
+            # uv_ego: Float32[ndarray, "21 2"] = uvc_ego[0, :, :2]
+            # uv_ego[uv_ego == -1] = np.nan
+            # image_log_path: Path = parent_log_path / current_ego_cam.name / "pinhole" / "video"
+            # rr.log(
+            #     f"{image_log_path}/{hand_side}",
+            #     rr.Points2D(
+            #         uv_ego,
+            #         colors=color,
+            #         class_ids=class_id,
+            #         keypoint_ids=sequence.hand_ids,
+            #         show_labels=False,
+            #     ),
+            # )
+            # log 2d keypoints in exo cameras
             for cam_param, bgr in zip(exo_data.cam_params_list, exo_data.bgr_list, strict=True):
                 uv: Float32[ndarray, "21 2"] = exo_data.uv_dict[cam_param.name][hand_idx]
                 uv[uv == -1] = np.nan
@@ -353,6 +383,14 @@ def visualize_exo_ego(config: VisualzeConfig):
             image_plane_distance=image_plane_distance,
             static=True,
         )
+
+    # log ego video assets
+    # current_ego_cam: PinholeParameters = sequence._ego_data[0]
+    # log_video(
+    #     video_path=sequence._ego_video_path,
+    #     video_log_path=parent_log_path / current_ego_cam.name / "pinhole" / "video",
+    #     timeline=timeline,
+    # )
 
     all_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
     for video_file, video_log_path in zip(exo_video_files, exo_video_log_paths, strict=True):

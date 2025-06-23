@@ -5,9 +5,10 @@ from typing import Literal, TypedDict
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, Int, UInt8
+from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
+from scipy.spatial.transform import Rotation as R
 from serde import serde
 from serde.yaml import from_yaml
 from tqdm import tqdm
@@ -24,6 +25,7 @@ from simplecv.data.exoego.skeleton.mediapipe import (
     MEDIAPIPE_IDS,
     MEDIAPIPE_LINKS,
 )
+from simplecv.video_io import VideoReader
 from simplecv.video_utils import create_temp_video_from_img_dir
 
 # External (exo) cameras are identified by numerical IDs
@@ -68,7 +70,7 @@ class HOCapExtrinsicsData:
     rs_master: str
     world_T_cam_dict: dict[CameraIDs, Float32[ndarray, "4 4"]] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # convert extrinsics to 3x4 matrices
         self.extrinsics: dict[CameraIDs, Float32[ndarray, "3 4"]] = {
             cam_id: extri.reshape(3, 4) for cam_id, extri in self.extrinsics.items()
@@ -127,6 +129,24 @@ class CalibratedMano:
     betas: Float32[ndarray, "10"]
 
 
+def quat_to_mat(quat: Float[ndarray, "batch 7"]) -> Float[ndarray, "batch 4 4"]:
+    """Convert quaternion to rotation matrix."""
+    # Placeholder for quaternion to rotation matrix conversion
+    # Extract quaternion (q) and translation (t)
+    q: Float[ndarray, "batch 4"] = quat[..., :4]  # Quaternion (4 elements)
+    t: Float[ndarray, "batch 3"] = quat[..., 4:]  # Translation (3 elements)
+
+    # Convert quaternion to rotation matrix and fill in the pose matrix
+    r = R.from_quat(q)
+
+    N = quat.shape[0]
+    p = np.tile(np.eye(4), (N, 1, 1))  # Create N identity matrices
+
+    p[..., :3, :3] = r.as_matrix()  # Fill rotation part
+    p[..., :3, 3] = t  # Fill translation part
+    return p
+
+
 class HOCapSequence(BaseExoEgoSequence):
     def __init__(
         self,
@@ -135,6 +155,11 @@ class HOCapSequence(BaseExoEgoSequence):
         subject_id: SubjectIDs,
         load_labels: bool = False,
     ) -> None:
+        self._ego_data = self.load_ego_cameras(data_path, sequence_name, subject_id)
+        self._ego_video_path: Path = self.load_ego_video_paths(
+            data_path=data_path, sequence_name=sequence_name, subject_id=subject_id
+        )
+        self._ego_video_reader: VideoReader = VideoReader(filename=self._ego_video_path)
         super().__init__(data_path, sequence_name, subject_id, load_labels)
         self._depth_paths: list[dict[ExoCameraIDs, Path]] = self.load_depth_paths(data_path, sequence_name, subject_id)
 
@@ -164,7 +189,7 @@ class HOCapSequence(BaseExoEgoSequence):
         return ExoData(cam_params_list=self.exo_cam_list, bgr_list=bgr_list, xyz=xyz, uv_dict=uv_dict)
 
     def load_exo_batch_data(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> ExoBatchData:
-        label_path: Path = data_path / "labels" / f"subject_{subject_id}" / sequence_name
+        label_path: Path = data_path / f"subject_{subject_id}" / sequence_name
         assert label_path.exists(), f"Path {label_path} does not exist."
 
         xyz_list: list[Float32[ndarray, "2 21 3"]] = []
@@ -235,6 +260,25 @@ class HOCapSequence(BaseExoEgoSequence):
             video_path_list.append(video_path)
         return video_path_list
 
+    def load_ego_video_paths(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> Path:
+        sequence_path: Path = data_path / f"subject_{subject_id}" / sequence_name
+        assert sequence_path.exists(), f"Path {sequence_path} does not exist."
+
+        # Load video path s for the ego camera (HoloLens)
+        img_dir: Path = sequence_path / self._ego_data[0].name
+        assert img_dir.exists(), f"Path {img_dir} does not exist."
+        video_path: Path = img_dir / "output.mp4"
+        if not video_path.exists():
+            video_path: Path = create_temp_video_from_img_dir(
+                img_dir,
+                fps=30,
+                quality="low",
+                image_extension="jpg",
+                save_file=False,
+            )
+
+        return video_path
+
     def load_depth_paths(
         self, data_path: Path, sequence_name: str, subject_id: SubjectIDs
     ) -> list[dict[ExoCameraIDs, Path]]:
@@ -266,12 +310,12 @@ class HOCapSequence(BaseExoEgoSequence):
     def load_mano_poses(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> ManoStack:
         subject_mano_yaml: Path = data_path / "calibration" / "mano" / f"subject_{subject_id}.yaml"
         assert subject_mano_yaml.exists(), f"Path {subject_mano_yaml} does not exist."
-        # load yaml file to str
-        with open(subject_mano_yaml) as file:
-            subject_mano_str: str = file.read()
+        # # load yaml file to str
+        # with open(subject_mano_yaml) as file:
+        #     subject_mano_str: str = file.read()
 
-        subject_mano: CalibratedMano = from_yaml(CalibratedMano, subject_mano_str)
-        poses_path: Path = data_path / "poses" / f"subject_{subject_id}" / sequence_name
+        subject_mano: CalibratedMano = from_yaml(CalibratedMano, subject_mano_yaml.read_text())
+        poses_path: Path = data_path / f"subject_{subject_id}" / sequence_name
         assert poses_path.exists(), f"Path {poses_path} does not exist."
         mano_poses: Path = poses_path / "poses_m.npy"
         # 0 for right hand, 1 for left hand
@@ -330,6 +374,81 @@ class HOCapSequence(BaseExoEgoSequence):
                     exo_cam_list.append(PinholeParameters(name=hocap_intri.serial, intrinsics=intri, extrinsics=extri))
 
         return exo_cam_list
+
+    def load_ego_cameras(self, data_path: Path, sequence_name: str, subject_id: SubjectIDs) -> list[PinholeParameters]:
+        calibration_path: Path = data_path / "calibration"
+        intrinsics_path: Path = calibration_path / "intrinsics"
+
+        sequence_path: Path = data_path / f"subject_{subject_id}" / sequence_name
+
+        assert intrinsics_path.exists(), f"Path {intrinsics_path} does not exist."
+        # TODO don't use self here after getting final iterable
+        assert sequence_path.exists(), f"Path {sequence_path} does not exist."
+
+        extrinsics_npy_path: Path = sequence_path / "poses_pv.npy"
+        # first 4 elements are the rotation (quaternion) and translation are the last 3 elements
+        extri_quat: Float[ndarray, "num_frames 7"] = np.load(extrinsics_npy_path)
+        world_T_cam_batch: Float[ndarray, "num_frames 4 4"] = quat_to_mat(extri_quat)
+
+        holo_intri_yaml_paths = list(intrinsics_path.glob("holo*.yaml"))
+        if not holo_intri_yaml_paths:
+            raise FileNotFoundError(f"No HoloLens intrinsics YAML found in {intrinsics_path}")
+        holo_intri_yaml_path: Path = holo_intri_yaml_paths[0]
+        holo_intri: HOCapIntrinsicsData = from_yaml(HOCapIntrinsicsData, holo_intri_yaml_path.read_text())
+
+        ego_cam_list: list[PinholeParameters] = []
+
+        world_T_cam: Float32[ndarray, "4 4"]
+        for world_T_cam in world_T_cam_batch:
+            # Check if the serial contains 'hololens' using match statement
+            intri = Intrinsics(
+                camera_conventions="RDF",
+                fl_x=holo_intri.color.fx,
+                fl_y=holo_intri.color.fy,
+                cx=holo_intri.color.ppx,
+                cy=holo_intri.color.ppy,
+                width=holo_intri.color.width,
+                height=holo_intri.color.height,
+            )
+            # For other cameras, print their serial and extrinsics if available
+            # need to do some stuff to make this
+            extri = Extrinsics(world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3])
+            ego_cam_list.append(PinholeParameters(name=holo_intri.serial, intrinsics=intri, extrinsics=extri))
+
+        return ego_cam_list
+
+        # hocap_intri_list: list[HOCapIntrinsicsData] = []
+        # for intrinsics_yaml in intrinsics_path.glob("*.yaml"):
+        #     # Skip any file with "hololens" in the name
+        #     with open(intrinsics_yaml) as file:
+        #         intri_str: str = file.read()
+        #     hocap_intri_list.append(from_yaml(HOCapIntrinsicsData, intri_str))
+
+        # exo_cam_list: list[PinholeParameters] = []
+        # for hocap_intri in hocap_intri_list:
+        #     # Check if the serial contains 'hololens' using match statement
+        #     match hocap_intri.serial:
+        #         # ego perspective
+        #         case serial if "hololens" in serial:
+        #             print(f"Found HoloLens camera: {hocap_intri.serial}")
+        #         # exo perspective
+        #         case _:
+        #             intri = Intrinsics(
+        #                 camera_conventions="RDF",
+        #                 fl_x=hocap_intri.color.fx,
+        #                 fl_y=hocap_intri.color.fy,
+        #                 cx=hocap_intri.color.ppx,
+        #                 cy=hocap_intri.color.ppy,
+        #                 width=hocap_intri.color.width,
+        #                 height=hocap_intri.color.height,
+        #             )
+        #             # For other cameras, print their serial and extrinsics if available
+        #             world_T_cam: Float32[ndarray, "4 4"] = extri_hocap.world_T_cam_dict.get(hocap_intri.serial)
+        #             # need to do some stuff to make this
+        #             extri = Extrinsics(world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3])
+        #             exo_cam_list.append(PinholeParameters(name=hocap_intri.serial, intrinsics=intri, extrinsics=extri))
+
+        # return exo_cam_list
 
     @property
     def hand_links(self) -> tuple[tuple[int, int], ...]:
