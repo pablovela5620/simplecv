@@ -4,17 +4,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import rerun as rr
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
-from serde import InternalTagging, serde
+from serde import InternalTagging, from_dict, serde
 from serde import field as serde_field
 from serde.json import from_json
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Distortion, Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.new_exoego.base_ego import BaseEgoDatasetConfig, BaseEgoSequence, EgoData
+from simplecv.data.exoego.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.data.exoego.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
+from simplecv.data.new_exoego.base_ego import BaseEgoDatasetConfig, BaseEgoSequence, EgoData, EgoLabels
 
 CameraNames = Literal["e1", "e2", "e3", "e4"]
 SerialNo = Literal[
@@ -103,6 +106,14 @@ class OVFishEye62:
     p2: float
     p3: float
     p4: float
+
+
+@serde
+class Hand3DKeypoints:
+    # Use the "rename" parameter to indicate that the JSON key "0" should map to serde_field "left"
+    left: Float32[ndarray, "21 3"] = serde_field(rename="0")
+    # And similarly for "1" -> "right"
+    right: Float32[ndarray, "21 3"] = serde_field(rename="1")
 
 
 @serde(tagging=InternalTagging("DistortionModel"))
@@ -264,6 +275,44 @@ class Assembly101EgoSequence(BaseEgoSequence):
 
         return ego_cam_dict, video_to_cam_map
 
+    def load_labels(self) -> EgoLabels:
+        ### Load 3D keypoints ###
+        landmarks3d_dir: Path = self.config.data_dir / "assembly101_camera_and_hand_poses" / "landmarks3D"
+        assert landmarks3d_dir.exists(), f"Directory {landmarks3d_dir} does not exist"
+        xyz_json_path: Path = landmarks3d_dir / f"{self.config.sequence_name}.json"
+        assert xyz_json_path.exists(), f"File {xyz_json_path} does not exist"
+        with open(xyz_json_path) as f:
+            all_xyz_dict: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
+
+        # sort all_3d_landmarks by frame number
+        all_xyz_dict = dict(sorted(all_xyz_dict.items(), key=lambda item: int(item[0])))
+
+        all_xyz_dict: dict[int, Hand3DKeypoints] = {
+            int(k): from_dict(Hand3DKeypoints, v) for k, v in all_xyz_dict.items()
+        }
+
+        xyz_stack_list: list[Float32[ndarray, "2 21 3"]] = []
+        for frame_number, _ in enumerate(tqdm(all_xyz_dict)):
+            keypoints: Hand3DKeypoints = all_xyz_dict[frame_number]
+            xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
+
+        # Concatenate keypoints from all frames vertically to get a (num_frames 21, 3) array.
+        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
+        num_frames = xyz_stack.shape[0]
+
+        xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
+        for f in range(num_frames):
+            xyzc_stack[f] = assembly21_to_coco133(xyz_stack[f])
+
+        return EgoLabels(
+            xyzc_stack=xyzc_stack,  # Placeholder for xyzc_stack
+        )
+
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
         return rr.ViewCoordinates.BUL
+
+    @property
+    def image_plane_distance(self) -> int | float:
+        """Get the image plane distance for the camera."""
+        return 35

@@ -6,17 +6,24 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import tyro
-from jaxtyping import Int
+from jaxtyping import Float, Int, UInt8
 from numpy import ndarray
 
 from simplecv.apis.view_exoego_data import log_exo_ego_sequence_batch, set_pose_annotation_context
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
 from simplecv.data.exoego.assembly_101 import Assembly101Sequence
-from simplecv.data.new_exoego.assembly_101_ego import Assembly101EgoSequence, EgoAssembly101Config
-from simplecv.data.new_exoego.base_ego import BaseEgoSequence, CamNameType
+from simplecv.data.exoego.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
+from simplecv.data.new_exoego.base_ego import BaseEgoSequence, CamNameType, EgoLabels
 from simplecv.data.new_exoego.hocap_ego import EgoHocapConfig
-from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
+from simplecv.rerun_log_utils import (
+    Points2DWithConfidence,
+    Points3DWithConfidence,
+    RerunTyroConfig,
+    confidence_scores_to_rgb,
+    log_pinhole,
+    log_video,
+)
 from simplecv.video_io import MultiVideoReader
 
 np.set_printoptions(suppress=True)
@@ -27,6 +34,24 @@ class VisualizeConfig:
     rr_config: RerunTyroConfig
     dataset: AnnotatedEgoDatasetUnion
     num_videos_to_log: Literal[4, 8] = 8
+
+
+def set_annotation_context() -> None:
+    rr.log(
+        "/",
+        rr.AnnotationContext(
+            [
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in COCO_133_ID2NAME.items()
+                    ],
+                    keypoint_connections=COCO_133_LINKS,
+                ),
+            ]
+        ),
+        static=True,
+    )
 
 
 def create_blueprint(exo_video_log_paths: list[Path], num_videos_to_log: Literal[4, 8] = 8) -> rrb.Blueprint:
@@ -73,7 +98,7 @@ def visualize_exo_ego(config: VisualizeConfig):
     # )
 
     rr.log("/", ego_sequence.world_coordinate_system, static=True)
-    # set_pose_annotation_context(exo_sequence)
+    set_annotation_context()
 
     parent_log_path = Path("world")
     timeline: str = "video_time"
@@ -120,6 +145,7 @@ def visualize_exo_ego(config: VisualizeConfig):
             video_file, ego_video_log_path, timeline=timeline
         )
         ego_timestamps.append(frame_timestamps_ns)
+        break
 
     # Find the timestamp list with the maximum length.
     shortest_timestamp: Int[ndarray, "num_frames"] = min(ego_timestamps, key=len)  # noqa: UP037
@@ -127,10 +153,20 @@ def visualize_exo_ego(config: VisualizeConfig):
         f"Length of timestamps {len(shortest_timestamp)} and sequence {len(ego_sequence)} do not match"
     )
 
+    ego_labels: EgoLabels = ego_sequence.ego_labels
+    xyzc_stack: Float[ndarray, "num_frames 133 4"] = ego_labels.xyzc_stack
+    print(xyzc_stack.shape)
+    # uvc_stack: Float[ndarray, "n_frames n_views 68 3"] = ego_labels.uvc_stack
+    # uv_stack_dict: dict[str, Float[ndarray, "..."]] = ego_labels.uv_stack_dict
+    # assume all confidence scores are the same for all cameras
+    # conf_stack: Float[ndarray, "n_frames 68 1"] = uvc_stack[:, 0, :, -1:]  # Keep the confidence scores
+    # all_colors_stack: UInt8[ndarray, "n_frames 68 3"] = confidence_scores_to_rgb(confidence_scores=conf_stack)
+
     for ts_idx, ts in enumerate(shortest_timestamp):
         rr.set_time_nanos(timeline=timeline, nanos=ts)
         ego_cam_param_list: list[PinholeParameters]
-        for cam_name, ego_cam_param_list in ego_cam_dict.items():
+        for cam_idx, (cam_name, ego_cam_param_list) in enumerate(ego_cam_dict.items()):
+            ego_video_log_path = ego_video_log_paths[cam_idx]
             try:
                 ego_cam_param: PinholeParameters = ego_cam_param_list[ts_idx]
             except IndexError:
@@ -147,9 +183,36 @@ def visualize_exo_ego(config: VisualizeConfig):
             log_pinhole(
                 camera=ego_cam_param,
                 cam_log_path=cam_log_path,
-                image_plane_distance=20.0,  # Assuming a default value for image plane distance
+                image_plane_distance=ego_sequence.image_plane_distance,  # Assuming a default value for image plane distance
                 static=False,
             )
+
+            # Log the 2D keypoints
+            xyz: Float[ndarray, "133 3"] = xyzc_stack[
+                ts_idx, ..., :3
+            ]  # Get the keypoints for the current timestamp and camera
+            rr.log(
+                f"{parent_log_path}/keypoints",
+                rr.Points3D(
+                    positions=xyz,  # Remove the view dimension
+                    colors=(0, 255, 0),  # Assuming a default color for the keypoints
+                    class_ids=0,
+                    keypoint_ids=COCO_133_IDS,
+                    show_labels=False,
+                ),
+            )
+
+            # rr.log(
+            #     f"{video_log_path}/keypoints",
+            #     Points2DWithConfidence(
+            #         positions=uv[0, :, 0:2],  # Remove the view dimension
+            #         confidences=uv[0, :, -1],  # Keep the confidence scores
+            #         colors=current_colors,
+            #         class_ids=0,
+            #         keypoint_ids=AVP_IDS,
+            #         show_labels=False,
+            #     ),
+            # )
 
     # log_exo_ego_sequence_batch(
     #     exo_sequence,

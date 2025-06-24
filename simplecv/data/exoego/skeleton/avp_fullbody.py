@@ -1,3 +1,8 @@
+from typing import Final
+
+import numpy as np
+from jaxtyping import Float
+
 AVP_LINKS = (
     # Spine
     (0, 61),  # hip -> spine1
@@ -155,3 +160,96 @@ AVP_ID2NAME: dict[int, str] = {
     67: "spine7",
 }
 AVP_IDS: list[int] = [int(key) for key in AVP_ID2NAME]
+
+
+AVP2COCO133: Final[dict[int, tuple[int, ...]]] = {
+    # ---- shoulders & elbows (COCO-17) ----
+    1: (5,),  # leftArm       → left_shoulder
+    33: (6,),  # rightArm      → right_shoulder
+    2: (7,),  # leftForearm   → left_elbow
+    34: (8,),  # rightForearm  → right_elbow
+    # ---- wrists (duplicate!) -------------
+    3: (9, 91),  # leftHand / wrist  → body-wrist + left_hand_root
+    35: (10, 112),  # rightHand / wrist → body-wrist + right_hand_root
+    # ---- LEFT HAND -----------------------
+    27: (92,),
+    25: (93,),
+    26: (94,),
+    28: (95,),  # thumb 1-4
+    6: (96,),
+    4: (97,),
+    5: (98,),
+    8: (99,),  # index 1-4
+    16: (100,),
+    14: (101,),
+    15: (102,),
+    18: (103,),  # middle 1-4
+    21: (104,),
+    19: (105,),
+    20: (106,),
+    23: (107,),  # ring 1-4
+    11: (108,),
+    9: (109,),
+    10: (110,),
+    13: (111,),  # pinky 1-4
+    # ---- RIGHT HAND ----------------------
+    59: (113,),
+    57: (114,),
+    58: (115,),
+    60: (116,),  # thumb 1-4
+    38: (117,),
+    36: (118,),
+    37: (119,),
+    40: (120,),  # index 1-4
+    48: (121,),
+    46: (122,),
+    47: (123,),
+    50: (124,),  # middle 1-4
+    53: (125,),
+    51: (126,),
+    52: (127,),
+    55: (128,),  # ring 1-4
+    43: (129,),
+    41: (130,),
+    42: (131,),
+    45: (132,),  # pinky 1-4
+}
+
+
+def avp_to_coco_hands(
+    xyz_avp: Float[np.ndarray, "N 68 3"],  # shape: (N, 68, 3)
+    conf_avp: Float[np.ndarray, "N 68 1"] | None,  # shape: (N, 68, 1)  (can be None → filled with 1.0)
+) -> tuple[Float[np.ndarray, "N 133 3"], Float[np.ndarray, "N 133 1"]]:
+    """
+    Convert the 42 hand joints from AVP (68‑joint model) to COCO‑133 layout.
+
+    Parameters
+    ----------
+    xyz_avp : float32[N, 68, 3]
+        Joint xyz positions in AVP order.
+    conf_avp : float32[N, 68, 1]
+        Per‑joint confidence (broadcastable).  If you pass None, a tensor of 1.0 is used.
+
+    Returns
+    -------
+    xyz_coco : float32[N, 133, 3]
+        COCO‑133 xyz array with *all* 133 joints.  Non‑hand joints are zero.
+    conf_coco : float32[N, 133, 1]
+        Matching confidence array (zeros where we did not fill anything).
+    """
+    N = xyz_avp.shape[0]
+
+    xyz_coco = np.full((N, 133, 3), np.nan, dtype=np.float32)
+    conf_coco = np.full((N, 133, 1), np.nan, dtype=np.float32)
+
+    if conf_avp is None:
+        conf_avp = np.ones((N, 68, 1), dtype=np.float32)
+
+    for avp_id, coco_ids in AVP2COCO133.items():
+        if isinstance(coco_ids, int):
+            coco_ids = (coco_ids,)
+        for cid in coco_ids:
+            xyz_coco[:, cid, :] = xyz_avp[:, avp_id, :]
+            conf_coco[:, cid, :] = conf_avp[:, avp_id, :]
+
+    return xyz_coco, conf_coco

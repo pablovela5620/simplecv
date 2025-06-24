@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
+from jaxtyping import Float
+from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import PinholeParameters
@@ -21,8 +23,16 @@ class EgoData:
 
 
 @dataclass
+class EgoLabels:
+    xyzc_stack: Float[ndarray, "num_frames 133 4"]
+    # uv_stack_dict: dict[str, Float[ndarray, "..."]]
+    # uvc_stack: Float[ndarray, "n_frames n_views 68 3"] | None = None  # 2D landmarks for each view and frame
+
+
+@dataclass
 class BaseEgoDatasetConfig(InstantiateConfig):
     root_directory: Path = Path()
+    load_labels: bool = True
 
 
 class BaseEgoSequence(ABC):
@@ -55,6 +65,8 @@ class BaseEgoSequence(ABC):
         self.ego_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self._video_path_list]
         )
+        if self.config.load_labels:
+            self._ego_labels: EgoLabels = self.load_labels()
 
     def __len__(self) -> int:
         # Return the length based on the first camera's pinhole parameters list
@@ -81,6 +93,11 @@ class BaseEgoSequence(ABC):
         pass
 
     @abstractmethod
+    def load_labels(self) -> EgoLabels:
+        """Load labels for the sequence, if applicable."""
+        pass
+
+    @abstractmethod
     def align_cams_and_videos(
         self, video_path_list: list[Path], ego_cam_dict: dict[CamNameType, list[PinholeParameters]]
     ) -> tuple[dict[CamNameType, list[PinholeParameters]], dict[CamNameType, Path]]:
@@ -93,6 +110,16 @@ class BaseEgoSequence(ABC):
         return self._ego_cam_dict
 
     @property
+    def ego_labels(self) -> EgoLabels:
+        """Get the dictionary of egocentric cameras."""
+        return self._ego_labels
+
+    @property
     @abstractmethod
     def world_coordinate_system(self) -> ViewCoordinates:
+        pass
+
+    @property
+    @abstractmethod
+    def image_plane_distance(self) -> int | float:
         pass
