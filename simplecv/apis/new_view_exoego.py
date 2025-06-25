@@ -12,10 +12,10 @@ from numpy import ndarray
 from simplecv.apis.view_exoego_data import log_exo_ego_sequence_batch, set_pose_annotation_context
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
-from simplecv.data.exoego.assembly_101 import Assembly101Sequence
-from simplecv.data.exoego.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
-from simplecv.data.new_exoego.base_ego import BaseEgoSequence, CamNameType, EgoLabels
-from simplecv.data.new_exoego.hocap_ego import EgoHocapConfig
+from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType, EgoLabels
+from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
+from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
 from simplecv.rerun_log_utils import (
     Points2DWithConfidence,
     Points3DWithConfidence,
@@ -88,16 +88,11 @@ def create_blueprint(exo_video_log_paths: list[Path], num_videos_to_log: Literal
 
 
 def visualize_exo_ego(config: VisualizeConfig):
-    ego_sequence: BaseEgoSequence = config.dataset.setup()  # one-liner
+    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()  # one-liner
+    ego_sequence: BaseEgoSequence | None = exoego_sequence.ego_sequence
+    exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
 
-    # exo_sequence: Assembly101Sequence = Assembly101Sequence(
-    #     data_path=ego_sequence.config.root_directory,
-    #     sequence_name=ego_sequence.config.sequence_name,
-    #     subject_id=None,
-    #     load_labels=True,
-    # )
-
-    rr.log("/", ego_sequence.world_coordinate_system, static=True)
+    rr.log("/", exoego_sequence.world_coordinate_system, static=True)
     set_annotation_context()
 
     parent_log_path = Path("world")
@@ -110,32 +105,32 @@ def visualize_exo_ego(config: VisualizeConfig):
     ego_cam_log_paths: list[Path] = [parent_log_path / ego_cam_name for ego_cam_name in ego_cam_dict]
     ego_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
 
-    # exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
-    # exo_video_files: list[Path] = exo_video_readers.video_paths
-    # exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
-    # exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
+    exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
+    exo_video_files: list[Path] = exo_video_readers.video_paths
+    exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
+    exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
-    # # log stationary exo cameras and video assets
-    # for exo_cam in exo_sequence.exo_cam_list:
-    #     cam_log_path: Path = parent_log_path / exo_cam.name
-    #     log_pinhole(
-    #         camera=exo_cam,
-    #         cam_log_path=cam_log_path,
-    #         image_plane_distance=100.0,
-    #         static=True,
-    #     )
-
-    # exo_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
-    # for video_file, exo_video_log_path in zip(exo_video_files, exo_video_log_paths, strict=True):
-    #     assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
-    #     # Log video asset which is referred to by frame references.
-    #     frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(  # noqa: UP037
-    #         video_file, exo_video_log_path, timeline=timeline
-    #     )
-    #     exo_timestamps.append(frame_timestamps_ns)
-
-    blueprint: rrb.Blueprint = create_blueprint(ego_video_log_paths, num_videos_to_log=config.num_videos_to_log)
+    blueprint: rrb.Blueprint = create_blueprint(exo_cam_log_paths, num_videos_to_log=config.num_videos_to_log)
     rr.send_blueprint(blueprint)
+
+    # log stationary exo cameras and video assets
+    for exo_cam in exo_sequence.exo_cam_list:
+        cam_log_path: Path = parent_log_path / exo_cam.name
+        log_pinhole(
+            camera=exo_cam,
+            cam_log_path=cam_log_path,
+            image_plane_distance=exo_sequence.image_plane_distance,
+            static=True,
+        )
+
+    exo_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
+    for video_file, exo_video_log_path in zip(exo_video_files, exo_video_log_paths, strict=True):
+        assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+        # Log video asset which is referred to by frame references.
+        frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(  # noqa: UP037
+            video_file, exo_video_log_path, timeline=timeline
+        )
+        exo_timestamps.append(frame_timestamps_ns)
 
     ego_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
     for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
@@ -145,7 +140,6 @@ def visualize_exo_ego(config: VisualizeConfig):
             video_file, ego_video_log_path, timeline=timeline
         )
         ego_timestamps.append(frame_timestamps_ns)
-        break
 
     # Find the timestamp list with the maximum length.
     shortest_timestamp: Int[ndarray, "num_frames"] = min(ego_timestamps, key=len)  # noqa: UP037
@@ -155,10 +149,9 @@ def visualize_exo_ego(config: VisualizeConfig):
 
     ego_labels: EgoLabels = ego_sequence.ego_labels
     xyzc_stack: Float[ndarray, "num_frames 133 4"] = ego_labels.xyzc_stack
-    print(xyzc_stack.shape)
     # uvc_stack: Float[ndarray, "n_frames n_views 68 3"] = ego_labels.uvc_stack
     # uv_stack_dict: dict[str, Float[ndarray, "..."]] = ego_labels.uv_stack_dict
-    # assume all confidence scores are the same for all cameras
+    # # assume all confidence scores are the same for all cameras
     # conf_stack: Float[ndarray, "n_frames 68 1"] = uvc_stack[:, 0, :, -1:]  # Keep the confidence scores
     # all_colors_stack: UInt8[ndarray, "n_frames 68 3"] = confidence_scores_to_rgb(confidence_scores=conf_stack)
 
@@ -202,17 +195,17 @@ def visualize_exo_ego(config: VisualizeConfig):
                 ),
             )
 
-            # rr.log(
-            #     f"{video_log_path}/keypoints",
-            #     Points2DWithConfidence(
-            #         positions=uv[0, :, 0:2],  # Remove the view dimension
-            #         confidences=uv[0, :, -1],  # Keep the confidence scores
-            #         colors=current_colors,
-            #         class_ids=0,
-            #         keypoint_ids=AVP_IDS,
-            #         show_labels=False,
-            #     ),
-            # )
+    # rr.log(
+    #     f"{video_log_path}/keypoints",
+    #     Points2DWithConfidence(
+    #         positions=uv[0, :, 0:2],  # Remove the view dimension
+    #         confidences=uv[0, :, -1],  # Keep the confidence scores
+    #         colors=current_colors,
+    #         class_ids=0,
+    #         keypoint_ids=AVP_IDS,
+    #         show_labels=False,
+    #     ),
+    # )
 
     # log_exo_ego_sequence_batch(
     #     exo_sequence,

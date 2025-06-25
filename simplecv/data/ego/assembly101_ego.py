@@ -1,8 +1,7 @@
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import rerun as rr
@@ -15,10 +14,11 @@ from serde.json import from_json
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Distortion, Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.exoego.skeleton.assembly_hands import assembly21_to_coco133
-from simplecv.data.exoego.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
-from simplecv.data.new_exoego.base_ego import BaseEgoDatasetConfig, BaseEgoSequence, EgoData, EgoLabels
+from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData, EgoLabels
+from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 
+if TYPE_CHECKING:
+    from simplecv.data.exoego.assembly101 import Assembly101Config
 CameraNames = Literal["e1", "e2", "e3", "e4"]
 SerialNo = Literal[
     "21176875",  # e1
@@ -131,17 +131,8 @@ def pick_schema(extrinsics_ego: dict[str, Any]) -> type[EgoExtri843] | type[EgoE
     return schema
 
 
-@dataclass
-class EgoAssembly101Config(BaseEgoDatasetConfig):
-    _target: type = field(default_factory=lambda: Assembly101EgoSequence)
-    data_dir: Path = Path("/mnt/8tb/data/assembly101-original/")
-    split: Literal["train", "val", "test"] | None = None
-    subject_id: str | None = None
-    sequence_name: str = "nusar-2021_action_both_9081-a30_9081_user_id_2021-02-12_155525"  # "nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345"
-
-
 class Assembly101EgoSequence(BaseEgoSequence):
-    config: EgoAssembly101Config
+    config: "Assembly101Config"
 
     def __len__(self) -> int:
         assert len(self.ego_video_readers) > 0, "No videos found."
@@ -157,7 +148,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
 
     def load_video_paths(self) -> list[Path]:
         """Load the paths to the video files."""
-        video_dir: Path = self.config.data_dir / "videos" / "av1" / self.config.sequence_name
+        video_dir: Path = self.config.root_directory / "videos" / "av1" / self.config.sequence_name
         assert video_dir.exists(), f"Directory {video_dir} does not exist"
         ego_video_files: list[Path] = sorted(
             [file for file in video_dir.iterdir() if file.is_file() and file.name.startswith("HMC")]
@@ -169,7 +160,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
         ############################################
         # Get Intrinsic Parameters for Ego Cameras #
         ############################################
-        intrinsics_ego_dir: Path = self.config.data_dir / "assemblyhands-toolkit" / "calib" / "nimble_json_calib"
+        intrinsics_ego_dir: Path = self.config.root_directory / "assemblyhands-toolkit" / "calib" / "nimble_json_calib"
         intri_jsons: list[Path] = sorted(intrinsics_ego_dir.glob("*.json"))
 
         # the original assembly101 dataset does not provide camera intrinsics in the fisheye 62 format, so we load them from
@@ -207,7 +198,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
         # Get Extrinsic Parameters for Ego Cameras #
         ############################################
         extrinsics_ego_path: Path = (
-            self.config.data_dir
+            self.config.root_directory
             / "assembly101_camera_and_hand_poses"
             / "camera_extrinsics_ego"
             / f"{self.config.sequence_name}.json"
@@ -277,7 +268,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
 
     def load_labels(self) -> EgoLabels:
         ### Load 3D keypoints ###
-        landmarks3d_dir: Path = self.config.data_dir / "assembly101_camera_and_hand_poses" / "landmarks3D"
+        landmarks3d_dir: Path = self.config.root_directory / "assembly101_camera_and_hand_poses" / "landmarks3D"
         assert landmarks3d_dir.exists(), f"Directory {landmarks3d_dir} does not exist"
         xyz_json_path: Path = landmarks3d_dir / f"{self.config.sequence_name}.json"
         assert xyz_json_path.exists(), f"File {xyz_json_path} does not exist"

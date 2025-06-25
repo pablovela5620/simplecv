@@ -4,20 +4,20 @@ from typing import TYPE_CHECKING
 
 import tyro
 
-from simplecv.data.new_exoego.assembly_101_ego import EgoAssembly101Config
-from simplecv.data.new_exoego.base_ego import BaseEgoDatasetConfig
+from simplecv.data.new_exoego.assembly101 import Assembly101Config
+from simplecv.data.new_exoego.base_exoego import BaseExoEgoDatasetConfig
 from simplecv.data.new_exoego.ego_dex import EgoDexConfig
-from simplecv.data.new_exoego.hocap_ego import EgoHocapConfig
+from simplecv.data.new_exoego.hocap import HocapConfig
 
 # ───────────────────── registry → union ─────────────────── #
 dataset_defaults = {
-    "assembly101": EgoAssembly101Config(),
-    "hocap": EgoHocapConfig(),
+    "assembly101": Assembly101Config(),
+    "hocap": HocapConfig(),
     "ego-dex": EgoDexConfig(),
 }
 
 if TYPE_CHECKING:  # for IDEs / mypy
-    EgoDatasetUnion = BaseEgoDatasetConfig
+    EgoDatasetUnion = BaseExoEgoDatasetConfig
 else:
     EgoDatasetUnion = tyro.extras.subcommand_type_from_defaults(dataset_defaults, prefix_names=False)
 

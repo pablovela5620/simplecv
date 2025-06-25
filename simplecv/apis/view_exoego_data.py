@@ -13,12 +13,9 @@ from jaxtyping import Float32, Int, UInt16
 from numpy import ndarray
 from tqdm import tqdm
 
-from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.exoego.assembly_101 import Assembly101Sequence
 from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
-from simplecv.data.exoego.hocap import HOCapSequence, SubjectIDs
-from simplecv.data.exoego.multicam import MulticamSequence
-from simplecv.ops.triangulate import projectN3
+from simplecv.data.new_exoego.multicam import MulticamSequence
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
@@ -31,7 +28,7 @@ class VisualzeConfig:
     rr_config: RerunTyroConfig
     dataset: Literal["hocap", "assembly101", "multicam"] = "hocap"
     root_directory: Path = Path("data/hocap/sample")
-    subject_id: SubjectIDs | None = "8"
+    # subject_id: SubjectIDs | None = "8"
     sequence_name: str = "20231024_180733"
     num_videos_to_log: Literal[4, 8] = 8
     log_depths: bool = False

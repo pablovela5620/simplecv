@@ -1,22 +1,24 @@
-from dataclasses import dataclass, field
+from dataclasses import field
 from pathlib import Path
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 
 import numpy as np
 import rerun as rr
 from icecream import ic
-from jaxtyping import Float, Float32, Int
+from jaxtyping import Float, Float32
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from scipy.spatial.transform import Rotation as R
 from serde import serde
 from serde.yaml import from_yaml
-from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.exoego.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
-from simplecv.data.new_exoego.base_ego import BaseEgoDatasetConfig, BaseEgoSequence, EgoData, EgoLabels
+from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData, EgoLabels
+from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.video_utils import create_temp_video_from_img_dir
+
+if TYPE_CHECKING:
+    from simplecv.data.exoego.hocap import HocapConfig
 
 # External (exo) cameras are identified by numerical IDs
 ExoCameraIDs = Literal[
@@ -120,17 +122,8 @@ def quat_to_mat(quat: Float[ndarray, "batch 7"]) -> Float[ndarray, "batch 4 4"]:
     return p
 
 
-@dataclass
-class EgoHocapConfig(BaseEgoDatasetConfig):
-    _target: type = field(default_factory=lambda: HocapEgoSequence)
-    root_directory: Path = Path("/mnt/8tb/data/hocap/datasets")
-    split: Literal["train", "val", "test"] | None = None
-    subject_id: str = "8"
-    sequence_name: str = "20231024_180733"
-
-
 class HocapEgoSequence(BaseEgoSequence):
-    config: EgoHocapConfig
+    config: "HocapConfig"
 
     def load_video_paths(self) -> list[Path]:
         sequence_path: Path = (
@@ -217,9 +210,9 @@ class HocapEgoSequence(BaseEgoSequence):
         """Load labels for the ego sequence."""
         # 2D keypoints are not available for HoloLens, so we will load 3D labels from the first camera
         calibration_path: Path = self.config.root_directory / "calibration"
-        extrinsis_path: Path = calibration_path / "extrinsics"
+        extrinsics_directory: Path = calibration_path / "extrinsics"
 
-        extrinsic_yaml: Path = extrinsis_path / "extrinsics_20231014.yaml"
+        extrinsic_yaml: Path = extrinsics_directory / "extrinsics_20231014.yaml"
         assert extrinsic_yaml.exists(), f"Path {extrinsic_yaml} does not exist."
 
         extri_hocap: HOCapExtrinsicsData = from_yaml(HOCapExtrinsicsData, extrinsic_yaml.read_text())

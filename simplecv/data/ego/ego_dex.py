@@ -1,33 +1,26 @@
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
 import rerun as rr
+from einops import rearrange
 from jaxtyping import Float, Float32
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.exoego.skeleton.avp_fullbody import AVP_ID2NAME, AVP_IDS, avp_to_coco_hands
-from simplecv.data.new_exoego.base_ego import BaseEgoDatasetConfig, BaseEgoSequence, EgoData, EgoLabels
+from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData, EgoLabels
+from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, avp_to_coco_hands
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.video_utils import reencode_video_optimal
-from einops import rearrange
 
-
-@dataclass
-class EgoDexConfig(BaseEgoDatasetConfig):
-    _target: type = field(default_factory=lambda: EgoDexSequence)
-    root_directory: Path = Path("/home/pablo/0Dev/data/ego-dex")
-    split: Literal["train", "val", "test"] = "test"
-    sequence_name: str = "add_remove_lid"
-    episode: int = 0
+if TYPE_CHECKING:
+    from simplecv.data.exoego.ego_dex import EgoDexConfig
 
 
 class EgoDexSequence(BaseEgoSequence):
-    config: EgoDexConfig
+    config: "EgoDexConfig"
 
     def load_video_paths(self) -> list[Path]:
         sequence_path: Path = self.config.root_directory / self.config.split / self.config.sequence_name

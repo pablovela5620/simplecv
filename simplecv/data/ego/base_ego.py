@@ -6,10 +6,9 @@ from typing import TypeVar
 
 from jaxtyping import Float
 from numpy import ndarray
-from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import PinholeParameters
-from simplecv.configs.base_config import InstantiateConfig
+from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.image_types import BGRList
 from simplecv.video_io import MultiVideoReader
 
@@ -29,20 +28,17 @@ class EgoLabels:
     # uvc_stack: Float[ndarray, "n_frames n_views 68 3"] | None = None  # 2D landmarks for each view and frame
 
 
-@dataclass
-class BaseEgoDatasetConfig(InstantiateConfig):
-    root_directory: Path = Path()
-    load_labels: bool = True
-
-
 class BaseEgoSequence(ABC):
-    config: BaseEgoDatasetConfig
+    config: BaseExoEgoDatasetConfig
 
     def __init__(
         self,
-        cfg: BaseEgoDatasetConfig,
+        cfg: BaseExoEgoDatasetConfig,
     ) -> None:
-        self.config: BaseEgoDatasetConfig = cfg
+        self.config: BaseExoEgoDatasetConfig = cfg
+        #################
+        # LOAD EGO DATA #
+        #################
         self._ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = self.load_ego_cams()
         self._video_path_list: list[Path] = self.load_video_paths()
         # Sort the cameras and videos based on the sequence to make sure they align correctly
@@ -65,6 +61,9 @@ class BaseEgoSequence(ABC):
         self.ego_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self._video_path_list]
         )
+        #################
+        # LOAD EXO DATA #
+        #################
         if self.config.load_labels:
             self._ego_labels: EgoLabels = self.load_labels()
 
@@ -113,11 +112,6 @@ class BaseEgoSequence(ABC):
     def ego_labels(self) -> EgoLabels:
         """Get the dictionary of egocentric cameras."""
         return self._ego_labels
-
-    @property
-    @abstractmethod
-    def world_coordinate_system(self) -> ViewCoordinates:
-        pass
 
     @property
     @abstractmethod
