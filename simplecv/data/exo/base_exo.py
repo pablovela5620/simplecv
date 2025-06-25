@@ -8,7 +8,7 @@ from jaxtyping import Float32
 from numpy import ndarray
 
 from simplecv.camera_parameters import PinholeParameters
-from simplecv.data.new_exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.image_types import BGRList
 from simplecv.video_io import MultiVideoReader
 

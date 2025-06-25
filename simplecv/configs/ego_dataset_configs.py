@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING
 
 import tyro
 
-from simplecv.data.new_exoego.assembly101 import Assembly101Config
-from simplecv.data.new_exoego.base_exoego import BaseExoEgoDatasetConfig
-from simplecv.data.new_exoego.ego_dex import EgoDexConfig
-from simplecv.data.new_exoego.hocap import HocapConfig
+from simplecv.data.exoego.assembly101 import Assembly101Config
+from simplecv.data.exoego.base_exoego import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.ego_dex import EgoDexConfig
+from simplecv.data.exoego.hocap import HocapConfig
 
 # ───────────────────── registry → union ─────────────────── #
 dataset_defaults = {

@@ -1,15 +1,14 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import Literal
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-import tyro
-from jaxtyping import Float, Int, UInt8
+from jaxtyping import Float, Int
 from numpy import ndarray
 
-from simplecv.apis.view_exoego_data import log_exo_ego_sequence_batch, set_pose_annotation_context
+# from simplecv.apis.view_exoego_data import log_exo_ego_sequence_batch, set_pose_annotation_context
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType, EgoLabels

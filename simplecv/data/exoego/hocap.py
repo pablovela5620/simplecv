@@ -9,8 +9,8 @@ from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.hocap_ego import HocapEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exo.hocap_exo import HocapExoSequence
-from simplecv.data.new_exoego.base_exoego import BaseExoEgoSequence
-from simplecv.data.new_exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
+from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 
 
 @dataclass
