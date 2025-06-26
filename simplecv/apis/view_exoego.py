@@ -363,7 +363,6 @@ def visualize_exo_ego(config: VisualizeConfig):
             ego_timestamps.append(ego_timestamps_ns)
 
     exo_video_log_paths: list[Path] | None = None
-    exo_timestamps: list[Int[ndarray, "num_frames"]] = []
     if exo_sequence is not None:
         exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
         exo_video_files: list[Path] = exo_video_readers.video_paths
@@ -380,11 +379,12 @@ def visualize_exo_ego(config: VisualizeConfig):
                 static=True,
             )
 
-        for video_file, exo_video_log_path in zip(exo_video_files, exo_video_log_paths, strict=True):
+        for idx, (video_file, exo_video_log_path) in enumerate(zip(exo_video_files, exo_video_log_paths, strict=True)):
+            if idx >= config.max_exo_videos_to_log:
+                break
             assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
             # Log video asset which is referred to by frame references.
-            exo_timestamps_ns: Int[ndarray, "num_frames"] = log_video(video_file, exo_video_log_path, timeline=timeline)
-            exo_timestamps.append(exo_timestamps_ns)
+            log_video(video_file, exo_video_log_path, timeline=timeline)
 
     blueprint: rrb.Blueprint = create_blueprint(
         exo_video_log_paths=exo_video_log_paths,
@@ -395,8 +395,7 @@ def visualize_exo_ego(config: VisualizeConfig):
 
     if ego_sequence is not None and ego_timestamps:
         # Find the timestamp list with the maximum length.
-        all_timestamps: list[Int[ndarray, "num_frames"]] = ego_timestamps + exo_timestamps
-        shortest_timestamp: Int[ndarray, "num_frames"] = min(all_timestamps, key=len)  # noqa: UP037
+        shortest_timestamp: Int[ndarray, "num_frames"] = min(ego_timestamps, key=len)  # noqa: UP037
         assert len(shortest_timestamp) == len(ego_sequence), (
             f"Length of timestamps {len(shortest_timestamp)} and sequence {len(ego_sequence)} do not match"
         )
