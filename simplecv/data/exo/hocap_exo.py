@@ -15,7 +15,7 @@ from simplecv.data.exo.base_exo import BaseExoSequence, ExoBatchData, ExoData, M
 from simplecv.video_utils import create_temp_video_from_img_dir
 
 if TYPE_CHECKING:
-    from simplecv.data.new_exoego.hocap import HocapConfig
+    from simplecv.data.exoego.hocap import HocapConfig
 
 # External (exo) cameras are identified by numerical IDs
 ExoCameraIDs = Literal[
@@ -228,7 +228,7 @@ class HocapExoSequence(BaseExoSequence):
                     fps=30,
                     quality="low",
                     image_extension="jpg",
-                    save_file=False,
+                    save_file=True,
                 )
 
             video_path_list.append(video_path)
