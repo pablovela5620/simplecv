@@ -1,25 +1,21 @@
 import json
-from collections.abc import Generator
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
-import rerun as rr
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32
 from numpy import ndarray
 from serde import field as serde_field
 from serde import from_dict, serde
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.exoego.base_exo_ego import BaseExoEgoSequence, ExoBatchData, ExoData
-from simplecv.data.exoego.skeleton.assembly_hands import (
-    HAND_ID2NAME,
-    HAND_IDS,
-    HAND_LINKS,
-)
+from simplecv.data.exo.base_exo import BaseExoSequence, ExoBatchData
 from simplecv.video_io import MultiVideoReader
+
+if TYPE_CHECKING:
+    from simplecv.data.new_exoego.assembly101 import Assembly101Config
 
 
 @serde
@@ -80,103 +76,35 @@ class Ego2DKeypoints:
     C21176623: Hand2DKeypoints = serde_field(rename="21176623:mono10bit")
 
 
-def load_ego_cameras(
-    extrinsics_ego_path: Path,
-    train_assembly_hands_json: Path,
-    height: int,
-    width: int,
-) -> list[PinholeParameters]:
-    with open(extrinsics_ego_path) as f:
-        extrinsics_ego = json.load(f)
-
-    exo_raw_extri: EgoExtriCameras = from_dict(EgoExtriCameras, extrinsics_ego)
-    # assembly101 does not have camera intrinsics, so need to get them from assemblyhands
-    with open(train_assembly_hands_json) as f:
-        train_assembly_hands_dict: dict = json.load(f)
-
-    all_calib_dict: dict = train_assembly_hands_dict["calibration"]
-    # assume that all cameras have the same intrinsics for each capture, so only get a single one
-    instrinsics_dict: dict[str, list[list[float]]] = next(iter(all_calib_dict.values()))["intrinsics"]
-
-    pinhole_list: list[PinholeParameters] = []
-
-    cam_name: str
-    exo_camera: Float32[ndarray, "4 4"]
-    for cam_name, exo_camera in asdict(exo_raw_extri).items():
-        intri: Float32[ndarray, "3 3"] = np.array(instrinsics_dict[f"{cam_name}_rgb"], dtype=np.float32)
-        intri = Intrinsics(
-            camera_conventions="RDF",
-            fl_x=float(intri[0, 0]),
-            fl_y=float(intri[1, 1]),
-            cx=float(intri[0, 2]),
-            cy=float(intri[1, 2]),
-            height=height,
-            width=width,
-        )
-        extri = Extrinsics(
-            world_R_cam=exo_camera[:3, :3],
-            world_t_cam=exo_camera[:3, 3],
-        )
-        pinhole_param = PinholeParameters(
-            name=cam_name,
-            intrinsics=intri,
-            extrinsics=extri,
-        )
-        pinhole_list.append(pinhole_param)
-
-    return pinhole_list
-
-
-class Assembly101Sequence(BaseExoEgoSequence):
-    def __init__(
-        self,
-        data_path: Path,
-        sequence_name: str,
-        subject_id: str | None = None,
-        load_labels: bool = False,
-    ) -> None:
-        self.encoding: Literal["av1", "h264"] = "av1"
-        super().__init__(data_path, sequence_name, subject_id, load_labels)
+class Assembly101ExoSequence(BaseExoSequence):
+    config: "Assembly101Config"
 
     def __len__(self) -> int:
-        assert len(self.video_path_list) > 0, "No videos found."
+        assert len(self._video_path_list) > 0, "No videos found."
         # Make sure all cameras have the same number of images
         return len(self.exo_video_readers)
 
-    # def __iter__(self) -> Generator[ExoData, None, None]:
-    #     for idx in range(len(self)):
-    #         bgr_list: list[UInt8[ndarray, "H W 3"]] = self.exo_video_readers[idx]
-    #         xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
-    #         uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
-    #             cam_name: uv_stack[idx] for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
-    #         }
-    #         yield ExoData(
-    #             cam_params_list=self.exo_cam_list,
-    #             bgr_list=bgr_list,
-    #             xyz=xyz,
-    #             uv_dict=uv_dict,
-    #         )
+    def __getitem__(self, idx: int) -> None:
+        # bgr_list: list[UInt8[ndarray, "H W 3"]] = self.exo_video_readers[idx]
+        # if self.config.load_labels:
+        #     xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
+        #     uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
+        #         cam_name: uv_stack[idx] for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
+        #     }
+        # else:
+        #     xyz = None
+        #     uv_dict = None
+        # return ExoData(
+        #     cam_params_list=self.exo_cam_list,
+        #     bgr_list=bgr_list,
+        #     xyz=xyz,
+        #     uv_dict=uv_dict,
+        # )
+        return None
 
-    def __getitem__(self, idx: int) -> ExoData:
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = self.exo_video_readers[idx]
-        if self.load_labels:
-            xyz: Float32[ndarray, "2 21 3"] = self.exo_batch_data.xyz_stack[idx]
-            uv_dict: dict[str, Float32[ndarray, "2 21 2"]] = {
-                cam_name: uv_stack[idx] for cam_name, uv_stack in self.exo_batch_data.uv_stack_dict.items()
-            }
-        else:
-            xyz = None
-            uv_dict = None
-        return ExoData(
-            cam_params_list=self.exo_cam_list,
-            bgr_list=bgr_list,
-            xyz=xyz,
-            uv_dict=uv_dict,
-        )
-
-    def load_video_paths(self, data_path: Path, sequence_name: str, subject_id: str | None = None) -> list[Path]:
+    def load_video_paths(self) -> list[Path]:
         """Load the paths to the video files."""
-        video_dir: Path = data_path / "videos" / self.encoding / sequence_name
+        video_dir: Path = self.config.root_directory / "videos" / "av1" / self.config.sequence_name
         assert video_dir.exists(), f"Directory {video_dir} does not exist"
         exo_video_files: list[Path] = sorted(
             [file for file in video_dir.iterdir() if file.is_file() and not file.name.startswith("HMC")]
@@ -184,14 +112,15 @@ class Assembly101Sequence(BaseExoEgoSequence):
 
         return exo_video_files
 
-    def load_exo_cameras(
-        self, data_path: Path, sequence_name: str, subject_id: str | None = None
-    ) -> list[PinholeParameters]:
+    def load_exo_cams(self) -> list[PinholeParameters]:
         extrinsics_exo_path: Path = (
-            data_path / "assembly101_camera_and_hand_poses" / "camera_extrinsics_fixed" / f"{sequence_name}.json"
+            self.config.root_directory
+            / "assembly101_camera_and_hand_poses"
+            / "camera_extrinsics_fixed"
+            / f"{self.config.sequence_name}.json"
         )
         assert extrinsics_exo_path.exists(), f"File {extrinsics_exo_path} does not exist"
-        assembly_hands_annotation_path: Path = data_path / "assembly-hands"
+        assembly_hands_annotation_path: Path = self.config.root_directory / "assembly-hands"
         train_assembly_hands_json: Path = (
             assembly_hands_annotation_path / "annotations" / "train" / "assemblyhands_train_exo_calib_v1-1.json"
         )
@@ -200,7 +129,7 @@ class Assembly101Sequence(BaseExoEgoSequence):
             extrinsics_fixed = json.load(f)
 
         # load videos to get height and width
-        video_paths: list[Path] = self.load_video_paths(data_path, sequence_name, subject_id)
+        video_paths: list[Path] = self._video_path_list
         # sort extrinsics_fixed by camera name
         extrinsics_fixed = dict(sorted(extrinsics_fixed.items()))
         exo_mv_video_reader = MultiVideoReader(video_paths)
@@ -298,25 +227,15 @@ class Assembly101Sequence(BaseExoEgoSequence):
         return ExoBatchData(uv_stack_dict=uv_stack_dict, xyz_stack=xyz_stack)
 
     @property
-    def hand_links(self) -> tuple[tuple[int, int], ...]:
-        """Get the links between hand joints."""
-        return HAND_LINKS
-
-    @property
-    def hand_ids(self) -> list[int]:
-        """Get the IDs of hand joints."""
-        return HAND_IDS
-
-    @property
-    def hand_id2name(self) -> dict[int, str]:
-        """Get mapping from joint ID to joint name."""
-        return HAND_ID2NAME
-
-    @property
-    def world_coordinate_system(self):
-        return rr.ViewCoordinates.BUL
-
-    @property
     def depth_paths(self) -> None:
         """Get mapping from joint ID to joint name."""
         return None
+
+    @property
+    def image_plane_distance(self) -> int | float:
+        """Get the image plane distance for the camera."""
+        return 100
+
+    # @property
+    # def depth_paths(self) -> list[dict[ExoCameraIDs, Path]]:
+    #     return self._depth_paths

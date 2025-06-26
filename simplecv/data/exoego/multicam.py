@@ -15,7 +15,7 @@ from simplecv.data.exoego.base_exo_ego import (
     ExoBatchData,
     ExoData,
 )
-from simplecv.data.exoego.skeleton.mediapipe import (
+from simplecv.data.skeleton.mediapipe import (
     MEDIAPIPE_ID2NAME,
     MEDIAPIPE_IDS,
     MEDIAPIPE_LINKS,

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import numpy as np
 import pyarrow as pa
 import rerun as rr
 from jaxtyping import Float, Int, UInt8
@@ -63,7 +64,7 @@ class RerunTyroConfig:
 def log_pinhole(
     camera: PinholeParameters,
     cam_log_path: Path,
-    image_plane_distance: float = 0.5,
+    image_plane_distance: int | float = 0.5,
     static: bool = False,
 ) -> None:
     """
@@ -131,6 +132,49 @@ def log_video(video_path: Path, video_log_path: Path, timeline: str = "video_tim
         columns=rr.VideoFrameReference.columns_nanoseconds(frame_timestamps_ns),
     )
     return frame_timestamps_ns
+
+
+def confidence_scores_to_rgb(
+    confidence_scores: Float[ndarray, "n_frames n_kpts 1"],
+) -> UInt8[ndarray, "n_frames n_kpts 3"]:
+    """Converts confidence scores to RGB colors using a Red-Yellow-Green gradient.
+
+    The color mapping is as follows:
+    - A confidence score of 0.0 is mapped to Red (255, 0, 0).
+    - A confidence score of 0.5 is mapped to Yellow (255, 255, 0).
+    - A confidence score of 1.0 is mapped to Green (0, 255, 0).
+    Scores are linearly interpolated between these points. Values outside the
+    [0.0, 1.0] range will be clipped by the function.
+
+        confidence_scores (Float32[ndarray, "n_frames n_kpts 1"]):
+            A NumPy array of shape (n_frames, n_kpts, 1) containing
+            confidence values. Values are typically between 0.0 and 1.0.
+
+        UInt8[ndarray, "n_frames n_kpts 3"]:
+            A NumPy array of shape (n_frames, n_kpts, 3) containing
+            the corresponding RGB colors as uint8 values. Each color is
+            represented as an array of three integers [R, G, B]."""
+    n_frames, n_kpts, _ = confidence_scores.shape
+    clipped_confidences: Float[ndarray, "n_frames n_kpts 1"] = np.clip(confidence_scores, a_min=0.0, a_max=1.0)
+    clipped_confidences: Float[ndarray, "n_frames n_kpts"] = np.squeeze(clipped_confidences, axis=-1)
+
+    colors: UInt8[ndarray, "n_frames n_kpts 3"] = np.zeros((n_frames, n_kpts, 3), dtype=np.uint8)
+    # Segment A: red → yellow for conf ≤ 0.5
+    mask_low = clipped_confidences <= 0.5
+    if mask_low.any():
+        t_low = clipped_confidences[mask_low] * 2.0  # 0‥1
+        colors[..., 0][mask_low] = 255  # red fixed
+        colors[..., 1][mask_low] = (t_low * 255).astype(np.uint8)
+
+    # Segment B: yellow → green for conf > 0.5
+    mask_high = ~mask_low
+    if mask_high.any():
+        t_high = (clipped_confidences[mask_high] - 0.5) * 2.0
+        colors[..., 0][mask_high] = ((1.0 - t_high) * 255).astype(np.uint8)
+        colors[..., 1][mask_high] = 255  # green fixed
+
+    # blue channel remains 0
+    return colors
 
 
 class ConfidenceBatch(rr.ComponentBatchMixin):
