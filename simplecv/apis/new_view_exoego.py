@@ -53,26 +53,64 @@ def set_annotation_context() -> None:
     )
 
 
-def create_blueprint(exo_video_log_paths: list[Path], num_videos_to_log: Literal[4, 8] = 8) -> rrb.Blueprint:
-    active_tab: int = 0  # 0 for video, 1 for images
-    main_view = rrb.Vertical(
-        contents=[
-            rrb.Spatial3DView(
-                origin="/",
-            ),
-            # take the first 4 video files
-            rrb.Horizontal(
-                contents=[
-                    rrb.Tabs(
-                        rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
-                        active_tab=active_tab,
-                    )
-                    for video_log_path in exo_video_log_paths[:4]
-                ]
-            ),
-        ],
-        row_shares=[3, 1],
+def create_blueprint(
+    *,
+    ego_video_log_paths: list[Path] | None = None,
+    exo_video_log_paths: list[Path] | None = None,
+    num_videos_to_log: Literal[4, 8] = 8,
+) -> rrb.Blueprint:
+    """Creates a Rerun blueprint for visualizing ego and exo-centric video streams.
+
+    This function constructs a Rerun blueprint layout. It starts with a main 3D
+    spatial view. If ego-centric video paths are provided, it adds a vertical
+    panel on the right with a tab for each ego video. If exo-centric video
+    paths are provided, it adds a horizontal panel at the bottom with a tab for
+    each exo video.
+
+    Args:
+        ego_video_log_paths: Optional list of paths to ego-centric video logs.
+            If provided, a vertical panel with tabs for each video's 2D view
+            is added to the right of the main 3D view.
+        exo_video_log_paths: Optional list of paths to exo-centric video logs.
+            If provided, a horizontal panel with tabs for each video's 2D view
+            is added below the main view.
+        num_videos_to_log: The maximum number of exo-centric videos to display
+            in the blueprint. Defaults to 8.
+
+    Returns:
+        A `rrb.Blueprint` object defining the layout for the Rerun viewer.
+    """
+    main_view = rrb.Spatial3DView(
+        origin="/",
     )
+
+    if ego_video_log_paths is not None:
+        ego_view = rrb.Vertical(
+            contents=[
+                rrb.Tabs(
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                )
+                for video_log_path in ego_video_log_paths
+            ]
+        )
+        main_view = rrb.Horizontal(
+            contents=[main_view, ego_view],
+            column_shares=[4, 1],
+        )
+
+    if exo_video_log_paths is not None:
+        exo_view = rrb.Horizontal(
+            contents=[
+                rrb.Tabs(
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                )
+                for video_log_path in exo_video_log_paths[:num_videos_to_log]
+            ]
+        )
+        main_view = rrb.Vertical(
+            contents=[main_view, exo_view],
+            row_shares=[4, 1],
+        )
 
     contents = [main_view]
 
@@ -109,7 +147,11 @@ def visualize_exo_ego(config: VisualizeConfig):
     exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
     exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
-    blueprint: rrb.Blueprint = create_blueprint(exo_cam_log_paths, num_videos_to_log=config.num_videos_to_log)
+    blueprint: rrb.Blueprint = create_blueprint(
+        exo_video_log_paths=exo_video_log_paths,
+        ego_video_log_paths=ego_video_log_paths,
+        num_videos_to_log=config.num_videos_to_log,
+    )
     rr.send_blueprint(blueprint)
 
     # log stationary exo cameras and video assets
