@@ -1,6 +1,6 @@
 [project]
 name = "simplecv"
-version = "0.4.1"
+version = "0.5.0"
 description = "CV Utilities for Python"
 authors = [{ name = "pablovela5620", email = "pablovela5620@gmail.com" }]
 requires-python = ">= 3.11"
