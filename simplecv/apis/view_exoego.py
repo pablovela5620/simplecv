@@ -220,7 +220,7 @@ def visualize_exo_ego(config: VisualizeConfig):
         ego_video_files: list[Path] = ego_video_readers.video_paths
         ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
         ego_cam_log_paths: list[Path] = [parent_log_path / ego_cam_name for ego_cam_name in ego_cam_dict]
-        ego_video_log_paths = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
+        ego_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
 
         for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
             assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
@@ -235,7 +235,7 @@ def visualize_exo_ego(config: VisualizeConfig):
         exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
         exo_video_files: list[Path] = exo_video_readers.video_paths
         exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
-        exo_video_log_paths = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
+        exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
         # log stationary exo cameras and video assets
         for exo_cam in exo_sequence.exo_cam_list:
