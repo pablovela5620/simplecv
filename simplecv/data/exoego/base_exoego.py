@@ -20,7 +20,7 @@ class EgoData:
 
 
 @dataclass
-class EgoLabels:
+class ExoEgoLabels:
     xyzc_stack: Float[ndarray, "num_frames 133 4"]
 
 
@@ -34,8 +34,8 @@ class BaseExoEgoSequence(ABC):
         self.config: BaseExoEgoDatasetConfig = cfg
         self.ego_sequence: BaseEgoSequence | None = self._build_ego()
         self.exo_sequence: BaseExoSequence | None = self._build_exo()
-        # if self.config.load_labels:
-        #     self._ego_labels: EgoLabels = self.load_labels()
+        if self.config.load_labels:
+            self._exoego_labels: ExoEgoLabels = self.load_labels()
 
     def __len__(self) -> int:
         # Return the length based on the first camera's pinhole parameters list
@@ -59,10 +59,15 @@ class BaseExoEgoSequence(ABC):
         """Get the EgoData for a specific index."""
 
     @abstractmethod
-    def load_labels(self):
+    def load_labels(self) -> ExoEgoLabels:
         """Load labels for the sequence, if applicable."""
 
     @property
     @abstractmethod
     def world_coordinate_system(self) -> ViewCoordinates:
         """Return the world coordinate system for the sequence."""
+
+    @property
+    def exoego_labels(self) -> ExoEgoLabels | None:
+        """Return the labels for the sequence, if available."""
+        return getattr(self, "_exoego_labels", None)

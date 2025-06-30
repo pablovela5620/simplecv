@@ -36,9 +36,9 @@ class BaseEgoSequence(ABC):
         cfg: BaseExoEgoDatasetConfig,
     ) -> None:
         self.config: BaseExoEgoDatasetConfig = cfg
-        #################
-        # LOAD EGO DATA #
-        #################
+        #############
+        # LOAD DATA #
+        #############
         self._ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = self.load_ego_cams()
         self._video_path_list: list[Path] = self.load_video_paths()
         # Sort the cameras and videos based on the sequence to make sure they align correctly
@@ -61,11 +61,8 @@ class BaseEgoSequence(ABC):
         self.ego_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self._video_path_list]
         )
-        #################
-        # LOAD EXO DATA #
-        #################
-        if self.config.load_labels:
-            self._ego_labels: EgoLabels = self.load_labels()
+        # if self.config.load_labels:
+        #     self._ego_labels: EgoLabels = self.load_labels()
 
     def __len__(self) -> int:
         # Return the length based on the first camera's pinhole parameters list
@@ -91,10 +88,11 @@ class BaseEgoSequence(ABC):
     def load_ego_cams(self) -> dict[str, list[PinholeParameters]]:
         pass
 
-    @abstractmethod
-    def load_labels(self) -> EgoLabels:
-        """Load labels for the sequence, if applicable."""
-        pass
+    # @abstractmethod
+    # def load_labels(self) -> EgoLabels:
+    #     """Load labels for the sequence, if applicable."""
+    #     # TODO this will load in the future the labels for the sequence, if applicable
+    #     pass
 
     @abstractmethod
     def align_cams_and_videos(

@@ -11508,8 +11508,8 @@ packages:
   timestamp: 1744494202036
 - pypi: ./
   name: simplecv
-  version: 0.4.1
-  sha256: bfac9bd99b2e897b86250de73b35bbc1881b9d7ade80f597505e514419d38386
+  version: 0.5.0
+  sha256: 33fbc332a8dfd36c56a4f15817be52d26a181b421185c0ee7b6f9e8c621f0105
   requires_dist:
   - jaxtyping>=0.2.33
   - beartype>=0.19.0

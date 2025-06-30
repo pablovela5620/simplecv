@@ -10,9 +10,9 @@ from numpy import ndarray
 
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
-from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType, EgoLabels
+from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
 from simplecv.rerun_log_utils import (
     Points2DWithConfidence,
@@ -346,7 +346,7 @@ def visualize_exo_ego(config: VisualizeConfig):
     timeline: str = "video_time"
 
     ego_video_log_paths: list[Path] | None = None
-    ego_timestamps: list[Int[ndarray, "num_frames"]] = []
+    ego_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
     if ego_sequence is not None:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
@@ -363,28 +363,28 @@ def visualize_exo_ego(config: VisualizeConfig):
             ego_timestamps.append(ego_timestamps_ns)
 
     exo_video_log_paths: list[Path] | None = None
-    if exo_sequence is not None:
-        exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
-        exo_video_files: list[Path] = exo_video_readers.video_paths
-        exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
-        exo_video_log_paths = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
+    # if exo_sequence is not None:
+    #     exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
+    #     exo_video_files: list[Path] = exo_video_readers.video_paths
+    #     exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
+    #     exo_video_log_paths = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
-        # log stationary exo cameras and video assets
-        for exo_cam in exo_sequence.exo_cam_list:
-            cam_log_path: Path = parent_log_path / exo_cam.name
-            log_pinhole(
-                camera=exo_cam,
-                cam_log_path=cam_log_path,
-                image_plane_distance=exo_sequence.image_plane_distance,
-                static=True,
-            )
+    #     # log stationary exo cameras and video assets
+    #     for exo_cam in exo_sequence.exo_cam_list:
+    #         cam_log_path: Path = parent_log_path / exo_cam.name
+    #         log_pinhole(
+    #             camera=exo_cam,
+    #             cam_log_path=cam_log_path,
+    #             image_plane_distance=exo_sequence.image_plane_distance,
+    #             static=True,
+    #         )
 
-        for idx, (video_file, exo_video_log_path) in enumerate(zip(exo_video_files, exo_video_log_paths, strict=True)):
-            if idx >= config.max_exo_videos_to_log:
-                break
-            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
-            # Log video asset which is referred to by frame references.
-            log_video(video_file, exo_video_log_path, timeline=timeline)
+    #     for idx, (video_file, exo_video_log_path) in enumerate(zip(exo_video_files, exo_video_log_paths, strict=True)):
+    #         if idx >= config.max_exo_videos_to_log:
+    #             break
+    #         assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+    #         # Log video asset which is referred to by frame references.
+    #         log_video(video_file, exo_video_log_path, timeline=timeline)
 
     blueprint: rrb.Blueprint = create_blueprint(
         exo_video_log_paths=exo_video_log_paths,
@@ -400,47 +400,48 @@ def visualize_exo_ego(config: VisualizeConfig):
             f"Length of timestamps {len(shortest_timestamp)} and sequence {len(ego_sequence)} do not match"
         )
 
-        ego_labels: EgoLabels = ego_sequence.ego_labels
-        xyzc_stack: Float[ndarray, "num_frames 133 4"] = ego_labels.xyzc_stack
+        exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
+        if exoego_labels is not None:
+            xyzc_stack: Float[ndarray, "num_frames 133 4"] = exoego_labels.xyzc_stack
 
-        for ts_idx, ts in enumerate(shortest_timestamp):
-            rr.set_time_nanos(timeline=timeline, nanos=ts)
-            ego_cam_param_list: list[PinholeParameters]
-            for cam_name, ego_cam_param_list in ego_cam_dict.items():
-                try:
-                    ego_cam_param: PinholeParameters = ego_cam_param_list[ts_idx]
-                except IndexError:
-                    print(f"Index {ts_idx} out of bounds for camera {cam_name}")
-                    continue
-                # get the cam log path that corresponds to the camera name, check cam_log_paths if it exists
-                cam_name: CamNameType = ego_cam_param.name
-                cam_log_matches: list[Path] = [
-                    cam_log_path for cam_log_path in ego_cam_log_paths if cam_name in cam_log_path.name
-                ]
-                if not cam_log_matches:
-                    raise ValueError(f"Camera name {cam_name} not found in all_logs: {ego_cam_log_paths}")
-                cam_log_path = cam_log_matches[0]
-                log_pinhole(
-                    camera=ego_cam_param,
-                    cam_log_path=cam_log_path,
-                    image_plane_distance=ego_sequence.image_plane_distance,
-                    static=False,
-                )
+            for ts_idx, ts in enumerate(shortest_timestamp):
+                rr.set_time_nanos(timeline=timeline, nanos=ts)
+                ego_cam_param_list: list[PinholeParameters]
+                for cam_name, ego_cam_param_list in ego_cam_dict.items():
+                    try:
+                        ego_cam_param: PinholeParameters = ego_cam_param_list[ts_idx]
+                    except IndexError:
+                        print(f"Index {ts_idx} out of bounds for camera {cam_name}")
+                        continue
+                    # get the cam log path that corresponds to the camera name, check cam_log_paths if it exists
+                    cam_name: CamNameType = ego_cam_param.name
+                    cam_log_matches: list[Path] = [
+                        cam_log_path for cam_log_path in ego_cam_log_paths if cam_name in cam_log_path.name
+                    ]
+                    if not cam_log_matches:
+                        raise ValueError(f"Camera name {cam_name} not found in all_logs: {ego_cam_log_paths}")
+                    cam_log_path = cam_log_matches[0]
+                    log_pinhole(
+                        camera=ego_cam_param,
+                        cam_log_path=cam_log_path,
+                        image_plane_distance=ego_sequence.image_plane_distance,
+                        static=False,
+                    )
 
-                # Log the 3D keypoints
-                xyz: Float[ndarray, "133 3"] = xyzc_stack[
-                    ts_idx, ..., :3
-                ]  # Get the keypoints for the current timestamp and camera
-                rr.log(
-                    f"{parent_log_path}/keypoints",
-                    rr.Points3D(
-                        positions=xyz,  # Remove the view dimension
-                        colors=(0, 255, 0),  # Assuming a default color for the keypoints
-                        class_ids=0,
-                        keypoint_ids=COCO_133_IDS,
-                        show_labels=False,
-                    ),
-                )
+                    # Log the 3D keypoints
+                    xyz: Float[ndarray, "133 3"] = xyzc_stack[
+                        ts_idx, ..., :3
+                    ]  # Get the keypoints for the current timestamp and camera
+                    rr.log(
+                        f"{parent_log_path}/keypoints",
+                        rr.Points3D(
+                            positions=xyz,  # Remove the view dimension
+                            colors=(0, 255, 0),  # Assuming a default color for the keypoints
+                            class_ids=0,
+                            keypoint_ids=COCO_133_IDS,
+                            show_labels=False,
+                        ),
+                    )
 
     # rr.log(
     #     f"{video_log_path}/keypoints",
