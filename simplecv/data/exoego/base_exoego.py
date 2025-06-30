@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
+from pathlib import Path
 
 from jaxtyping import Float
 from numpy import ndarray
@@ -20,7 +21,7 @@ class EgoData:
 
 
 @dataclass
-class EgoLabels:
+class ExoEgoLabels:
     xyzc_stack: Float[ndarray, "num_frames 133 4"]
 
 
@@ -34,8 +35,9 @@ class BaseExoEgoSequence(ABC):
         self.config: BaseExoEgoDatasetConfig = cfg
         self.ego_sequence: BaseEgoSequence | None = self._build_ego()
         self.exo_sequence: BaseExoSequence | None = self._build_exo()
-        # if self.config.load_labels:
-        #     self._ego_labels: EgoLabels = self.load_labels()
+
+        if self.config.load_labels:
+            self._exoego_labels: ExoEgoLabels = self.load_labels()
 
     def __len__(self) -> int:
         # Return the length based on the first camera's pinhole parameters list
@@ -59,10 +61,23 @@ class BaseExoEgoSequence(ABC):
         """Get the EgoData for a specific index."""
 
     @abstractmethod
-    def load_labels(self):
+    def load_labels(self) -> ExoEgoLabels:
         """Load labels for the sequence, if applicable."""
+
+    # def project_xyz(self):
+    # xyz_hom: Float32[ndarray, "21 4"] = np.hstack((xyz, np.ones((21, 1)))).astype(np.float32)
+    # P_ego: Float32[ndarray, "3 4"] = current_ego_cam.projection_matrix.astype(np.float32)
+    # P_ego: Float32[ndarray, "1 3 4"] = rearrange(P_ego, "n m -> 1 n m")
+    # uvc_ego: Float32[ndarray, "1 21 3"] = projectN3(xyz_hom, P_ego).astype(np.float32)
+    # uv_ego: Float32[ndarray, "21 2"] = uvc_ego[0, :, :2]
+    # uv_ego[uv_ego == -1] = np.nan
 
     @property
     @abstractmethod
     def world_coordinate_system(self) -> ViewCoordinates:
         """Return the world coordinate system for the sequence."""
+
+    @property
+    def exoego_labels(self) -> ExoEgoLabels | None:
+        """Return the labels for the sequence, if available."""
+        return getattr(self, "_exoego_labels", None)

@@ -1,16 +1,32 @@
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import rerun as rr
+from jaxtyping import Float32
+from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
+from serde import field as serde_field
+from serde import from_dict, serde
+from tqdm import tqdm
 
 from simplecv.data.ego.assembly101_ego import Assembly101EgoSequence
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.assembly101_exo import Assembly101ExoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+
+
+@serde
+class Hand3DKeypoints:
+    # Use the "rename" parameter to indicate that the JSON key "0" should map to serde_field "left"
+    left: Float32[ndarray, "21 3"] = serde_field(rename="0")
+    # And similarly for "1" -> "right"
+    right: Float32[ndarray, "21 3"] = serde_field(rename="1")
 
 
 @dataclass
@@ -34,9 +50,38 @@ class Assembly101Sequence(BaseExoEgoSequence):
     def _build_exo(self) -> BaseExoSequence | None:
         return Assembly101ExoSequence(cfg=self.config)
 
-    def load_labels(self):
-        """Load labels for the sequence, if applicable."""
-        pass
+    def load_labels(self) -> ExoEgoLabels:
+        ### Load 3D keypoints ###
+        landmarks3d_dir: Path = self.config.root_directory / "assembly101_camera_and_hand_poses" / "landmarks3D"
+        assert landmarks3d_dir.exists(), f"Directory {landmarks3d_dir} does not exist"
+        xyz_json_path: Path = landmarks3d_dir / f"{self.config.sequence_name}.json"
+        assert xyz_json_path.exists(), f"File {xyz_json_path} does not exist"
+        with open(xyz_json_path) as f:
+            all_xyz_dict: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
+
+        # sort all_3d_landmarks by frame number
+        all_xyz_dict = dict(sorted(all_xyz_dict.items(), key=lambda item: int(item[0])))
+
+        all_xyz_dict: dict[int, Hand3DKeypoints] = {
+            int(k): from_dict(Hand3DKeypoints, v) for k, v in all_xyz_dict.items()
+        }
+
+        xyz_stack_list: list[Float32[ndarray, "2 21 3"]] = []
+        for frame_number, _ in enumerate(tqdm(all_xyz_dict)):
+            keypoints: Hand3DKeypoints = all_xyz_dict[frame_number]
+            xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
+
+        # Concatenate keypoints from all frames vertically to get a (num_frames 21, 3) array.
+        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
+        num_frames = xyz_stack.shape[0]
+
+        xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
+        for f in range(num_frames):
+            xyzc_stack[f] = assembly21_to_coco133(xyz_stack[f])
+
+        return ExoEgoLabels(
+            xyzc_stack=xyzc_stack,
+        )
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:

@@ -47,8 +47,6 @@ class BaseExoSequence(ABC):
         self.config: BaseExoEgoDatasetConfig = cfg
         self._video_path_list: list[Path] = self.load_video_paths()
         self._exo_cam_list: list[PinholeParameters] = self.load_exo_cams()
-        # Sort the cameras and videos based on the sequence to make sure they align correctly
-
         self.exo_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self._video_path_list]
         )

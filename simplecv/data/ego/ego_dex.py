@@ -4,15 +4,12 @@ from typing import TYPE_CHECKING
 import h5py
 import numpy as np
 import rerun as rr
-from einops import rearrange
-from jaxtyping import Float, Float32
+from jaxtyping import Float
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData, EgoLabels
-from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, avp_to_coco_hands
-from simplecv.ops.triangulate import proj_3d_vectorized
+from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
 from simplecv.video_utils import reencode_video_optimal
 
 if TYPE_CHECKING:
@@ -84,84 +81,6 @@ class EgoDexSequence(BaseEgoSequence):
         video_to_cam_map = {cam_name: video_path}
 
         return ego_cam_dict, video_to_cam_map
-
-    def load_labels(self) -> EgoLabels:
-        """Load labels for the sequence, if applicable."""
-        # In this case, we are not loading any labels.
-        # This method can be extended in the future if needed.
-        ego_labels: EgoLabels = self._parse_joints()
-        return ego_labels
-
-    def _parse_joints(self):
-        sequence_path: Path = self.config.root_directory / self.config.split / self.config.sequence_name
-        hdf5_path: Path = sequence_path / f"{self.config.episode}.hdf5"
-        assert hdf5_path.exists(), f"Path {hdf5_path} does not exist."
-
-        with h5py.File(f"{hdf5_path}", "r") as h5py_file:
-            # contains intrinsics that are right now manually set
-            # camera = h5py_file["camera"]
-            transforms = h5py_file["transforms"]
-            joints_list: list[Float32[ndarray, "n_frames 3"]] = []
-            for joint_name in AVP_ID2NAME.values():
-                joint_transform: Float32[ndarray, "n_frames 4 4"] = transforms.get(joint_name)[:]
-                joint_xyz: Float32[ndarray, "n_frames 3"] = joint_transform[:, :3, 3]
-                joints_list.append(joint_xyz)
-
-            xyz_stack: Float32[ndarray, "n_frames 68 3"] = np.stack(joints_list, axis=1)
-
-            try:
-                confidences = h5py_file["confidences"]
-                conf_list: list[Float32[ndarray, "n_frames 3"]] = []
-                for joint_name in AVP_ID2NAME.values():
-                    conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]  # noqa: UP037
-                    conf_list.append(conf)
-
-                conf_stack: Float32[ndarray, "n_frames 68"] = np.stack(conf_list, axis=1)
-                conf_stack: Float32[ndarray, "n_frames 68 1"] = rearrange(
-                    conf_stack, "n_frames n_joints -> n_frames n_joints 1"
-                )
-            except KeyError:
-                conf_stack: Float32[ndarray, "n_frames 68 1"] = np.ones(
-                    (xyz_stack.shape[0], xyz_stack.shape[1], 1), dtype=np.float32
-                )  # default confidence of 1.0 for all joints
-
-        # convert from AVP to COCO 133
-        xyz_coco_stack, conf_coco_stack = avp_to_coco_hands(xyz_avp=xyz_stack, conf_avp=conf_stack)
-        xyzc_stack: Float32[ndarray, "n_frames 133 4"] = np.concatenate([xyz_coco_stack, conf_coco_stack], axis=-1)
-        # homogeneous coordinates for projection
-        # xyz_hom_stack: Float32[ndarray, "n_frames 68 4"] = np.concatenate(
-        #     [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
-        # )
-
-        # project 3D points to 2D using the camera parameters
-        # ego_cam_dict = self.ego_cam_dict
-        # # there should be only one camera in the dict, assert that
-        # assert len(ego_cam_dict) == 1, f"Expected single camera, got {len(ego_cam_dict)}"
-        # pinhole_params: PinholeParameters = next(iter(ego_cam_dict.values()))[0]
-        # P: Float32[ndarray, "3 4"] = pinhole_params.projection_matrix.astype(np.float32)
-        # # n_views 3 4, in this case only one view since its not a multicamera dataset
-        # Pall: Float32[ndarray, "1 3 4"] = P[np.newaxis, ...]
-
-        # uv_stack: Float32[ndarray, "n_frames 1 68 2"] = proj_3d_vectorized(xyz_hom=xyz_hom_stack, P=Pall)
-
-        # # --- mark 2‑D points that project outside the image bounds BEFORE we
-        # #     fuse them with confidences so that the NaNs propagate ---
-        # uv_stack[..., 0] = np.where(
-        #     (uv_stack[..., 0] < 0) | (uv_stack[..., 0] > pinhole_params.intrinsics.width),
-        #     np.nan,
-        #     uv_stack[..., 0],
-        # )
-        # uv_stack[..., 1] = np.where(
-        #     (uv_stack[..., 1] < 0) | (uv_stack[..., 1] > pinhole_params.intrinsics.height),
-        #     np.nan,
-        #     uv_stack[..., 1],
-        # )
-
-        # uvc_stack: Float32[ndarray, "n_frames 1 68 3"] = np.concatenate(
-        #     [uv_stack, conf_stack[:, np.newaxis, ...]], axis=-1
-        # )
-
-        return EgoLabels(xyzc_stack=xyzc_stack)
 
     def __getitem__(self, idx) -> EgoData:
         return EgoData()
