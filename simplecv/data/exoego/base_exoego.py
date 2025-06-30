@@ -35,7 +35,6 @@ class BaseExoEgoSequence(ABC):
         self.config: BaseExoEgoDatasetConfig = cfg
         self.ego_sequence: BaseEgoSequence | None = self._build_ego()
         self.exo_sequence: BaseExoSequence | None = self._build_exo()
-
         if self.config.load_labels:
             self._exoego_labels: ExoEgoLabels = self.load_labels()
 
