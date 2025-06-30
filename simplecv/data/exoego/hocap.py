@@ -73,7 +73,7 @@ class HocapSequence(BaseExoEgoSequence):
             )
             xyz_cam_homogeneous: Float32[ndarray, "2 21 4"] = np.concatenate([xyz_cam, ones], axis=-1)
 
-            # filger out -1 (not detected) values
+            # filter out -1 (not detected) values
             xyz_cam_homogeneous = np.where(xyz_cam_homogeneous == -1, np.nan, xyz_cam_homogeneous)
 
             # Transform all joints at once using matrix multiplication.
