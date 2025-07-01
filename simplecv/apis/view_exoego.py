@@ -16,6 +16,7 @@ from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
+from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
     confidence_scores_to_rgb,
@@ -32,6 +33,8 @@ class VisualizeConfig:
     rr_config: RerunTyroConfig
     dataset: AnnotatedEgoDatasetUnion
     max_exo_videos_to_log: Literal[4, 8] = 4
+    log_exo: bool = True
+    log_ego: bool = True
 
 
 def set_annotation_context() -> None:
@@ -123,6 +126,28 @@ def create_blueprint(
     return blueprint
 
 
+def filter_out_of_bounds_keypoints(
+    uv_stack: Float[ndarray, "... 2"],
+    camera_params: PinholeParameters,
+    margin_percentage: float = 0.2,
+) -> Float[ndarray, "... 2"]:
+    """Filters out-of-bounds 2D keypoints by setting them to NaN."""
+    width: int = camera_params.intrinsics.width
+    height: int = camera_params.intrinsics.height
+    margin_x: float = margin_percentage * width
+    margin_y: float = margin_percentage * height
+
+    uv_stack[..., 0] = np.where(
+        (uv_stack[..., 0] < -margin_x) | (uv_stack[..., 0] > width + margin_x), np.nan, uv_stack[..., 0]
+    )
+    uv_stack[..., 1] = np.where(
+        (uv_stack[..., 1] < -margin_y) | (uv_stack[..., 1] > height + margin_y),
+        np.nan,
+        uv_stack[..., 1],
+    )
+    return uv_stack
+
+
 def log_exoego_batch(
     exoego_sequence: BaseExoEgoSequence,
     parent_log_path: Path,
@@ -163,7 +188,52 @@ def log_exoego_batch(
             ],
         )
 
-    # batch send all ego cams
+    ###########################
+    # batch send all exo cams #
+    ###########################
+    exo_cam_param_list: list[PinholeParameters] = exoego_sequence.exo_sequence.exo_cam_list
+    Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack([pinhole.projection_matrix for pinhole in exo_cam_param_list])
+    xyz_hom_stack: Float[ndarray, "num_frames 133 4"] = np.concatenate(
+        [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
+    )
+    uv_exo_stack: Float[ndarray, "n_frames n_views 133 2"] = proj_3d_vectorized(xyz_hom=xyz_hom_stack, P=Pall_exo)
+    uv_exo_stack: Float[ndarray, "n_frames n_views 133 2"] = filter_out_of_bounds_keypoints(
+        uv_exo_stack, exo_cam_param_list[0]
+    )
+    for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
+        exo_cam_path: Path = parent_log_path / exo_cam.name
+        exo_pinhole_path: Path = exo_cam_path / "pinhole"
+        uv_exo: Float[ndarray, "num_frames 133 2"] = uv_exo_stack[:, exo_cam_idx, :, :]
+        # filter batch with invalid values
+        rr.log(
+            f"{exo_pinhole_path}/keypoints",
+            rr.Points2D.from_fields(
+                class_ids=0,
+                keypoint_ids=COCO_133_IDS,
+                show_labels=False,
+            ),
+            static=True,
+        )
+        rr.send_columns(
+            f"{exo_pinhole_path}/keypoints",
+            indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(uv_exo)])],
+            columns=[
+                *rr.Points2D.columns(
+                    positions=rearrange(
+                        uv_exo,
+                        "num_frames kpts dim -> (num_frames kpts) dim",
+                    ),
+                    colors=rearrange(
+                        colors,
+                        "num_frames kpts dim -> (num_frames kpts) dim",
+                    ),
+                ).partition(lengths=[len(COCO_133_IDS)] * len(uv_exo)),
+            ],
+        )
+
+    ###########################
+    # batch send all ego cams #
+    ###########################
     for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
         # We assume that all cameras have the intrinsics
         first_cam: PinholeParameters = ego_cam_param_list[0]
@@ -201,6 +271,58 @@ def log_exoego_batch(
             ],
         )
 
+        # make Pall for specific camera
+        Pall: Float[ndarray, "num_frames 3 4"] = np.stack([pinhole.projection_matrix for pinhole in ego_cam_param_list])
+        uv_ego_stack: Float[ndarray, "num_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
+
+        # Process in batches to balance memory usage and performance
+        batch_size = 100  # Adjust based on available memory
+        for start_idx in range(0, len(xyz_hom_stack), batch_size):
+            end_idx: int = min(start_idx + batch_size, len(xyz_hom_stack))
+
+            # Get batch data
+            xyz_hom_batch = xyz_hom_stack[start_idx:end_idx]  # (batch_frames, 133, 4)
+            P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
+
+            # Use the vectorized projection function on the batch
+            uv_batch: Float[ndarray, "batch_frames batch_frames 133 2"] = proj_3d_vectorized(
+                xyz_hom=xyz_hom_batch, P=P_batch
+            )
+
+            # Extract diagonal to get frame-to-frame correspondence
+            batch_len = end_idx - start_idx
+            uv_batch_diagonal = uv_batch[np.arange(batch_len), np.arange(batch_len)]  # (batch_frames, 133, 2)
+
+            # Store results
+            uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
+
+        uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, first_cam)
+        rr.log(
+            f"{pinhole_log_path}/keypoints",
+            rr.Points2D.from_fields(
+                class_ids=0,
+                keypoint_ids=COCO_133_IDS,
+                show_labels=False,
+            ),
+            static=True,
+        )
+        rr.send_columns(
+            f"{pinhole_log_path}/keypoints",
+            indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(uv_ego_stack)])],
+            columns=[
+                *rr.Points2D.columns(
+                    positions=rearrange(
+                        uv_ego_stack,
+                        "num_frames kpts dim -> (num_frames kpts) dim",
+                    ),
+                    colors=rearrange(
+                        colors,
+                        "num_frames kpts dim -> (num_frames kpts) dim",
+                    ),
+                ).partition(lengths=[len(COCO_133_IDS)] * len(uv_ego_stack)),
+            ],
+        )
+
 
 def visualize_exo_ego(config: VisualizeConfig):
     start_time: float = timer()
@@ -231,7 +353,7 @@ def visualize_exo_ego(config: VisualizeConfig):
             ego_timestamps.append(ego_timestamps_ns)
 
     exo_video_log_paths: list[Path] | None = None
-    if exo_sequence is not None:
+    if exo_sequence is not None and config.log_exo:
         exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
         exo_video_files: list[Path] = exo_video_readers.video_paths
         exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]

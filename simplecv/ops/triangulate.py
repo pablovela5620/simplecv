@@ -27,7 +27,7 @@ def proj_3d_vectorized(
     """
     Projects 3D points to 2D using the projection matrix for a batch of frames and views.
 
-    xyz_hom: [n_frames, 21, 4] [x, y, z, 1]
+    xyz_hom: [n_frames, n_joints, 4] [x, y, z, 1]
     P: [n_views, 3, 4] (projection matrix - includes extrensic (R, t) and intrinsic (K))
 
     return kp2d: [n_frames, n_views, n_joints, 2] (squeeze out if 1)
