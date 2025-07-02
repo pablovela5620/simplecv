@@ -1,11 +1,13 @@
 import json
-from dataclasses import dataclass, field
+from collections.abc import Generator
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import rerun as rr
 from jaxtyping import Float32
+from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from serde import field as serde_field
@@ -35,7 +37,6 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: Assembly101Sequence)
     root_directory: Path = Path("/mnt/8tb/data/assembly101-original/")
     split: Literal["train", "val", "test"] | None = None
-    subject_id: str | None = None
     sequence_name: str = "nusar-2021_action_both_9081-a30_9081_user_id_2021-02-12_155525"  # "nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345"
     resize: Resolution | None = None  # Resize the video to this resolution, if None, no resizing is done.
 
@@ -85,7 +86,41 @@ class Assembly101Sequence(BaseExoEgoSequence):
             xyzc_stack=xyzc_stack,
         )
 
-    @property
+    @classmethod
+    def iter_episode_sequences(cls, cfg: Assembly101Config) -> Generator["Assembly101Sequence", None, None]:
+        """
+        Iterates over all episode sequences in the dataset specified by the given configuration.
+
+        This class method yields `Assembly101Sequence` instances for each sequence found in the dataset directory structure.
+        It expects the dataset to be organized with subject directories named "subject_*", each containing sequence directories.
+
+        Args:
+            cfg (Assembly101Config): Configuration object specifying the root directory and other parameters.
+
+        Yields:
+            Assembly101Sequence: An instance for each sequence found, with configuration updated for the current subject and sequence.
+
+        Notes:
+            - Uses natural sorting for subject and sequence directories.
+            - Prints subject ID and sequence name for each iteration using `icecream.ic`.
+            - Pauses execution for user input after each sequence (likely for debugging).
+        """
+        root: Path = cfg.root_directory
+        videos_dir: Path = root / "videos" / "av1"
+        assert videos_dir.exists(), f"Directory {videos_dir} does not exist"
+
+        sequence_dirs: list[Path] = natsorted(
+            [d for d in videos_dir.iterdir() if d.is_dir()],
+        )
+        for sequence_dir in sequence_dirs:
+            # print(sequence_dir.name)  # Optionally use logging here
+            new_cfg = replace(
+                cfg,
+                sequence_name=sequence_dir.name,
+            )
+
+            yield cls(new_cfg)
+
     def world_coordinate_system(self) -> ViewCoordinates:
         return rr.ViewCoordinates.BUL
 

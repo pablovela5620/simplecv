@@ -47,6 +47,10 @@ class BaseExoEgoSequence(ABC):
             # Yield the result of __getitem__ for iteration
             yield self[idx]
 
+    def iter_dataset(self):
+        """Sugar so you can call this on an *instance*."""
+        yield from self.__class__.iter_episode_sequences(self.config)
+
     @abstractmethod
     def _build_ego(self) -> BaseEgoSequence | None:
         """Build the ego sequence based on the configuration."""
@@ -62,6 +66,10 @@ class BaseExoEgoSequence(ABC):
     @abstractmethod
     def load_labels(self) -> ExoEgoLabels:
         """Load labels for the sequence, if applicable."""
+
+    @classmethod
+    @abstractmethod
+    def iter_episode_sequences(cls, cfg: BaseExoEgoDatasetConfig) -> Generator["BaseExoEgoSequence", None, None]: ...
 
     # def project_xyz(self):
     # xyz_hom: Float32[ndarray, "21 4"] = np.hstack((xyz, np.ones((21, 1)))).astype(np.float32)

@@ -251,6 +251,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/mysql-common-9.2.0-h266115a_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/mysql-libs-9.2.0-he0572af_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/narwhals-1.37.0-pyh29332c3_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/natsort-8.4.0-pyh29332c3_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.5-h2d0b736_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/nest-asyncio-1.6.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nlohmann_json-3.12.0-h3f2d84a_0.conda
@@ -580,6 +581,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/mysql-common-9.2.0-hd7719f6_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/mysql-libs-9.2.0-ha8be5b7_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/narwhals-1.37.0-pyh29332c3_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/natsort-8.4.0-pyh29332c3_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/ncurses-6.5-h5e97a16_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/nest-asyncio-1.6.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/nlohmann_json-3.12.0-ha1acc90_0.conda
@@ -1061,6 +1063,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/mysql-common-9.0.1-h266115a_6.conda
       - conda: https://prefix.dev/conda-forge/linux-64/mysql-libs-9.0.1-he0572af_6.conda
       - conda: https://prefix.dev/conda-forge/noarch/narwhals-1.40.0-pyhe01879c_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/natsort-8.4.0-pyh29332c3_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.5-h2d0b736_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/nest-asyncio-1.6.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nlohmann_json-3.12.0-h3f2d84a_0.conda
@@ -1391,6 +1394,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/mysql-common-9.0.1-hd7719f6_6.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/mysql-libs-9.0.1-ha8be5b7_6.conda
       - conda: https://prefix.dev/conda-forge/noarch/narwhals-1.40.0-pyhe01879c_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/natsort-8.4.0-pyh29332c3_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/ncurses-6.5-h5e97a16_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/nest-asyncio-1.6.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/nlohmann_json-3.12.0-ha1acc90_0.conda
@@ -9408,6 +9412,18 @@ packages:
   - pkg:pypi/narwhals?source=compressed-mapping
   size: 225140
   timestamp: 1747661220649
+- conda: https://prefix.dev/conda-forge/noarch/natsort-8.4.0-pyh29332c3_1.conda
+  sha256: 594ae12c32f163f6d312e38de41311a89e476544613df0c1d048f699721621d7
+  md5: 0aa03903d33997f3886be58abc890aef
+  depends:
+  - python >=3.9
+  - python
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/natsort?source=hash-mapping
+  size: 39002
+  timestamp: 1733880463101
 - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.5-h2d0b736_3.conda
   sha256: 3fde293232fa3fca98635e1167de6b7c7fda83caf24b9d6c91ec9eefb4f4d586
   md5: 47e340acb35de30501a76c7c799c41d7
@@ -11509,7 +11525,7 @@ packages:
 - pypi: ./
   name: simplecv
   version: 0.5.0
-  sha256: 33fbc332a8dfd36c56a4f15817be52d26a181b421185c0ee7b6f9e8c621f0105
+  sha256: a2aa03e0ee708915470053bb2c2c0818f1703abc3ba08e53a99be902cfd73dd8
   requires_dist:
   - jaxtyping>=0.2.33
   - beartype>=0.19.0

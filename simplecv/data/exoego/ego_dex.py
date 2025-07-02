@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field
+from collections.abc import Generator
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -7,6 +8,7 @@ import numpy as np
 import rerun as rr
 from einops import rearrange
 from jaxtyping import Float32
+from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
@@ -113,6 +115,40 @@ class EgoDexSequence(BaseExoEgoSequence):
         # )
 
         return xyzc_stack
+
+    @classmethod
+    def iter_episode_sequences(cls, cfg: EgoDexConfig) -> Generator["EgoDexSequence", None, None]:
+        """
+        Iterates over all episode sequences in the dataset specified by the given configuration.
+
+        This class method yields `EgoDexSequence` instances for each sequence found in the dataset directory structure.
+        It expects the dataset to be organized with subject directories named "subject_*", each containing sequence directories.
+
+        Args:
+            cfg (EgoDexConfig): Configuration object specifying the root directory and other parameters.
+
+        Yields:
+            EgoDexSequence: An instance for each sequence found, with configuration updated for the current subject and sequence.
+
+        Notes:
+            - Uses natural sorting for subject and sequence directories.
+            - Prints subject ID and sequence name for each iteration using `icecream.ic`.
+            - Pauses execution for user input after each sequence (likely for debugging).
+        """
+        root: Path = cfg.root_directory
+        sequence_dirs: list[Path] = natsorted(
+            [d for d in (root / cfg.split).iterdir() if d.is_dir()],
+        )
+        for sequence_dir in sequence_dirs:
+            episodes_int: list[int] = natsorted([int(episode.stem) for episode in sequence_dir.glob("*.hdf5")])
+            for episode in episodes_int:
+                new_cfg = replace(
+                    cfg,
+                    sequence_name=sequence_dir.name,
+                    episode=episode,
+                )
+
+                yield cls(new_cfg)
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:

@@ -1,10 +1,12 @@
-from dataclasses import dataclass, field
+from collections.abc import Generator
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, get_args
 
 import numpy as np
 import rerun as rr
 from jaxtyping import Float32
+from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from serde.yaml import from_yaml
@@ -101,6 +103,41 @@ class HocapSequence(BaseExoEgoSequence):
         # create xyzc stack
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.concatenate([coco_xyz_stack, conf_stack], axis=-1)
         return ExoEgoLabels(xyzc_stack=xyzc_stack)
+
+    @classmethod
+    def iter_episode_sequences(cls, cfg: HocapConfig) -> Generator["HocapSequence", None, None]:
+        """
+        Iterates over all episode sequences in the dataset specified by the given configuration.
+
+        This class method yields `HocapSequence` instances for each sequence found in the dataset directory structure.
+        It expects the dataset to be organized with subject directories named "subject_*", each containing sequence directories.
+
+        Args:
+            cfg (HocapConfig): Configuration object specifying the root directory and other parameters.
+
+        Yields:
+            HocapSequence: An instance for each sequence found, with configuration updated for the current subject and sequence.
+
+        Notes:
+            - Uses natural sorting for subject and sequence directories.
+            - Prints subject ID and sequence name for each iteration using `icecream.ic`.
+            - Pauses execution for user input after each sequence (likely for debugging).
+        """
+        root: Path = cfg.root_directory
+
+        subject_dirs: list[Path] = natsorted([d for d in root.glob("subject_*") if d.is_dir()])
+
+        # iterate through subject directories and get each sequence
+        for subj_dir in subject_dirs:
+            seq_dirs: list[Path] = natsorted([d for d in subj_dir.iterdir() if d.is_dir()])
+            subject_id: str = subj_dir.name.split("_")[-1]  # e.g., "8" from "subject_8"
+            for seq_dir in seq_dirs:
+                new_cfg = replace(
+                    cfg,
+                    subject_id=subject_id,
+                    sequence_name=seq_dir.name,
+                )
+                yield cls(new_cfg)
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
