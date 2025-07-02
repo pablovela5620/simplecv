@@ -12,10 +12,10 @@ from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.exo.base_exo import BaseExoSequence, ExoBatchData
-from simplecv.video_io import MultiVideoReader
+from simplecv.video_utils import RESOLUTION_MAP, reencode_video_optimal
 
 if TYPE_CHECKING:
-    from simplecv.data.new_exoego.assembly101 import Assembly101Config
+    from simplecv.data.exoego.assembly101 import Assembly101Config
 
 
 @serde
@@ -109,6 +109,11 @@ class Assembly101ExoSequence(BaseExoSequence):
         exo_video_files: list[Path] = sorted(
             [file for file in video_dir.iterdir() if file.is_file() and not file.name.startswith("HMC")]
         )
+        if self.config.resize is not None:
+            exo_video_files: list[Path] = [
+                reencode_video_optimal(p, resize=self.config.resize)
+                for p in tqdm(exo_video_files, desc="Re-encoding videos")
+            ]
 
         return exo_video_files
 
@@ -128,12 +133,8 @@ class Assembly101ExoSequence(BaseExoSequence):
         with open(extrinsics_exo_path) as f:
             extrinsics_fixed = json.load(f)
 
-        # load videos to get height and width
-        video_paths: list[Path] = self._video_path_list
         # sort extrinsics_fixed by camera name
         extrinsics_fixed = dict(sorted(extrinsics_fixed.items()))
-        exo_mv_video_reader = MultiVideoReader(video_paths)
-        height, width = exo_mv_video_reader.height, exo_mv_video_reader.width
         exo_raw_extri: ExoExtriCameras = from_dict(ExoExtriCameras, extrinsics_fixed)
         # assembly101 does not have camera intrinsics, so need to get them from assemblyhands
         with open(train_assembly_hands_json) as f:
@@ -142,6 +143,9 @@ class Assembly101ExoSequence(BaseExoSequence):
         all_calib_dict: dict = train_assembly_hands_dict["calibration"]
         # assume that all cameras have the same intrinsics for each capture, so only get a single one
         instrinsics_dict: dict[str, list[list[float]]] = next(iter(all_calib_dict.values()))["intrinsics"]
+        # Original resolution of the videos in assembly101
+        height: int = 1080
+        width: int = 1920
 
         pinhole_list: list[PinholeParameters] = []
 
@@ -149,7 +153,7 @@ class Assembly101ExoSequence(BaseExoSequence):
         exo_camera: Float32[ndarray, "4 4"]
         for cam_name, exo_camera in asdict(exo_raw_extri).items():
             intri: Float32[ndarray, "3 3"] = np.array(instrinsics_dict[f"{cam_name}_rgb"], dtype=np.float32)
-            intri = Intrinsics(
+            intri: Intrinsics = Intrinsics(
                 camera_conventions="RDF",
                 fl_x=float(intri[0, 0]),
                 fl_y=float(intri[1, 1]),
@@ -158,6 +162,18 @@ class Assembly101ExoSequence(BaseExoSequence):
                 height=height,
                 width=width,
             )
+            # resize intri if resizing is enabled
+            if self.config.resize is not None:
+                new_w, new_h = RESOLUTION_MAP[self.config.resize]
+                intri = Intrinsics(
+                    camera_conventions=intri.camera_conventions,
+                    fl_x=float(intri.fl_x * new_w / width),
+                    fl_y=float(intri.fl_y * new_h / height),
+                    cx=float(intri.cx * new_w / width),
+                    cy=float(intri.cy * new_h / height),
+                    height=new_h,
+                    width=new_w,
+                )
             extri = Extrinsics(
                 world_R_cam=exo_camera[:3, :3],
                 world_t_cam=exo_camera[:3, 3],

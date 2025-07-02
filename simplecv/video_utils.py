@@ -3,7 +3,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal
+from typing import Literal, TypeAlias
 
 
 def create_temp_video_from_img_dir(
@@ -129,52 +129,59 @@ def create_temp_video_from_img_dir(
     return output_path
 
 
+Resolution: TypeAlias = Literal["1080p", "720p", "480p", "360p"]  # noqa: N815  (type alias)
+
+RESOLUTION_MAP: dict[Resolution, tuple[int, int]] = {
+    "1080p": (1920, 1080),
+    "720p": (1280, 720),
+    "480p": (854, 480),
+    "360p": (640, 360),
+}
+
+
 def reencode_video_optimal(
     input_video_path: Path,
+    *,
+    # NEW ------------------------------------------------------------
+    resize: Resolution | None = None,  # e.g. "720p" or None
+    # ----------------------------------------------------------------
     delete_on_exit: bool = True,
     save_file: bool = False,
     output_directory: Path | None = None,
 ) -> Path:
     """
-    Re-encode an existing video file to AV1 using optimal NVIDIA GPU accelerated settings.
-
-    Args:
-        input_video_path: Path to the input video file.
-        delete_on_exit: Whether to delete the temporary output file when the program exits.
-                        Only applicable if save_file is False.
-        save_file: If True, saves the output video in the same directory as the input
-                   or in output_directory if specified, with "_optimal.mp4" suffix.
-                   If False, creates a temporary file.
-        output_directory: Directory to save the output file if save_file is True.
-                          If None, input_video_path.parent is used.
-
-    Returns:
-        Path to the re-encoded video file.
+    Re-encode an existing video to AV1 (NVENC) and-optionally-down-sample
+    to 1080p / 720p / 360p, keeping everything else unchanged.
     """
     if not input_video_path.is_file():
         raise FileNotFoundError(f"Input video file not found: {input_video_path}")
 
+    # ── output destination (unchanged) ──────────────────────────────────────
     if not save_file:
-        with tempfile.NamedTemporaryFile(suffix="_optimal.mp4", delete=False) as temp_file:
-            output_path = Path(temp_file.name)
+        with tempfile.NamedTemporaryFile(suffix="_optimal.mp4", delete=False) as tmp:
+            output_path = Path(tmp.name)
         if delete_on_exit:
             atexit.register(lambda p: p.unlink(missing_ok=True), output_path)
     else:
-        base_name = input_video_path.stem
-        out_dir = output_directory if output_directory else input_video_path.parent
+        out_dir = output_directory or input_video_path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        output_path = out_dir / f"{base_name}_optimal.mp4"
+        output_path = out_dir / f"{input_video_path.stem}_optimal.mp4"
 
-    # Build ffmpeg command base
-    cmd_base: list[str] = [
+    # ── ffmpeg command (base) ───────────────────────────────────────────────
+    cmd: list[str] = [
         "ffmpeg",
         "-y",
         "-i",
         str(input_video_path),
     ]
 
-    # AV1 NVENC settings for "optimal" quality
-    cmd_encoder_specific: list[str] = [
+    # NEW: in-line scale filter when a preset is chosen
+    if resize:
+        w, h = RESOLUTION_MAP[resize]
+        cmd += ["-vf", f"scale={w}:{h}"]
+
+    # ── encoder settings (unchanged) ────────────────────────────────────────
+    cmd += [
         "-c:v",
         "av1_nvenc",
         "-preset",
@@ -189,23 +196,18 @@ def reencode_video_optimal(
         "yuv420p",  # Standard pixel format
         "-c:a",
         "copy",  # Copy audio stream without re-encoding
+        str(output_path),
     ]
 
-    # Combine base command, encoder specific commands, and output path
-    cmd: list[str] = cmd_base + cmd_encoder_specific + [str(output_path)]
+    # ── run ffmpeg & handle errors (unchanged) ─────────────────────────────
+    t0 = timer()
+    proc = subprocess.run(cmd, capture_output=True)
+    dt = timer() - t0
+    print(f"FFmpeg re-encoding completed in {dt:.2f} s")
 
-    # Execute FFmpeg
-    start_time = timer()
-    process = subprocess.run(cmd, capture_output=True)
-    end_time = timer()
-
-    print(f"FFmpeg re-encoding to optimal AV1 completed in {end_time - start_time:.2f} seconds.")
-
-    if process.returncode != 0:
-        error_msg = process.stderr.decode()
-        # Clean up temp file if error occurs and it was a temp file
+    if proc.returncode:
         if not save_file and output_path.exists():
             output_path.unlink()
-        raise RuntimeError(f"FFmpeg re-encoding failed: {error_msg}")
+        raise RuntimeError(proc.stderr.decode().strip())
 
     return output_path

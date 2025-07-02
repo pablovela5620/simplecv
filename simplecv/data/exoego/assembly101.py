@@ -19,6 +19,7 @@ from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.video_utils import Resolution
 
 
 @serde
@@ -36,6 +37,7 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
     split: Literal["train", "val", "test"] | None = None
     subject_id: str | None = None
     sequence_name: str = "nusar-2021_action_both_9081-a30_9081_user_id_2021-02-12_155525"  # "nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345"
+    resize: Resolution | None = None  # Resize the video to this resolution, if None, no resizing is done.
 
 
 class Assembly101Sequence(BaseExoEgoSequence):
