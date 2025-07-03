@@ -121,6 +121,7 @@ class Assembly101Sequence(BaseExoEgoSequence):
 
             yield cls(new_cfg)
 
+    @property
     def world_coordinate_system(self) -> ViewCoordinates:
         return rr.ViewCoordinates.BUL
 
