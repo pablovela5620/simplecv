@@ -132,7 +132,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
         return len(self.ego_video_readers)
 
     def __getitem__(self, idx: int) -> EgoData:
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = self.ego_video_readers[idx]
+        # bgr_list: list[UInt8[ndarray, "H W 3"]] = self.ego_video_readers[idx]
         return EgoData(
             # cam_params_list=self._ego_cam_dict,
             # bgr_list=bgr_list,
@@ -140,7 +140,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
 
     def load_video_paths(self) -> list[Path]:
         """Load the paths to the video files."""
-        video_dir: Path = self.config.root_directory / "videos" / "av1" / self.config.sequence_name
+        video_dir: Path = self.config.root_directory / "videos" / self.config.encoding / self.config.sequence_name
         assert video_dir.exists(), f"Directory {video_dir} does not exist"
         ego_video_files: list[Path] = sorted(
             [file for file in video_dir.iterdir() if file.is_file() and file.name.startswith("HMC")]

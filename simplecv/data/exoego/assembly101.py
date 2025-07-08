@@ -37,8 +37,9 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: Assembly101Sequence)
     root_directory: Path = Path("/mnt/8tb/data/assembly101-original/")
     split: Literal["train", "val", "test"] | None = None
-    sequence_name: str = "nusar-2021_action_both_9081-a30_9081_user_id_2021-02-12_155525"  # "nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345"
+    sequence_name: str = "nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"  # "nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345"
     resize: Resolution | None = None  # Resize the video to this resolution, if None, no resizing is done.
+    encoding: Literal["h264", "av1", "av1-720-new"] = "av1-720-new"  # Encoding format of the video files.
 
 
 class Assembly101Sequence(BaseExoEgoSequence):

@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.exo.base_exo import BaseExoSequence, ExoBatchData
+from simplecv.video_io import VideoReader
 from simplecv.video_utils import RESOLUTION_MAP, reencode_video_optimal
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ class Assembly101ExoSequence(BaseExoSequence):
 
     def load_video_paths(self) -> list[Path]:
         """Load the paths to the video files."""
-        video_dir: Path = self.config.root_directory / "videos" / "av1" / self.config.sequence_name
+        video_dir: Path = self.config.root_directory / "videos" / self.config.encoding / self.config.sequence_name
         assert video_dir.exists(), f"Directory {video_dir} does not exist"
         exo_video_files: list[Path] = sorted(
             [file for file in video_dir.iterdir() if file.is_file() and not file.name.startswith("HMC")]
@@ -147,6 +148,10 @@ class Assembly101ExoSequence(BaseExoSequence):
         height: int = 1080
         width: int = 1920
 
+        # get the current resolution from video files
+        video_reader = VideoReader(filename=self._video_path_list[0])
+        current_w, current_h = video_reader.resolution
+
         pinhole_list: list[PinholeParameters] = []
 
         cam_name: str
@@ -174,6 +179,18 @@ class Assembly101ExoSequence(BaseExoSequence):
                     height=new_h,
                     width=new_w,
                 )
+            if current_w != width or current_h != height:
+                # adjust intrinsics to the current resolution of the video
+                intri = Intrinsics(
+                    camera_conventions=intri.camera_conventions,
+                    fl_x=float(intri.fl_x * current_w / width),
+                    fl_y=float(intri.fl_y * current_h / height),
+                    cx=float(intri.cx * current_w / width),
+                    cy=float(intri.cy * current_h / height),
+                    height=current_h,
+                    width=current_w,
+                )
+
             extri = Extrinsics(
                 world_R_cam=exo_camera[:3, :3],
                 world_t_cam=exo_camera[:3, 3],
