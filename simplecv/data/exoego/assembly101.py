@@ -120,7 +120,13 @@ class Assembly101Sequence(BaseExoEgoSequence):
                 sequence_name=sequence_dir.name,
             )
 
-            yield cls(new_cfg)
+            try:
+                seq = cls(new_cfg)  # may raise
+            except Exception as e:
+                print(f"[skip] {sequence_dir.name}: {e}")
+                continue  # go on to the next directory
+            else:
+                yield seq
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
