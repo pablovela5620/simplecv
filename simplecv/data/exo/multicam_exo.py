@@ -91,7 +91,7 @@ class MulticamExoSequence(BaseExoSequence):
 
     @property
     def depth_paths(self) -> None:
-        """Get mapping from joint ID to joint name."""
+        """Return depth paths if available; currently not implemented."""
         return None
 
     @property

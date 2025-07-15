@@ -21,7 +21,7 @@ class MulticamConfig(BaseExoEgoDatasetConfig):
 class MulticamSequence(BaseExoEgoSequence):
     config: MulticamConfig
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> None:
         return None
 
     def _build_ego(self) -> None:
