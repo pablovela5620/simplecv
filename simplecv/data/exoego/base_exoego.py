@@ -64,7 +64,7 @@ class BaseExoEgoSequence(ABC):
         """Get the EgoData for a specific index."""
 
     @abstractmethod
-    def load_labels(self) -> ExoEgoLabels:
+    def load_labels(self) -> ExoEgoLabels | None:
         """Load labels for the sequence, if applicable."""
 
     @classmethod

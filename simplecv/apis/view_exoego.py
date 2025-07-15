@@ -343,6 +343,7 @@ def visualize_exo_ego(config: VisualizeConfig):
     timeline: str = "video_time"
 
     ego_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
+    ego_video_log_paths: list[Path] | None = None
     if ego_sequence is not None:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
