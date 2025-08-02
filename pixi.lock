@@ -304,6 +304,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/rerun-sdk-0.23.2-py312h8aede1f_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/retrying-1.3.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-14.0.0-pyh29332c3_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/ruff-0.12.7-hf9daec2_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/s2n-1.5.17-hba75a32_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/scipy-1.15.2-py312ha707e6e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/sdl2-2.32.54-h3f2d84a_0.conda
@@ -379,7 +380,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/54/97/c6101a7e60ae138c4ef75b22434373a0da50a707dad523dd19a4889315bf/fonttools-4.59.0-cp312-cp312-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/d6/d8/f87ea6f42456254b48915970ed98e993110521e9263472840174d32c880d/hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/bc/b3/9458adb9472e61a998c8c4d95cfdfec91c73c53a375b30b1428310f923e4/kiwisolver-1.4.8-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/26/fc/ba6f25e549a573128005d261296f7068a49e85d74a156f638607a8f16640/lo-0.2.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/92/f7/a74742c9f9823a6a1fb18eb11fe77da61ea9426770ede6406f2f97a9622a/lovely_numpy-0.2.13-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/66/2b/bed8a45e74957549197a2ac2e1259671cd80b55ed9e1fe2b5c94d88a9202/matplotlib-3.10.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/05/e7/df2285f3d08fee213f2d041540fa4fc9ca6c2d44cf36d3a035bf2a8d2bcc/pyparsing-3.2.3-py3-none-any.whl
@@ -641,6 +641,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/rerun-sdk-0.23.2-py312haae96f4_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/retrying-1.3.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-14.0.0-pyh29332c3_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/ruff-0.12.7-h575f11b_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/scipy-1.15.2-py312h99a188d_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/sdl2-2.32.54-ha1acc90_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/sdl3-3.2.10-hf196eef_1.conda
@@ -690,7 +691,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/e2/77/b1c8af22f4265e951cd2e5535dbef8859efcef4fb8dee742d368c967cddb/fonttools-4.59.0-cp312-cp312-macosx_10_13_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/41/ba/8d9fd9f1083525edfcb389c93738c802f3559cb749324090d7109c8bf4c2/hf_transfer-0.1.9-cp38-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/60/26/d6a0db6785dd35d3ba5bf2b2df0aedc5af089962c6eb2cbf67a15b81369e/kiwisolver-1.4.8-cp312-cp312-macosx_11_0_arm64.whl
-      - pypi: https://files.pythonhosted.org/packages/26/fc/ba6f25e549a573128005d261296f7068a49e85d74a156f638607a8f16640/lo-0.2.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/92/f7/a74742c9f9823a6a1fb18eb11fe77da61ea9426770ede6406f2f97a9622a/lovely_numpy-0.2.13-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/e6/d6f7d1b59413f233793dda14419776f5f443bcccb2dfc84b09f09fe05dbe/matplotlib-3.10.5-cp312-cp312-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/05/e7/df2285f3d08fee213f2d041540fa4fc9ca6c2d44cf36d3a035bf2a8d2bcc/pyparsing-3.2.3-py3-none-any.whl
@@ -1135,6 +1135,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/rerun-sdk-0.23.2-py312h8aede1f_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/retrying-1.3.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-14.0.0-pyh29332c3_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/ruff-0.12.7-hf9daec2_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/s2n-1.5.14-h6c98b2b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/scipy-1.15.2-py312ha707e6e_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/sdl2-2.32.54-h3f2d84a_0.conda
@@ -1210,7 +1211,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/54/97/c6101a7e60ae138c4ef75b22434373a0da50a707dad523dd19a4889315bf/fonttools-4.59.0-cp312-cp312-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/d6/d8/f87ea6f42456254b48915970ed98e993110521e9263472840174d32c880d/hf_transfer-0.1.9-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/bc/b3/9458adb9472e61a998c8c4d95cfdfec91c73c53a375b30b1428310f923e4/kiwisolver-1.4.8-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/26/fc/ba6f25e549a573128005d261296f7068a49e85d74a156f638607a8f16640/lo-0.2.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/92/f7/a74742c9f9823a6a1fb18eb11fe77da61ea9426770ede6406f2f97a9622a/lovely_numpy-0.2.13-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/66/2b/bed8a45e74957549197a2ac2e1259671cd80b55ed9e1fe2b5c94d88a9202/matplotlib-3.10.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/05/e7/df2285f3d08fee213f2d041540fa4fc9ca6c2d44cf36d3a035bf2a8d2bcc/pyparsing-3.2.3-py3-none-any.whl
@@ -1473,6 +1473,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/osx-arm64/rerun-sdk-0.23.2-py312haae96f4_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/retrying-1.3.4-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/rich-14.0.0-pyh29332c3_0.conda
+      - conda: https://prefix.dev/conda-forge/osx-arm64/ruff-0.12.7-h575f11b_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/scipy-1.15.2-py312h99a188d_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/sdl2-2.32.54-ha1acc90_0.conda
       - conda: https://prefix.dev/conda-forge/osx-arm64/sdl3-3.2.14-hf196eef_0.conda
@@ -1522,7 +1523,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/e2/77/b1c8af22f4265e951cd2e5535dbef8859efcef4fb8dee742d368c967cddb/fonttools-4.59.0-cp312-cp312-macosx_10_13_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/41/ba/8d9fd9f1083525edfcb389c93738c802f3559cb749324090d7109c8bf4c2/hf_transfer-0.1.9-cp38-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/60/26/d6a0db6785dd35d3ba5bf2b2df0aedc5af089962c6eb2cbf67a15b81369e/kiwisolver-1.4.8-cp312-cp312-macosx_11_0_arm64.whl
-      - pypi: https://files.pythonhosted.org/packages/26/fc/ba6f25e549a573128005d261296f7068a49e85d74a156f638607a8f16640/lo-0.2.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/92/f7/a74742c9f9823a6a1fb18eb11fe77da61ea9426770ede6406f2f97a9622a/lovely_numpy-0.2.13-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/e6/d6f7d1b59413f233793dda14419776f5f443bcccb2dfc84b09f09fe05dbe/matplotlib-3.10.5-cp312-cp312-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/05/e7/df2285f3d08fee213f2d041540fa4fc9ca6c2d44cf36d3a035bf2a8d2bcc/pyparsing-3.2.3-py3-none-any.whl
@@ -9268,10 +9268,6 @@ packages:
   purls: []
   size: 282100
   timestamp: 1747367434936
-- pypi: https://files.pythonhosted.org/packages/26/fc/ba6f25e549a573128005d261296f7068a49e85d74a156f638607a8f16640/lo-0.2.0.tar.gz
-  name: lo
-  version: 0.2.0
-  sha256: 1b63b2282ea268f9c50f80934fcf23f7ba2668f32e02fd7266f36e432fd87883
 - conda: https://prefix.dev/conda-forge/noarch/loguru-0.7.3-pyh707e725_0.conda
   sha256: e4a07f357a4cf195a2345dabd98deab80f4d53574abe712a9cc7f22d3f2cc2c3
   md5: 49647ac1de4d1e4b49124aedf3934e02
@@ -10887,7 +10883,8 @@ packages:
   - python
   license: BSD-3-Clause
   license_family: BSD
-  purls: []
+  purls:
+  - pkg:pypi/pycparser?source=hash-mapping
   size: 110100
   timestamp: 1733195786147
 - conda: https://prefix.dev/conda-forge/noarch/pygments-2.19.1-pyhd8ed1ab_0.conda
@@ -11556,6 +11553,37 @@ packages:
   - pkg:pypi/ruamel-yaml-clib?source=hash-mapping
   size: 115973
   timestamp: 1728724684349
+- conda: https://prefix.dev/conda-forge/linux-64/ruff-0.12.7-hf9daec2_0.conda
+  noarch: python
+  sha256: be3eb69d5f1bff60743289252dd37fc4369db01763cd0fb48e5cb0e340f665f9
+  md5: e1775b6c7aae7ea99b3677b6bb8fcf1d
+  depends:
+  - python
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/ruff?source=compressed-mapping
+  size: 10481171
+  timestamp: 1753906136472
+- conda: https://prefix.dev/conda-forge/osx-arm64/ruff-0.12.7-h575f11b_0.conda
+  noarch: python
+  sha256: 3217bde750750b135a9e1273ee776536de681ca24712e1b8c4c80e1999bbd253
+  md5: db9a75ae51077e52982566919fb6bc16
+  depends:
+  - python
+  - __osx >=11.0
+  constrains:
+  - __osx >=11.0
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/ruff?source=compressed-mapping
+  size: 9695306
+  timestamp: 1753906196067
 - conda: https://prefix.dev/conda-forge/linux-64/s2n-1.5.14-h6c98b2b_0.conda
   sha256: 39419e07dc5d2b49cea1c8550320d04dda49bfced41d535518b5620d6240e2ff
   md5: efab4ad81ba5731b2fefa0ab4359e884
@@ -11791,7 +11819,7 @@ packages:
 - pypi: ./
   name: simplecv
   version: 0.5.0
-  sha256: 0c5d98dff73b4f09614d3b926c6d2ac8fb360d2f0f46cc3c7c71bd9678708356
+  sha256: 063338bd95080b42a0e9cf37872f42141e68510c2c48a38594812f989cab5749
   requires_dist:
   - jaxtyping>=0.2.33
   - beartype>=0.19.0
@@ -11804,7 +11832,6 @@ packages:
   - tyro>=0.9.1
   - tqdm
   - hf-transfer>=0.1.9
-  - lo>=0.2.0,<0.3
   - lovely-numpy>=0.2.13,<0.3
   requires_python: '>=3.11'
   editable: true
