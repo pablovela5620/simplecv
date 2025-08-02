@@ -20,20 +20,21 @@ world_points = world_T_cam @ cam_points  # camera → world
 ```
 Both directions are stored in `Extrinsics` dataclass and computed automatically.
 
-### Type Safety with JAXTyping
-All arrays use shape-annotated types:
+### Array Type Annotations with JAXTyping
+Every array must specify both dtype and shape using jaxtyping, and variables should be annotated at assignment time:
 ```python
-from jaxtyping import Float, UInt8
-rgb: UInt8[np.ndarray, "H W 3"] = ...  # Height × Width × Channels
+from jaxtyping import Float, UInt8, Int
+rgb: UInt8[np.ndarray, "H W 3"] = ...
 intrinsics: Float[np.ndarray, "3 3"] = ...
+indices: Int[np.ndarray, "N"] = ...
 ```
+- Annotate variables using PEP 526-style assignments, even for intermediate values.
+- This verbosity keeps code self-documenting and enables static and runtime shape validation.
 
 ### Runtime Type Checking with Beartype
-**Critical**: Everything must be type annotated. The project uses `beartype_this_package()` for automatic runtime type validation:
-- All functions, classes, and variables are automatically type-checked at runtime
-- Use PEP 526-compliant annotated variable assignments whenever possible
-- JAXTyping is preferred for array types to enable shape validation
-- No need to manually add `@beartype` decorators - it's applied automatically
+The project uses `beartype_this_package()` for automatic runtime type validation:
+- All functions, classes, and variables are type-checked at runtime.
+- No need to manually add `@beartype` decorators.
 
 References: [beartype docs](https://beartype.readthedocs.io/en/latest/), [jaxtyping docs](https://docs.kidger.site/jaxtyping/)
 

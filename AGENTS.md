@@ -41,16 +41,21 @@ cam_points = cam_T_world @ world_points  # world → camera
 ```
 
 ### Type Safety
-All arrays use JAXTyping shape annotations:
+Runtime type checking via `beartype_this_package()` ensures all code is validated at runtime.
+
+- Every function and variable must include type annotations.
+- Use PEP 526–compliant annotated assignments wherever variables are defined.
+- No manual `@beartype` decorators are needed.
+
+### Array Type Annotations with JAXTyping
+Arrays must be annotated with both dtype and shape using jaxtyping:
 ```python
 from jaxtyping import Float, UInt8
 rgb: UInt8[np.ndarray, "H W 3"] = ...
+depth_map: Float[np.ndarray, "H W"] = ...
 ```
-
-**Critical**: Everything must be type annotated. Runtime type checking via `beartype_this_package()`:
-- All code is automatically validated at runtime - no manual `@beartype` decorators needed
-- Use PEP 526-compliant annotated variable assignments whenever possible  
-- Prefer JAXTyping for arrays to enable shape validation
+- Include dtype (`Float`, `UInt8`, etc.) and shape string in every array annotation.
+- Annotate array variables at assignment time, even for intermediates—the verbosity keeps code self-documenting.
 
 References: [beartype docs](https://beartype.readthedocs.io/en/latest/), [jaxtyping docs](https://docs.kidger.site/jaxtyping/)
 
