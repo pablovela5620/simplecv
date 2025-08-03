@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import os.path as osp
 from collections import OrderedDict
 from collections.abc import Generator
 from pathlib import Path
@@ -13,7 +12,6 @@ from cv2 import (
     CAP_PROP_FRAME_HEIGHT,
     CAP_PROP_FRAME_WIDTH,
     CAP_PROP_POS_FRAMES,
-    VideoWriter_fourcc,
 )
 
 from simplecv.image_types import BGRList, ImageBGR
@@ -285,13 +283,10 @@ class MultiVideoReader:
             assert video_path.exists(), f"{video_path} does not exist"
 
         self.video_paths: list[Path] = video_paths
-        self.video_readers: list[VideoReader] = [
-            VideoReader(video_path) for video_path in video_paths
-        ]
+        self.video_readers: list[VideoReader] = [VideoReader(video_path) for video_path in video_paths]
 
         assert all(
-            reader.height == self.video_readers[0].height
-            and reader.width == self.video_readers[0].width
+            reader.height == self.video_readers[0].height and reader.width == self.video_readers[0].width
             for reader in self.video_readers
         )
 

@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import h5py
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -12,7 +11,6 @@ from numpy import ndarray
 from tqdm import tqdm
 
 from simplecv.apis.view_ego_data import EgoDataSequence, confidence_scores_to_rgb, parse_hdf5_file
-from simplecv.data.exoego.skeleton.avp_fullbody import AVP_ID2NAME, AVP_IDS, AVP_LINKS
 from simplecv.ops.triangulate import projectN3
 from simplecv.rerun_log_utils import (
     Points2DWithConfidence,

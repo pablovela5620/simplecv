@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from pathlib import Path
-from timeit import default_timer as timer
 from typing import Literal
 
 import cv2

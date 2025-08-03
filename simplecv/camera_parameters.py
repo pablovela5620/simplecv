@@ -331,14 +331,14 @@ def fisheye_projection(
     points_2d_distorted[:, 1] += camera.intrinsics.cy
 
     # make sure points are within image bounds
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(  # noqa: UP037
         points_2d_distorted[:, 0] >= camera.intrinsics.width,
         points_2d_distorted[:, 1] >= camera.intrinsics.height,
     )
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 0] < 0)
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 1] < 0)
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 0] < 0)  # noqa: UP037
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 1] < 0)  # noqa: UP037
     # make sure points are in front of camera
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_3d_cam[:, 2] < 0)
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_3d_cam[:, 2] < 0)  # noqa: UP037
 
     # if out of bounds, set to -1
     points_2d_distorted[out_of_bounds, :] = np.nan

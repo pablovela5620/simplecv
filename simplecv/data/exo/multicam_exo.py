@@ -8,7 +8,7 @@ from serde.json import from_json
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.conversion_utils import NerfstudioData
-from simplecv.data.exo.base_exo import BaseExoSequence, ExoBatchData
+from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.ops.conventions import CameraConventions, convert_pose
 
 if TYPE_CHECKING:

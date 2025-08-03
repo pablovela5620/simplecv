@@ -67,9 +67,7 @@ def read_intri(intri_name):
     return cameras
 
 
-def read_camera(
-    intri_name: str, extri_name: str, cam_names: list[str] | None = None
-) -> dict:
+def read_camera(intri_name: str, extri_name: str, cam_names: list[str] | None = None) -> dict:
     if cam_names is None:
         cam_names = []
     assert os.path.exists(intri_name), intri_name
@@ -126,7 +124,7 @@ def load_cameras(data_path: Path) -> list[PinholeParameters]:
             cx=cam["K"][0, 2],
             cy=cam["K"][1, 2],
         )
-        cam_distortion: Float[ndarray, "5"] = cam["dist"].squeeze()
+        cam_distortion: Float[ndarray, "5"] = cam["dist"].squeeze()  # noqa UP307
         distortion = Distortion(
             k1=float(cam_distortion[0]),
             k2=float(cam_distortion[1]),
@@ -134,18 +132,11 @@ def load_cameras(data_path: Path) -> list[PinholeParameters]:
             p2=float(cam_distortion[3]),
             k3=float(cam_distortion[4]),
         )
-        pinhole_cam = PinholeParameters(
-            name=cam_name, extrinsics=extri, intrinsics=intri, distortion=distortion
-        )
+        pinhole_cam = PinholeParameters(name=cam_name, extrinsics=extri, intrinsics=intri, distortion=distortion)
         camera_list.append(pinhole_cam)
     return camera_list
 
 
 def get_Pall(cameras, camnames):
-    Pall = np.stack(
-        [
-            cameras[cam]["K"] @ np.hstack((cameras[cam]["R"], cameras[cam]["T"]))
-            for cam in camnames
-        ]
-    )
+    Pall = np.stack([cameras[cam]["K"] @ np.hstack((cameras[cam]["R"], cameras[cam]["T"])) for cam in camnames])
     return Pall

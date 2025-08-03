@@ -3,19 +3,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
 import rerun as rr
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
-from serde import InternalTagging, from_dict, serde
+from serde import InternalTagging, serde
 from serde import field as serde_field
 from serde.json import from_json
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Distortion, Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData, EgoLabels
-from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.assembly101 import Assembly101Config
@@ -215,7 +213,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
             "e4": [],
         }
         ego_cam: EgoExtri211 | EgoExtri843
-        for ts, ego_cam in tqdm(ego_extri_cameras.items(), desc="Processing ego cameras"):
+        for _, ego_cam in tqdm(ego_extri_cameras.items(), desc="Processing ego cameras"):
             for key in ego_pinhole_dict:
                 cam_T_world = getattr(ego_cam, key)
                 extri: Extrinsics = Extrinsics(

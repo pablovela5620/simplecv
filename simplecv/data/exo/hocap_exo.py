@@ -11,7 +11,7 @@ from serde.yaml import from_yaml
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.exo.base_exo import BaseExoSequence, ExoBatchData, ExoData, ManoStack
+from simplecv.data.exo.base_exo import BaseExoSequence, ExoBatchData, ManoStack
 from simplecv.video_utils import create_temp_video_from_img_dir
 
 if TYPE_CHECKING:

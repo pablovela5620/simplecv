@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
-from pathlib import Path
 
 from jaxtyping import Float
 from numpy import ndarray
