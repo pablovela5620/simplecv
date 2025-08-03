@@ -18,19 +18,21 @@ SimpleCV is a computer vision utility library focused on multi-camera 3D reconst
    ```bash
    git clone https://github.com/pablovela5620/simplecv.git
    cd simplecv
-   pixi shell  # Enters conda environment (Linux/macOS only)
+   pixi shell -e dev
    ```
 
 ### Running Code
 **Critical**: To run any Python code with correct dependencies, you must either:
-- Be inside `pixi shell` environment, OR  
-- Prefix commands with `pixi run` (e.g., `pixi run python tools/view_polycam.py`)
+- Be inside `pixi shell -e dev` environment, OR  
+- Prefix commands with `pixi run -e dev` (e.g., `pixi run -e devpython tools/view_polycam.py`)
+always use dev environment
 
 ### Available Tasks
 ```bash
 pixi task list  # Shows all available tasks
 pixi run view-polycam-data  # Example task
 ```
+Read the pyproject.toml to get more information about tasks
 
 ## Key Design Patterns
 
@@ -53,6 +55,7 @@ Arrays must be annotated with both dtype and shape using jaxtyping:
 from jaxtyping import Float, UInt8
 rgb: UInt8[np.ndarray, "H W 3"] = ...
 depth_map: Float[np.ndarray, "H W"] = ...
+xyzc_stack: Float[ndarray, "num_frames 133 4"] = ...
 ```
 - Include dtype (`Float`, `UInt8`, etc.) and shape string in every array annotation.
 - Annotate array variables at assignment time, even for intermediates—the verbosity keeps code self-documenting.
@@ -71,8 +74,7 @@ tyro.cli(ViewConfig)
 ```
 
 ## Testing & Linting
-- Run `ruff check .` and fix any issues before PRs
-- Test with project-specific tasks: `pixi run <task-name>`
+- Run `pixi run -e dev ruff check .` and fix any issues before PRs
 
 ## Adding New Datasets
 1. Create loader in `simplecv/data/your_dataset.py` with `@serde` classes
