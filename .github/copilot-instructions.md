@@ -32,11 +32,35 @@ indices: Int[np.ndarray, "N"] = ...
 - This verbosity keeps code self-documenting and enables static and runtime shape validation.
 
 ### Runtime Type Checking with Beartype
-The project uses `beartype_this_package()` for automatic runtime type validation:
-- All functions, classes, and variables are type-checked at runtime.
-- No need to manually add `@beartype` decorators.
+The project uses environment-conditional beartype activation via `PIXI_ENVIRONMENT_NAME`:
+```python
+if os.environ.get("PIXI_ENVIRONMENT_NAME") == "dev":
+    from beartype.claw import beartype_this_package
+    beartype_this_package()
+```
+- Full runtime type checking only in dev environment
+- No need to manually add `@beartype` decorators
+- Zero overhead in production/default environments
 
 References: [beartype docs](https://beartype.readthedocs.io/en/latest/), [jaxtyping docs](https://docs.kidger.site/jaxtyping/)
+
+### Camera Parameter Structure
+All cameras follow the `PinholeParameters` pattern:
+```python
+PinholeParameters(
+    name="cam_01",
+    intrinsics=Intrinsics(
+        camera_conventions="RDF",  # or "RUB" 
+        fl_x=fx, fl_y=fy, cx=cx, cy=cy,
+        height=h, width=w
+    ),
+    extrinsics=Extrinsics(
+        world_R_cam=R, world_t_cam=t  # OR cam_R_world, cam_t_world
+    )
+)
+```
+- Extrinsics automatically computes both `world_T_cam` and `cam_T_world` matrices
+- Convention handling via `simplecv.ops.conventions` for coordinate system conversions
 
 ### Configuration with Tyro + Dataclasses
 CLI tools use tyro for type-safe configuration:
@@ -66,31 +90,33 @@ All visualization uses Rerun SDK with standardized logging:
 
 ### Environment Setup
 ```bash
-pixi shell  # Enters conda environment (Linux/macOS only)
-pixi task list  # Shows all available tasks
+pixi shell -e dev  # Development environment (includes beartype, ruff)
+pixi shell         # Default environment (production-like)
+pixi task list     # Shows all available tasks
 ```
 
-**Important**: To run any Python code with correct dependencies, you must either:
-- Be inside `pixi shell` environment, OR
-- Prefix commands with `pixi run` (e.g., `pixi run python tools/view_polycam.py`)
+**Critical**: Always use the dev environment for development:
+- `pixi run -e dev` for running commands
+- `pixi shell -e dev` for interactive development
+- beartype runtime checking only activates in dev environment
 
 ### Testing & Linting
 ```bash
-ruff check .  # Required before PRs
-pixi run <task-name>  # Run project-specific tasks
+pixi run -e dev ruff check .      # Required before PRs
+pixi run -e dev pytest            # Run test suite
 ```
-
-### Adding New Datasets
-1. Create loader in `simplecv/data/your_dataset.py` with `@serde` classes
-2. Add visualization API in `simplecv/apis/view_your_data.py` 
-3. Create tool script in `tools/view_your_dataset.py` using tyro
-4. Add pixi task in `pyproject.toml` with download dependencies
 
 ### Camera Convention Handling
 Use `simplecv.ops.conventions` for coordinate system conversions:
 - `CameraConventions.CV` (OpenCV: X right, Y down, Z forward)
 - `CameraConventions.GL` (OpenGL: X right, Y up, Z backward)
 - Always convert to project's standard convention in data loaders
+
+### Adding New Datasets
+1. Create loader in `simplecv/data/your_dataset.py` with `@serde` classes
+2. Add visualization API in `simplecv/apis/view_your_data.py` 
+3. Create tool script in `tools/view_your_dataset.py` using tyro
+4. Add pixi task in `pyproject.toml` with download dependencies
 
 ## Key Files for Reference
 

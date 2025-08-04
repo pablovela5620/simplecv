@@ -74,7 +74,23 @@ tyro.cli(ViewConfig)
 ```
 
 ## Testing & Linting
-- Run `pixi run -e dev ruff check .` and fix any issues before PRs
+
+### Test‑Driven Development (TDD)
+SimpleCV follows a strict **test‑driven development** workflow:
+
+1. **Write the test first** – create or update a failing test in `simplecv/tests/` that captures the desired behaviour or reproduces a bug.
+2. **Make it pass** – implement the minimal code changes required for the test to pass.
+3. **Refactor** – clean up the implementation while keeping the test suite green.
+
+### Running the test & lint suite
+Run the full test and lint suite locally before every commit:
+
+```bash
+pixi run -e dev pytest            # run all tests
+pixi run -e dev ruff check .      # static analysis & style
+```
+
+Pull requests that introduce new functionality without accompanying tests (or that leave tests failing) will not be accepted.
 
 ## Adding New Datasets
 1. Create loader in `simplecv/data/your_dataset.py` with `@serde` classes
