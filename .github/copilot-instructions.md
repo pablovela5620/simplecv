@@ -118,6 +118,32 @@ Use `simplecv.ops.conventions` for coordinate system conversions:
 3. Create tool script in `tools/view_your_dataset.py` using tyro
 4. Add pixi task in `pyproject.toml` with download dependencies
 
+### RRD Artifact Creation and Sharing
+When tools use `RerunTyroConfig` (from `simplecv.configs.rerun_tyro_config`), you can create shareable RRD artifacts:
+
+#### 1. Generate RRD File
+Use `--rr-config.save` with any visualization tool. Name artifacts descriptively with Rerun version and datetime:
+```bash
+# Format: {dataset}-{description}-rerun{version}-{YYYY-MM-DD-HHMMSS}.rrd
+pixi run python tools/view_exoego.py --rr-config.save data/rrd-debug-artifacts/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd [subcommand] [options]
+```
+
+#### 2. Upload to HuggingFace
+```bash
+huggingface-cli upload pablovela5620/rrd-debug-artifacts data/rrd-debug-artifacts/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd --repo-type dataset --commit-message "Add assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd"
+```
+
+#### 3. Create Shareable Links
+- **Download URL**: `https://huggingface.co/datasets/pablovela5620/rrd-debug-artifacts/resolve/main/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd`
+- **Rerun Viewer**: `https://app.rerun.io/version/0.24.0/index.html?url=https://huggingface.co/datasets/pablovela5620/rrd-debug-artifacts/resolve/main/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd`
+
+#### Artifact Naming Convention
+Use this pattern: `{dataset}-{description}-rerun{version}-{YYYY-MM-DD-HHMMSS}.rrd`
+- Include dataset name, brief description, Rerun version, and timestamp
+- Examples: `assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd`, `polycam-room-scan-rerun0.24.0-2025-08-03-143000.rrd`
+
+This workflow enables easy sharing of complex 3D visualizations without requiring users to download and process original datasets.
+
 ## Key Files for Reference
 
 - `simplecv/camera_parameters.py` - Core camera math and data structures

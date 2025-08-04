@@ -91,6 +91,17 @@ test -e data/assembly101-sample \
 outputs = ["data/assembly101-sample"]
 description = "Downloads an example assembly101 dataset from huggingface"
 
+[tool.pixi.tasks._download-assembly101-720-sample]
+cmd = """
+test -e data/assembly101-720-sample \
+  || (huggingface-cli download pablovela5620/Assembly101-Sample \
+    --repo-type dataset \
+    --include "assembly101-720-sample/**" \
+    --local-dir data/)
+"""
+outputs = ["data/assembly101-720-sample"]
+description = "Downloads an example assembly101 720p dataset from huggingface"
+
 [tool.pixi.pypi-dependencies]
 simplecv = { path = ".", editable = true }
 

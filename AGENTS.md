@@ -98,6 +98,47 @@ Pull requests that introduce new functionality without accompanying tests (or th
 3. Create tool script in `tools/view_your_dataset.py` using tyro
 4. Add pixi task in `pyproject.toml` with download dependencies
 
+## RRD Artifact Workflow
+
+When working with datasets and visualization tools that use `RerunTyroConfig` (from `simplecv.configs.rerun_tyro_config`), you can create shareable RRD artifacts for easy visualization. This workflow is particularly useful for creating demos and debugging visualizations.
+
+### Step 1: Generate RRD Artifact
+Use any tool with `--rr-config.save` to generate an RRD file. Name artifacts descriptively with Rerun version and datetime:
+```bash
+# Example: Create Assembly101 720p artifact
+# Format: {dataset}-{description}-rerun{version}-{YYYY-MM-DD-HHMMSS}.rrd
+pixi run python tools/view_exoego.py --rr-config.save data/rrd-debug-artifacts/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd assembly101 --root-directory data/assembly101-720-sample --sequence-name nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724 --encoding av1-720-new
+```
+
+### Step 2: Upload to HuggingFace
+Upload the generated RRD file to the artifacts dataset:
+```bash
+huggingface-cli upload pablovela5620/rrd-debug-artifacts data/rrd-debug-artifacts/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd --repo-type dataset --commit-message "Add assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd"
+```
+
+### Step 3: Create Shareable Rerun Link
+The final download URL follows this pattern:
+```
+https://huggingface.co/datasets/pablovela5620/rrd-debug-artifacts/resolve/main/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd
+```
+
+You can then create a direct Rerun viewer link:
+```
+https://app.rerun.io/version/0.24.0/index.html?url=https://huggingface.co/datasets/pablovela5620/rrd-debug-artifacts/resolve/main/assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd
+```
+
+### Artifact Naming Convention
+Follow this naming pattern for consistency:
+```
+{dataset}-{description}-rerun{version}-{YYYY-MM-DD-HHMMSS}.rrd
+```
+Examples:
+- `assembly101-720p-sample-rerun0.24.0-2025-08-03-212600.rrd`
+- `polycam-room-scan-rerun0.24.0-2025-08-03-143000.rrd`
+- `ego4d-hands-demo-rerun0.24.0-2025-08-03-091500.rrd`
+
+This workflow enables easy sharing of complex 3D visualizations without requiring users to download and process the original datasets.
+
 ## PR Instructions
 - Title format: `[simplecv] <Title>`
 - Include a **Summary** describing the changes
