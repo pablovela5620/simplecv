@@ -140,7 +140,7 @@ ruff = ">=0.12.7,<0.13"
 [tool.pixi.environments]
 # Create a custom environment which only has the `ego` feature (numpy isn't part of that env).
 ego = { features = ["ego"], no-default-feature = true }
-dev = { features = ["dev"]}
+dev = { features = ["dev"] }
 
 [tool.ruff]
 line-length = 150
@@ -162,7 +162,9 @@ select = [
 ]
 
 ignore = [
-    "E501", # Line too long.
-    "F722", # Forward annotation false positive from jaxtyping. Should be caught by pyright.
-    "F821", # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "E501",  # Line too long.
+    "F722",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "F821",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "UP037", # Remove quotes from type, false positive when using jaxtyping
+
 ]
