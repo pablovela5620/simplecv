@@ -35,7 +35,7 @@ class BaseExoEgoSequence(ABC):
         self.ego_sequence: BaseEgoSequence | None = self._build_ego()
         self.exo_sequence: BaseExoSequence | None = self._build_exo()
         if self.config.load_labels:
-            self._exoego_labels: ExoEgoLabels = self.load_labels()
+            self._exoego_labels: ExoEgoLabels | None = self.load_labels()
 
     def __len__(self) -> int:
         # Return the length based on the first camera's pinhole parameters list

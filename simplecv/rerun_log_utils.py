@@ -122,14 +122,13 @@ def log_video(video_path: Path, video_log_path: Path, timeline: str = "video_tim
     rr.log(str(video_log_path), video_asset, static=True)
 
     # Send automatically determined video frame timestamps.
-    frame_timestamps_ns: Int[ndarray, "num_frames"] = (  # noqa: UP037
-        video_asset.read_frame_timestamps_ns()
-    )
+    frame_timestamps_ns: Int[ndarray, "num_frames"] = video_asset.read_frame_timestamps_nanos()
+
     rr.send_columns(
         f"{video_log_path}",
         # Note timeline values don't have to be the same as the video timestamps.
-        indexes=[rr.TimeNanosColumn(timeline, frame_timestamps_ns)],
-        columns=rr.VideoFrameReference.columns_nanoseconds(frame_timestamps_ns),
+        indexes=[rr.TimeColumn("video_time", duration=1e-9 * frame_timestamps_ns)],
+        columns=rr.VideoFrameReference.columns_nanos(frame_timestamps_ns),
     )
     return frame_timestamps_ns
 

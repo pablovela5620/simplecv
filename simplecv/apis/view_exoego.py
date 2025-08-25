@@ -176,7 +176,7 @@ def log_exoego_batch(
         )
         rr.send_columns(
             f"{parent_log_path}/keypoints",
-            indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(xyzc_stack)])],
+            indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(xyzc_stack)])],
             columns=[
                 *rr.Points3D.columns(
                     positions=rearrange(
@@ -342,7 +342,7 @@ def visualize_exo_ego(config: VisualizeConfig):
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
-    ego_timestamps: list[Int[ndarray, "num_frames"]] = []  # noqa: UP037
+    ego_timestamps: list[Int[ndarray, "num_frames"]] = []
     ego_video_log_paths: list[Path] | None = None
     if ego_sequence is not None:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
@@ -354,9 +354,7 @@ def visualize_exo_ego(config: VisualizeConfig):
         for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
             assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
             # Log video asset which is referred to by frame references.
-            ego_timestamps_ns: Int[ndarray, "num_frames"] = log_video(  # noqa: UP037
-                video_file, ego_video_log_path, timeline=timeline
-            )
+            ego_timestamps_ns: Int[ndarray, "num_frames"] = log_video(video_file, ego_video_log_path, timeline=timeline)
             ego_timestamps.append(ego_timestamps_ns)
 
     exo_video_log_paths: list[Path] | None = None
