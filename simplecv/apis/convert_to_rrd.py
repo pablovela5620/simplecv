@@ -178,7 +178,7 @@ def log_batched(
     )
     rr.send_columns(
         f"{joints_log_path}",
-        indexes=[rr.TimeNanosColumn(timeline, frame_timestamps_ns)],
+        indexes=[rr.TimeColumn(timeline, duration=1e-9 * frame_timestamps_ns)],
         columns=[
             *rr.Points3D.columns(
                 positions=rearrange(

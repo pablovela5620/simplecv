@@ -32,7 +32,7 @@ np.set_printoptions(suppress=True)
 class VisualizeConfig:
     rr_config: RerunTyroConfig
     dataset: AnnotatedEgoDatasetUnion
-    max_exo_videos_to_log: Literal[4, 8] = 4
+    max_exo_videos_to_log: Literal[4, 8] = 8
     log_exo: bool = True
     log_ego: bool = True
 
@@ -153,6 +153,8 @@ def log_exoego_batch(
     parent_log_path: Path,
     timeline: str,
     shortest_timestamp: Int[ndarray, "num_frames"],
+    log_ego: bool = True,
+    log_exo: bool = True,
 ) -> None:
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     if exoego_labels is not None:
@@ -194,7 +196,7 @@ def log_exoego_batch(
     ###########################
     # batch send all exo cams #
     ###########################
-    if exoego_sequence.exo_sequence is not None:
+    if exoego_sequence.exo_sequence is not None and log_exo:
         exo_cam_param_list: list[PinholeParameters] = exoego_sequence.exo_sequence.exo_cam_list
         Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
             [pinhole.projection_matrix for pinhole in exo_cam_param_list]
@@ -219,7 +221,7 @@ def log_exoego_batch(
             )
             rr.send_columns(
                 f"{exo_pinhole_path}/keypoints",
-                indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(uv_exo)])],
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(uv_exo)])],
                 columns=[
                     *rr.Points2D.columns(
                         positions=rearrange(
@@ -237,7 +239,7 @@ def log_exoego_batch(
     ###########################
     # batch send all ego cams #
     ###########################
-    if exoego_sequence.ego_sequence is not None:
+    if exoego_sequence.ego_sequence is not None and log_ego:
         for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
             # We assume that all cameras have the intrinsics
             first_cam: PinholeParameters = ego_cam_param_list[0]
@@ -266,7 +268,7 @@ def log_exoego_batch(
             # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
             rr.send_columns(
                 f"{cam_log_path}",
-                indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(batch_world_t_cam)])],
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(batch_world_t_cam)])],
                 columns=[
                     *rr.Transform3D.columns(
                         translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
@@ -314,7 +316,7 @@ def log_exoego_batch(
             )
             rr.send_columns(
                 f"{pinhole_log_path}/keypoints",
-                indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0 : len(uv_ego_stack)])],
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(uv_ego_stack)])],
                 columns=[
                     *rr.Points2D.columns(
                         positions=rearrange(
@@ -344,7 +346,7 @@ def visualize_exo_ego(config: VisualizeConfig):
 
     ego_timestamps: list[Int[ndarray, "num_frames"]] = []
     ego_video_log_paths: list[Path] | None = None
-    if ego_sequence is not None:
+    if ego_sequence is not None and config.log_ego:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
         ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
@@ -400,6 +402,8 @@ def visualize_exo_ego(config: VisualizeConfig):
             parent_log_path=parent_log_path,
             timeline=timeline,
             shortest_timestamp=shortest_timestamp,
+            log_ego=config.log_ego,
+            log_exo=config.log_exo,
         )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
