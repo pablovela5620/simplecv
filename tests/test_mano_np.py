@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +6,6 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from simplecv.ops import mano_np, mano_torch
-
 
 # ----------------------
 # Small functional parity

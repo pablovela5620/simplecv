@@ -34,9 +34,6 @@ view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path dat
     "_download-example-polycam-data",
 ], description = "View example polycam data" }
 
-# Run tests in the dev environment
-tests = { cmd = "pixi run -e dev pytest -q", description = "Run pytest in the dev environment" }
-
 
 [tool.pixi.tasks.view-egoexo-data]
 cmd = "python tools/view_exoego.py"
@@ -181,11 +178,15 @@ hypothesis = ">=6.112.1,<7"
 [tool.pixi.feature.dev.pypi-dependencies]
 pytest-beartype = ">=0.2,<1"
 
+[tool.pixi.feature.dev.tasks]
+# Run tests in the dev environment
+tests = { cmd = "pixi run -e dev pytest -q", description = "Run pytest in the dev environment" }
+
 [tool.pytest.ini_options]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
-addopts = "-p pytest_beartype"
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+# Enable pytest-beartype and jaxtyping's import hook so function boundaries in
+# both the library and tests get runtime shape/dtype checks via beartype.
+addopts = "--jaxtyping-packages=simplecv,tests,beartype.beartype"
 
 [tool.pixi.environments]
 cuda128 = { features = [

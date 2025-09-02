@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +26,7 @@ local annotations; rely on return annotations for runtime validation.
 def _load_betas() -> Float32[ndarray, "10"] | None:
     try:
         from serde.yaml import from_yaml
+
         from simplecv.data.exoego.hocap import CalibratedMano
     except Exception:
         return None
@@ -42,13 +41,13 @@ def _load_poses(seq: str) -> Float32[ndarray, "n_frames 2 51"] | None:
     p = ROOT / f"subject_{SUBJECT}" / seq / "poses_m.npy"
     if p.exists():
         poses: Float32[ndarray, "n_hands=2 n_frames 51"] = np.load(p).astype(np.float32)
-        poses: Float32[ndarray, "n_frames 2 51"] = np.transpose(poses, (1, 0, 2))
+        poses: Float32[ndarray, "n_frames n_hands=2 51"] = np.transpose(poses, (1, 0, 2))
         return poses
     # fallback like the sample layout
     p2 = ROOT / "poses" / f"subject_{SUBJECT}" / seq / "poses_m.npy"
     if p2.exists():
         poses: Float32[ndarray, "n_hands=2 n_frames 51"] = np.load(p2).astype(np.float32)
-        poses: Float32[ndarray, "n_frames 2 51"] = np.transpose(poses, (1, 0, 2))
+        poses: Float32[ndarray, "n_frames n_hands=2 51"] = np.transpose(poses, (1, 0, 2))
         return poses
     return None
 
