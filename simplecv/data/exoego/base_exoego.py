@@ -8,7 +8,7 @@ from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence
-from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.image_types import BGRList
 
@@ -22,6 +22,7 @@ class EgoData:
 @dataclass
 class ExoEgoLabels:
     xyzc_stack: Float[ndarray, "num_frames 133 4"]
+    mano_stack: ManoStack | None = None
 
 
 class BaseExoEgoSequence(ABC):

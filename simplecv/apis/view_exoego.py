@@ -6,14 +6,16 @@ from typing import Literal
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+import torch
 from einops import rearrange
-from jaxtyping import Float, Int, UInt8
+from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
+from torch import Tensor
 
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
-from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
 from simplecv.ops.triangulate import proj_3d_vectorized
@@ -152,19 +154,20 @@ def log_exoego_batch(
     exoego_sequence: BaseExoEgoSequence,
     parent_log_path: Path,
     timeline: str,
-    shortest_timestamp: Int[ndarray, "num_frames"],
+    shortest_timestamp: Int[ndarray, "n_frames"],
     log_ego: bool = True,
     log_exo: bool = True,
 ) -> None:
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     if exoego_labels is not None:
-        xyzc_stack: Float[ndarray, "num_frames 133 4"] = exoego_labels.xyzc_stack
-        xyz_stack: Float[ndarray, "num_frames 133 3"] = xyzc_stack[:, :, :3]
-        xyz_hom_stack: Float[ndarray, "num_frames 133 4"] = np.concatenate(
+        ### Send XYZ coordinates
+        xyzc_stack: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
+        xyz_stack: Float[ndarray, "n_frames 133 3"] = xyzc_stack[:, :, :3]
+        xyz_hom_stack: Float[ndarray, "n_frames 133 4"] = np.concatenate(
             [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
         )
-        conf_stack: Float[ndarray, "num_frames 133"] = xyzc_stack[:, :, 3]
-        colors: UInt8[ndarray, "num_frames 133 3"] = confidence_scores_to_rgb(
+        conf_stack: Float[ndarray, "n_frames 133"] = xyzc_stack[:, :, 3]
+        colors: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
             confidence_scores=conf_stack[..., np.newaxis]
         )
         rr.log(
@@ -183,15 +186,57 @@ def log_exoego_batch(
                 *rr.Points3D.columns(
                     positions=rearrange(
                         xyz_stack,
-                        "num_frames kpts dim -> (num_frames kpts) dim",
+                        "n_frames kpts dim -> (n_frames kpts) dim",
                     ),
                     colors=rearrange(
                         colors,
-                        "num_frames kpts dim -> (num_frames kpts) dim",
+                        "n_frames kpts dim -> (n_frames kpts) dim",
                     ),
                 ).partition(lengths=[len(COCO_133_IDS)] * len(xyzc_stack)),
             ],
         )
+
+        # send mano verts
+        mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
+        if mano_stack is not None:
+            from simplecv.ops.mano_torch import MANOLayerTorch
+
+            mano_layers = [
+                MANOLayerTorch(side="right", betas=mano_stack.betas),
+                MANOLayerTorch(side="left", betas=mano_stack.betas),
+            ]
+            mano_poses: Float32[ndarray, "n_frames n_hands=2 51"] = mano_stack.poses
+            mano_poses: Float32[ndarray, "n_hands=2 n_frames 51"] = rearrange(
+                mano_poses, "n_frames n_hands pose -> n_hands n_frames pose"
+            )
+            for mano_pose, mano_layer in zip(mano_poses, mano_layers, strict=True):
+                poses: Float32[ndarray, "n_frames 48"] = mano_pose[:, :48]
+                translations: Float32[ndarray, "n_frames 3"] = mano_pose[:, 48:51]
+                mano_outputs: tuple[
+                    Float32[Tensor, "n_frames 778 3"],
+                    Float32[Tensor, "n_frames 21 3"],
+                ] = mano_layer(torch.from_numpy(poses), torch.from_numpy(translations))
+                verts: Float32[Tensor, "n_frames 778 3"] = mano_outputs[0]
+                joints: Float32[Tensor, "n_frames 21 3"] = mano_outputs[1]
+                rr.log(
+                    f"{parent_log_path}/mano_{mano_layer.side}_verts",
+                    rr.Points3D.from_fields(
+                        show_labels=False,
+                    ),
+                    static=True,
+                )
+                rr.send_columns(
+                    f"{parent_log_path}/mano_{mano_layer.side}_verts",
+                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(xyzc_stack)])],
+                    columns=[
+                        *rr.Points3D.columns(
+                            positions=rearrange(
+                                verts,
+                                "n_frames kpts dim -> (n_frames kpts) dim",
+                            ),
+                        ).partition(lengths=[778] * len(verts)),
+                    ],
+                )
 
     ###########################
     # batch send all exo cams #
@@ -208,7 +253,7 @@ def log_exoego_batch(
         for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
             exo_cam_path: Path = parent_log_path / exo_cam.name
             exo_pinhole_path: Path = exo_cam_path / "pinhole"
-            uv_exo: Float[ndarray, "num_frames 133 2"] = uv_exo_stack[:, exo_cam_idx, :, :]
+            uv_exo: Float[ndarray, "n_frames 133 2"] = uv_exo_stack[:, exo_cam_idx, :, :]
             # filter batch with invalid values
             rr.log(
                 f"{exo_pinhole_path}/keypoints",
@@ -226,11 +271,11 @@ def log_exoego_batch(
                     *rr.Points2D.columns(
                         positions=rearrange(
                             uv_exo,
-                            "num_frames kpts dim -> (num_frames kpts) dim",
+                            "n_frames kpts dim -> (n_frames kpts) dim",
                         ),
                         colors=rearrange(
                             colors,
-                            "num_frames kpts dim -> (num_frames kpts) dim",
+                            "n_frames kpts dim -> (n_frames kpts) dim",
                         ),
                     ).partition(lengths=[len(COCO_133_IDS)] * len(uv_exo)),
                 ],
@@ -259,10 +304,10 @@ def log_exoego_batch(
                 ),
                 static=True,
             )
-            batch_world_t_cam: Float[ndarray, "num_frames 3"] = np.array(
+            batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
                 [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in ego_cam_param_list]
             )
-            batch_world_R_cam: Float[ndarray, "num_frames 3 3"] = np.array(
+            batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
                 [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in ego_cam_param_list]
             )
             # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
@@ -278,10 +323,10 @@ def log_exoego_batch(
             )
 
             # make Pall for specific camera
-            Pall: Float[ndarray, "num_frames 3 4"] = np.stack(
+            Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
                 [pinhole.projection_matrix for pinhole in ego_cam_param_list]
             )
-            uv_ego_stack: Float[ndarray, "num_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
+            uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
 
             # Process in batches to balance memory usage and performance
             batch_size = min(100, len(xyz_hom_stack))  # Adjust based on available memory
@@ -321,11 +366,11 @@ def log_exoego_batch(
                     *rr.Points2D.columns(
                         positions=rearrange(
                             uv_ego_stack,
-                            "num_frames kpts dim -> (num_frames kpts) dim",
+                            "n_frames kpts dim -> (n_frames kpts) dim",
                         ),
                         colors=rearrange(
                             colors,
-                            "num_frames kpts dim -> (num_frames kpts) dim",
+                            "n_frames kpts dim -> (n_frames kpts) dim",
                         ),
                     ).partition(lengths=[len(COCO_133_IDS)] * len(uv_ego_stack)),
                 ],
@@ -344,7 +389,7 @@ def visualize_exo_ego(config: VisualizeConfig):
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
-    ego_timestamps: list[Int[ndarray, "num_frames"]] = []
+    ego_timestamps: list[Int[ndarray, "n_frames"]] = []
     ego_video_log_paths: list[Path] | None = None
     if ego_sequence is not None and config.log_ego:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
@@ -356,7 +401,7 @@ def visualize_exo_ego(config: VisualizeConfig):
         for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
             assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
             # Log video asset which is referred to by frame references.
-            ego_timestamps_ns: Int[ndarray, "num_frames"] = log_video(video_file, ego_video_log_path, timeline=timeline)
+            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, ego_video_log_path, timeline=timeline)
             ego_timestamps.append(ego_timestamps_ns)
 
     exo_video_log_paths: list[Path] | None = None
@@ -392,7 +437,7 @@ def visualize_exo_ego(config: VisualizeConfig):
 
     if ego_sequence is not None and ego_timestamps:
         # Find the timestamp list with the maximum length.
-        shortest_timestamp: Int[ndarray, "num_frames"] = min(ego_timestamps, key=len)  # noqa: UP037
+        shortest_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamps, key=len)  # noqa: UP037
         assert len(shortest_timestamp) == len(ego_sequence), (
             f"Length of timestamps {len(shortest_timestamp)} and sequence {len(ego_sequence)} do not match"
         )

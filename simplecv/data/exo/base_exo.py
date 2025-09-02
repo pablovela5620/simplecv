@@ -17,7 +17,9 @@ CamNameType = TypeVar("CamNameType", bound=str)
 
 @dataclass
 class ManoStack:
+    # https://github.com/rerun-io/pi0-lerobot/blob/a2f7f415f48379349bb05c88893c99f07c5209e3/src/pi0_lerobot/apis/visualize_exo_ego.py
     betas: Float32[ndarray, "10"]  # only a single set for all frames and hands
+    # 0 for right hand, 1 for left hand, p 0:48, t 48:51
     poses: Float32[ndarray, "num_frames 2 51"]  # 2 hands 51 angles (3*17)
 
 
