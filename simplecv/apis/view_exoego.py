@@ -202,7 +202,7 @@ def log_exoego_batch(
             ],
         )
 
-        ### Send Mano Data, this includes
+        ### Send MANO Data, this includes
         mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
         if mano_stack is not None:
             from simplecv.ops.mano_torch import MANOLayerTorch
