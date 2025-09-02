@@ -17,7 +17,13 @@ from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
+from simplecv.data.skeleton.coco_133 import (
+    COCO_133_ID2NAME,
+    COCO_133_IDS,
+    COCO_133_LINKS,
+    LEFT_HAND_IDX,
+    RIGHT_HAND_IDX,
+)
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
@@ -196,7 +202,7 @@ def log_exoego_batch(
             ],
         )
 
-        # send mano verts
+        ### Send Mano Data, this includes
         mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
         if mano_stack is not None:
             from simplecv.ops.mano_torch import MANOLayerTorch
@@ -209,6 +215,12 @@ def log_exoego_batch(
             mano_poses: Float32[ndarray, "n_hands=2 n_frames 51"] = rearrange(
                 mano_poses, "n_frames n_hands pose -> n_hands n_frames pose"
             )
+            # Prepare a single COCO-133 buffer (both hands combined)
+            n_frames_mano_total: int = min(mano_poses.shape[1], len(shortest_timestamp))
+            xyz_coco_mano: Float32[ndarray, "n_frames 133 3"] = np.full(
+                (n_frames_mano_total, 133, 3), np.nan, dtype=np.float32
+            )
+            conf_coco_mano: Float32[ndarray, "n_frames 133"] = np.zeros((n_frames_mano_total, 133), dtype=np.float32)
             for mano_pose, mano_layer in zip(mano_poses, mano_layers, strict=True):
                 poses: Float32[ndarray, "n_frames 48"] = mano_pose[:, :48]
                 translations: Float32[ndarray, "n_frames 3"] = mano_pose[:, 48:51]
@@ -217,7 +229,14 @@ def log_exoego_batch(
                     Float32[Tensor, "n_frames 21 3"],
                 ] = mano_layer(torch.from_numpy(poses), torch.from_numpy(translations))
                 verts: Float32[Tensor, "n_frames 778 3"] = mano_outputs[0]
-                joints: Float32[Tensor, "n_frames 21 3"] = mano_outputs[1]
+                xyz_mano: Float32[Tensor, "n_frames n_joints=21 3"] = mano_outputs[1]
+                # Aggregate MANO joints (21) → into single COCO-133 buffer
+                xyz_mano_np: Float32[ndarray, "n_frames 21 3"] = xyz_mano.detach().cpu().numpy()
+                hand_idx: ndarray = RIGHT_HAND_IDX if mano_layer.side == "right" else LEFT_HAND_IDX
+                xyz_coco_mano[:, hand_idx, :] = xyz_mano_np[0:n_frames_mano_total]
+                conf_coco_mano[:, hand_idx] = 1.0
+
+                # send verts
                 rr.log(
                     f"{parent_log_path}/mano_{mano_layer.side}_verts",
                     rr.Points3D.from_fields(
@@ -237,6 +256,63 @@ def log_exoego_batch(
                         ).partition(lengths=[778] * len(verts)),
                     ],
                 )
+
+                # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
+                faces_np: Int[ndarray, "n_faces 3"] = mano_layer.f.detach().cpu().numpy().astype(np.int32)
+                mesh_entity_path: Path = parent_log_path / f"mano_{mano_layer.side}_mesh"
+                rr.log(
+                    f"{mesh_entity_path}",
+                    rr.Mesh3D.from_fields(
+                        triangle_indices=faces_np,
+                    ),
+                    static=True,
+                )
+
+                # Stream vertex positions over time under the same entity using send_columns
+                verts_np: Float32[ndarray, "n_frames 778 3"] = verts.detach().cpu().numpy()
+                n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
+                rr.send_columns(
+                    f"{mesh_entity_path}",
+                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mesh])],
+                    columns=[
+                        *rr.Mesh3D.columns(
+                            vertex_positions=rearrange(
+                                verts_np[0:n_frames_mesh],
+                                "n v d -> (n v) d",
+                            ),
+                        ).partition(lengths=[verts_np.shape[1]] * n_frames_mesh),
+                    ],
+                )
+
+            # Log a single combined MANO keypoints stream (both hands)
+            colors_coco: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
+                confidence_scores=conf_coco_mano[..., np.newaxis]
+            )
+            rr.log(
+                f"{parent_log_path}/mano_keypoints",
+                rr.Points3D.from_fields(
+                    class_ids=0,
+                    keypoint_ids=COCO_133_IDS,
+                    show_labels=False,
+                ),
+                static=True,
+            )
+            rr.send_columns(
+                f"{parent_log_path}/mano_keypoints",
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mano_total])],
+                columns=[
+                    *rr.Points3D.columns(
+                        positions=rearrange(
+                            xyz_coco_mano,
+                            "n_frames kpts dim -> (n_frames kpts) dim",
+                        ),
+                        colors=rearrange(
+                            colors_coco,
+                            "n_frames kpts dim -> (n_frames kpts) dim",
+                        ),
+                    ).partition(lengths=[len(COCO_133_IDS)] * n_frames_mano_total),
+                ],
+            )
 
     ###########################
     # batch send all exo cams #
