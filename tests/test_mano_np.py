@@ -4,6 +4,9 @@ import numpy as np
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from hypothesis.extra.numpy import arrays
+
+import torch
 
 from simplecv.ops import mano_np, mano_torch
 
@@ -13,13 +16,14 @@ from simplecv.ops import mano_np, mano_torch
 
 
 @given(
-    quat=st.lists(
-        st.floats(min_value=-1.0, max_value=1.0, allow_nan=False, allow_infinity=False), min_size=4, max_size=4
-    ).map(lambda q: np.array([q], dtype=np.float32))
+    quat=arrays(
+        dtype=np.float32,
+        shape=(1, 4),
+        elements=st.floats(min_value=-1.0, max_value=1.0, allow_nan=False, allow_infinity=False),
+    )
 )
 @settings(max_examples=50)
 def test_quat2mat_parity(quat: np.ndarray):
-    torch = pytest.importorskip("torch")
     q_t = torch.from_numpy(quat)
     m_t = mano_torch.quat2mat(q_t).detach().cpu().numpy()
     m_n = mano_np.quat2mat(quat)
@@ -27,15 +31,14 @@ def test_quat2mat_parity(quat: np.ndarray):
 
 
 @given(
-    aa=st.lists(
-        st.floats(min_value=-3.14, max_value=3.14, allow_nan=False, allow_infinity=False),
-        min_size=3,
-        max_size=3,
-    ).map(lambda a: np.array([a], dtype=np.float32))
+    aa=arrays(
+        dtype=np.float32,
+        shape=(1, 3),
+        elements=st.floats(min_value=-3.14, max_value=3.14, allow_nan=False, allow_infinity=False),
+    )
 )
 @settings(max_examples=50)
 def test_batch_rodrigues_parity(aa: np.ndarray):
-    torch = pytest.importorskip("torch")
     a_t = torch.from_numpy(aa)
     r_t = mano_torch.batch_rodrigues(a_t).detach().cpu().numpy()
     r_n = mano_np.batch_rodrigues(aa)
@@ -43,15 +46,14 @@ def test_batch_rodrigues_parity(aa: np.ndarray):
 
 
 @given(
-    pose=st.lists(
-        st.floats(min_value=-2.0, max_value=2.0, allow_nan=False, allow_infinity=False),
-        min_size=48,
-        max_size=48,
-    ).map(lambda p: np.array([p], dtype=np.float32))
+    pose=arrays(
+        dtype=np.float32,
+        shape=(1, 48),
+        elements=st.floats(min_value=-2.0, max_value=2.0, allow_nan=False, allow_infinity=False),
+    )
 )
 @settings(max_examples=25)
 def test_posemap_and_subflatid_parity(pose: np.ndarray):
-    torch = pytest.importorskip("torch")
     p_t = torch.from_numpy(pose)
     rm_t = mano_torch.th_posemap_axisang(p_t).detach().cpu().numpy()
     pm_t = mano_torch.subtract_flat_id(torch.from_numpy(rm_t)).detach().cpu().numpy()
@@ -64,21 +66,14 @@ def test_posemap_and_subflatid_parity(pose: np.ndarray):
 
 
 @given(
-    mats=st.lists(
-        st.lists(
-            st.lists(
-                st.floats(min_value=-5.0, max_value=5.0, allow_nan=False, allow_infinity=False), min_size=4, max_size=4
-            ),
-            min_size=3,
-            max_size=3,
-        ),
-        min_size=1,
-        max_size=1,
-    ).map(lambda m: np.array(m, dtype=np.float32))
+    mats=arrays(
+        dtype=np.float32,
+        shape=(1, 3, 4),
+        elements=st.floats(min_value=-5.0, max_value=5.0, allow_nan=False, allow_infinity=False),
+    )
 )
 @settings(max_examples=25)
 def test_with_zeros_parity(mats: np.ndarray):
-    torch = pytest.importorskip("torch")
     m_t = mano_torch.th_with_zeros(torch.from_numpy(mats)).detach().cpu().numpy()
     m_n = mano_np.th_with_zeros(mats)
     np.testing.assert_allclose(m_n, m_t, rtol=1e-6, atol=1e-6)
@@ -118,7 +113,6 @@ def _find_hocap_sample() -> tuple[np.ndarray, np.ndarray] | None:
 
 @pytest.mark.slow
 def test_mano_np_matches_torch_on_hocap_sample():
-    torch = pytest.importorskip("torch")
     res = _find_hocap_sample()
     if res is None:
         pytest.skip("HoCap sample not available; skipping integration test")
