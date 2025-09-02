@@ -555,7 +555,7 @@ class MANOLayerTorch(Module):
     @property
     def th_selected_comps(self) -> Tensor:
         """Return the selected components tensor."""
-        return self._mano_layer.th_selected_comps
+        return self._mano_layer.th_comps
 
     @property
     def th_v_template(self) -> Float32[Tensor, "b=1 n_verts=778 dim=3"]:
