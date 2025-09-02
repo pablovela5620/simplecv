@@ -6,11 +6,9 @@ from typing import Literal
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-import torch
 from einops import rearrange
 from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
-from torch import Tensor
 
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedEgoDatasetUnion
@@ -205,12 +203,11 @@ def log_exoego_batch(
         ### Send MANO Data, this includes
         mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
         if mano_stack is not None:
-            from simplecv.ops.mano_torch import MANOLayerTorch
             from simplecv.ops.mano_np import MANOLayerNP
 
             mano_layers = [
-                MANOLayerTorch(side="right", betas=mano_stack.betas),
-                MANOLayerTorch(side="left", betas=mano_stack.betas),
+                MANOLayerNP(side="right", betas=mano_stack.betas),
+                MANOLayerNP(side="left", betas=mano_stack.betas),
             ]
             mano_poses: Float32[ndarray, "n_frames n_hands=2 51"] = mano_stack.poses
             mano_poses: Float32[ndarray, "n_hands=2 n_frames 51"] = rearrange(
@@ -218,31 +215,24 @@ def log_exoego_batch(
             )
             # Prepare a single COCO-133 buffer (both hands combined)
             n_frames_mano_total: int = min(mano_poses.shape[1], len(shortest_timestamp))
-            xyz_coco_mano: Float32[ndarray, "n_frames 133 3"] = np.full(
+            xyz_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133 3"] = np.full(
                 (n_frames_mano_total, 133, 3), np.nan, dtype=np.float32
             )
-            conf_coco_mano: Float32[ndarray, "n_frames 133"] = np.zeros((n_frames_mano_total, 133), dtype=np.float32)
+            conf_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133"] = np.zeros(
+                (n_frames_mano_total, 133), dtype=np.float32
+            )
             for mano_pose, mano_layer in zip(mano_poses, mano_layers, strict=True):
                 poses: Float32[ndarray, "n_frames 48"] = mano_pose[:, :48]
                 translations: Float32[ndarray, "n_frames 3"] = mano_pose[:, 48:51]
                 mano_outputs: tuple[
-                    Float32[Tensor, "n_frames 778 3"],
-                    Float32[Tensor, "n_frames 21 3"],
-                ] = mano_layer(torch.from_numpy(poses), torch.from_numpy(translations))
-                verts: Float32[Tensor, "n_frames 778 3"] = mano_outputs[0]
-                xyz_mano: Float32[Tensor, "n_frames n_joints=21 3"] = mano_outputs[1]
+                    Float32[ndarray, "n_frames n_verts=778 3"],
+                    Float32[ndarray, "n_frames n_joints=21 3"],
+                ] = mano_layer(poses, translations)
+                verts: Float32[ndarray, "n_frames n_verts=778 3"] = mano_outputs[0]
+                xyz_mano: Float32[ndarray, "n_frames n_joints=21 3"] = mano_outputs[1]
 
-                # Validate NumPy vs Torch outputs are close (in meters)
-                mano_layer_np: MANOLayerNP = MANOLayerNP(side=mano_layer.side, betas=mano_stack.betas)
-                verts_np_m, joints_np_m = mano_layer_np(poses, translations)
-                verts_t_m: Float32[ndarray, "n_frames 778 3"] = verts.detach().cpu().numpy()
-                joints_t_m: Float32[ndarray, "n_frames 21 3"] = xyz_mano.detach().cpu().numpy()
-                n_cmp: int = min(len(verts_np_m), len(verts_t_m))
-                # tighter tolerances proved stable in unit tests
-                np.testing.assert_allclose(verts_np_m[:n_cmp], verts_t_m[:n_cmp], rtol=1e-3, atol=1e-3)
-                np.testing.assert_allclose(joints_np_m[:n_cmp], joints_t_m[:n_cmp], rtol=1e-3, atol=1e-3)
                 # Aggregate MANO joints (21) → into single COCO-133 buffer
-                xyz_mano_np: Float32[ndarray, "n_frames 21 3"] = xyz_mano.detach().cpu().numpy()
+                xyz_mano_np: Float32[ndarray, "n_frames n_joints=21 3"] = xyz_mano
                 hand_idx: ndarray = RIGHT_HAND_IDX if mano_layer.side == "right" else LEFT_HAND_IDX
                 xyz_coco_mano[:, hand_idx, :] = xyz_mano_np[0:n_frames_mano_total]
                 conf_coco_mano[:, hand_idx] = 1.0
@@ -269,7 +259,7 @@ def log_exoego_batch(
                 )
 
                 # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
-                faces_np: Int[ndarray, "n_faces 3"] = mano_layer.f.detach().cpu().numpy().astype(np.int32)
+                faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
                 mesh_entity_path: Path = parent_log_path / f"mano_{mano_layer.side}_mesh"
                 rr.log(
                     f"{mesh_entity_path}",
@@ -280,7 +270,7 @@ def log_exoego_batch(
                 )
 
                 # Stream vertex positions over time under the same entity using send_columns
-                verts_np: Float32[ndarray, "n_frames 778 3"] = verts.detach().cpu().numpy()
+                verts_np: Float32[ndarray, "n_frames 778 3"] = verts
                 n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
                 rr.send_columns(
                     f"{mesh_entity_path}",
