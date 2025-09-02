@@ -34,6 +34,9 @@ view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path dat
     "_download-example-polycam-data",
 ], description = "View example polycam data" }
 
+# Run tests in the dev environment
+tests = { cmd = "pixi run -e dev pytest -q", description = "Run pytest in the dev environment" }
+
 
 [tool.pixi.tasks.view-egoexo-data]
 cmd = "python tools/view_exoego.py"
@@ -170,8 +173,19 @@ platforms = ["linux-64"]
 channels = ["https://prefix.dev/conda-forge"]
 
 [tool.pixi.feature.dev.dependencies]
-beartype = ">=0.19.0,<0.20"
+beartype = ">=0.21.0,<0.22"
 ruff = ">=0.12.7,<0.13"
+pytest = ">=8.3.3,<9"
+hypothesis = ">=6.112.1,<7"
+
+[tool.pixi.feature.dev.pypi-dependencies]
+pytest-beartype = ">=0.2,<1"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+addopts = "-p pytest_beartype"
 
 [tool.pixi.environments]
 cuda128 = { features = [

@@ -13,7 +13,7 @@ from numpy import ndarray
 from torch import Tensor
 
 from simplecv.camera_parameters import PinholeParameters
-from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
+from simplecv.configs.exoego_dataset_configs import AnnotatedEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
@@ -206,6 +206,7 @@ def log_exoego_batch(
         mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
         if mano_stack is not None:
             from simplecv.ops.mano_torch import MANOLayerTorch
+            from simplecv.ops.mano_np import MANOLayerNP
 
             mano_layers = [
                 MANOLayerTorch(side="right", betas=mano_stack.betas),
@@ -230,6 +231,16 @@ def log_exoego_batch(
                 ] = mano_layer(torch.from_numpy(poses), torch.from_numpy(translations))
                 verts: Float32[Tensor, "n_frames 778 3"] = mano_outputs[0]
                 xyz_mano: Float32[Tensor, "n_frames n_joints=21 3"] = mano_outputs[1]
+
+                # Validate NumPy vs Torch outputs are close (in meters)
+                mano_layer_np: MANOLayerNP = MANOLayerNP(side=mano_layer.side, betas=mano_stack.betas)
+                verts_np_m, joints_np_m = mano_layer_np(poses, translations)
+                verts_t_m: Float32[ndarray, "n_frames 778 3"] = verts.detach().cpu().numpy()
+                joints_t_m: Float32[ndarray, "n_frames 21 3"] = xyz_mano.detach().cpu().numpy()
+                n_cmp: int = min(len(verts_np_m), len(verts_t_m))
+                # tighter tolerances proved stable in unit tests
+                np.testing.assert_allclose(verts_np_m[:n_cmp], verts_t_m[:n_cmp], rtol=1e-3, atol=1e-3)
+                np.testing.assert_allclose(joints_np_m[:n_cmp], joints_t_m[:n_cmp], rtol=1e-3, atol=1e-3)
                 # Aggregate MANO joints (21) → into single COCO-133 buffer
                 xyz_mano_np: Float32[ndarray, "n_frames 21 3"] = xyz_mano.detach().cpu().numpy()
                 hand_idx: ndarray = RIGHT_HAND_IDX if mano_layer.side == "right" else LEFT_HAND_IDX
