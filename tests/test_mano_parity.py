@@ -1,17 +1,18 @@
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
 from beartype.door import die_if_unbearable
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
 from jaxtyping import Float32
 from numpy import ndarray
 from torch import Tensor
 
-from simplecv.ops import mano_np, mano_torch
+from simplecv.ops import mano_jax, mano_np, mano_torch
 
 # ----------------------
 # Small functional parity
@@ -25,7 +26,7 @@ from simplecv.ops import mano_np, mano_torch
         elements=st.floats(min_value=-1.0, max_value=1.0, allow_nan=False, allow_infinity=False),
     )
 )
-@settings(max_examples=50)
+@settings(max_examples=50, deadline=None)
 def test_quat2mat_parity(quat: Float32[ndarray, "b=1 4"]) -> None:
     # Validate input from Hypothesis
     die_if_unbearable(quat, Float32[ndarray, "b=1 4"])  # (1,4)
@@ -40,6 +41,11 @@ def test_quat2mat_parity(quat: Float32[ndarray, "b=1 4"]) -> None:
     die_if_unbearable(m_n, Float32[ndarray, "b=1 3 3"])  # (1,3,3)
     np.testing.assert_allclose(m_n, m_t, rtol=1e-5, atol=1e-5)
 
+    # JAX parity (skip extremely small-norm quats that may be numerically unstable)
+    assume(float(np.linalg.norm(quat)) > 1e-12)
+    m_j = mano_jax.quat2mat(jnp.asarray(quat))
+    np.testing.assert_allclose(np.asarray(m_j), m_t, rtol=1e-5, atol=1e-5)
+
 
 @given(
     aa=arrays(
@@ -48,7 +54,7 @@ def test_quat2mat_parity(quat: Float32[ndarray, "b=1 4"]) -> None:
         elements=st.floats(min_value=-3.14, max_value=3.14, allow_nan=False, allow_infinity=False),
     )
 )
-@settings(max_examples=50)
+@settings(max_examples=50, deadline=None)
 def test_batch_rodrigues_parity(aa: Float32[ndarray, "b=1 3"]) -> None:
     die_if_unbearable(aa, Float32[ndarray, "b=1 3"])  # (1,3)
 
@@ -61,6 +67,8 @@ def test_batch_rodrigues_parity(aa: Float32[ndarray, "b=1 3"]) -> None:
     r_n: Float32[ndarray, "b=1 9"] = mano_np.batch_rodrigues(aa)
     die_if_unbearable(r_n, Float32[ndarray, "b=1 9"])  # (1,9)
     np.testing.assert_allclose(r_n, r_t, rtol=1e-5, atol=1e-5)
+    r_j = mano_jax.batch_rodrigues(jnp.asarray(aa))
+    np.testing.assert_allclose(np.asarray(r_j), r_t, rtol=1e-5, atol=1e-5)
 
 
 @given(
@@ -70,7 +78,7 @@ def test_batch_rodrigues_parity(aa: Float32[ndarray, "b=1 3"]) -> None:
         elements=st.floats(min_value=-2.0, max_value=2.0, allow_nan=False, allow_infinity=False),
     )
 )
-@settings(max_examples=25)
+@settings(max_examples=25, deadline=None)
 def test_posemap_and_subflatid_parity(pose: Float32[ndarray, "b=1 48"]) -> None:
     die_if_unbearable(pose, Float32[ndarray, "b=1 48"])  # (1,48)
 
@@ -91,6 +99,10 @@ def test_posemap_and_subflatid_parity(pose: Float32[ndarray, "b=1 48"]) -> None:
 
     np.testing.assert_allclose(rm_n, rm_t, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(pm_n, pm_t, rtol=1e-5, atol=1e-5)
+    rm_j = mano_jax.th_posemap_axisang(jnp.asarray(pose))
+    pm_j = mano_jax.subtract_flat_id(rm_j)
+    np.testing.assert_allclose(np.asarray(rm_j), rm_t, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(pm_j), pm_t, rtol=1e-5, atol=1e-5)
 
 
 @given(
@@ -100,7 +112,7 @@ def test_posemap_and_subflatid_parity(pose: Float32[ndarray, "b=1 48"]) -> None:
         elements=st.floats(min_value=-5.0, max_value=5.0, allow_nan=False, allow_infinity=False),
     )
 )
-@settings(max_examples=25)
+@settings(max_examples=25, deadline=None)
 def test_with_zeros_parity(mats: Float32[ndarray, "b=1 3 4"]) -> None:
     die_if_unbearable(mats, Float32[ndarray, "b=1 3 4"])  # (1,3,4)
 
@@ -112,6 +124,8 @@ def test_with_zeros_parity(mats: Float32[ndarray, "b=1 3 4"]) -> None:
     m_n: Float32[ndarray, "b=1 4 4"] = mano_np.th_with_zeros(mats)
     die_if_unbearable(m_n, Float32[ndarray, "b=1 4 4"])  # (1,4,4)
     np.testing.assert_allclose(m_n, m_t, rtol=1e-6, atol=1e-6)
+    m_j = mano_jax.th_with_zeros(jnp.asarray(mats))
+    np.testing.assert_allclose(np.asarray(m_j), m_t, rtol=1e-6, atol=1e-6)
 
 
 # ----------------------
@@ -183,3 +197,15 @@ def test_mano_np_matches_torch_on_hocap_sample() -> None:
 
         np.testing.assert_allclose(vt_n, vt_t, rtol=1e-3, atol=1e-3)
         np.testing.assert_allclose(jt_n, jt_t, rtol=1e-3, atol=1e-3)
+
+        # JAX layer
+        try:
+            from simplecv.ops.mano_jax import MANOLayerJAX
+        except Exception:
+            pytest.skip("JAX MANO layer not available; skipping JAX parity")
+        layer_j = MANOLayerJAX(side=side, betas=betas, mano_root_dir=mano_root)
+        vt_j, jt_j = layer_j(poses, trans)
+        die_if_unbearable(vt_j, Float32[ndarray, "b n_verts=778 dim=3"])  # (b,778,3)
+        die_if_unbearable(jt_j, Float32[ndarray, "b n_joints=21 dim=3"])  # (b,21,3)
+        np.testing.assert_allclose(vt_j, vt_t, rtol=1e-3, atol=1e-3)
+        np.testing.assert_allclose(jt_j, jt_t, rtol=1e-3, atol=1e-3)

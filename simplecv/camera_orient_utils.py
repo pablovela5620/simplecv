@@ -9,7 +9,7 @@ the codebase. See `camera_utils.py` for original reference.
 from __future__ import annotations
 
 import math
-from typing import Literal, NamedTuple, TypeAlias
+from typing import Literal, NamedTuple
 
 import numpy as np
 from jaxtyping import Float
@@ -96,8 +96,8 @@ def focus_of_attention(poses: Float[ndarray, "*n 4 4"], initial_focus: Float[nda
     return focus_pt.astype(np.float64)
 
 
-OrientedPoses: TypeAlias = Float[ndarray, "*n 3 4"]
-Transform34: TypeAlias = Float[ndarray, "3 4"]
+type OrientedPoses = Float[ndarray, "*n 3 4"]
+type Transform34 = Float[ndarray, "3 4"]
 
 
 class OrientResults(NamedTuple):

@@ -7,6 +7,7 @@ from jaxtyping import Float32
 from numpy import ndarray
 
 from simplecv.ops import mano_np, mano_torch
+from simplecv.ops.mano_jax import MANOLayerJAX
 
 ROOT = Path("/mnt/8tb/data/hocap/datasets")
 SUBJECT = "8"
@@ -104,3 +105,11 @@ def test_mano_np_matches_torch_on_full_hocap(sequence: str) -> None:
 
         np.testing.assert_allclose(vt_n, vt_t, rtol=1e-3, atol=1e-3)
         np.testing.assert_allclose(jt_n, jt_t, rtol=1e-3, atol=1e-3)
+
+        # JAX
+        layer_j = MANOLayerJAX(side=side, betas=betas, mano_root_dir=mano_root)
+        vt_j, jt_j = layer_j(poses, trans)
+        die_if_unbearable(vt_j, Float32[ndarray, "b n_verts=778 dim=3"])  # (b,778,3)
+        die_if_unbearable(jt_j, Float32[ndarray, "b n_joints=21 dim=3"])  # (b,21,3)
+        np.testing.assert_allclose(vt_j, vt_t, rtol=1e-3, atol=1e-3)
+        np.testing.assert_allclose(jt_j, jt_t, rtol=1e-3, atol=1e-3)

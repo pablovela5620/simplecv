@@ -181,6 +181,12 @@ pytest-beartype = ">=0.2,<1"
 [tool.pixi.feature.dev.tasks]
 # Run tests in the dev environment
 tests = { cmd = "pytest -q", description = "Run pytest in the dev environment" }
+lint = { cmd = "ruff check .", description = "Run Ruff linter" }
+test_and_lint = { depends-on = [
+    "tests",
+    "lint",
+], description = "Alias for 'tests'" }
+
 
 [tool.pytest.ini_options]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]

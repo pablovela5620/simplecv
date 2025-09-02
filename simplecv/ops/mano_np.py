@@ -23,31 +23,30 @@ def quat2mat(quat: Float[ndarray, "_ 4"]) -> Float[ndarray, "_ 3 3"]:
         Rotation matrices of shape (b, 3, 3)
     """
     quat = quat.astype(np.float32)
-    # Match torch behavior: divide by norm without epsilon (zero-norm -> NaN)
+    # Match torch behavior: divide by norm without epsilon (zero-norm -> NaN); silence related warnings
     norm = np.linalg.norm(quat, axis=1, keepdims=True)
-    # Match torch behavior: zero-norm quaternions will produce NaN results, as in PyTorch; warnings are silenced
     with np.errstate(divide="ignore", invalid="ignore"):
         q = quat / norm
-    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
 
-    w2, x2, y2, z2 = w * w, x * x, y * y, z * z
-    wx, wy, wz = w * x, w * y, w * z
-    xy, xz, yz = x * y, x * z, y * z
+        w2, x2, y2, z2 = w * w, x * x, y * y, z * z
+        wx, wy, wz = w * x, w * y, w * z
+        xy, xz, yz = x * y, x * z, y * z
 
-    rot = np.stack(
-        [
-            w2 + x2 - y2 - z2,
-            2 * xy - 2 * wz,
-            2 * wy + 2 * xz,
-            2 * wz + 2 * xy,
-            w2 - x2 + y2 - z2,
-            2 * yz - 2 * wx,
-            2 * xz - 2 * wy,
-            2 * wx + 2 * yz,
-            w2 - x2 - y2 + z2,
-        ],
-        axis=1,
-    ).reshape((-1, 3, 3))
+        rot = np.stack(
+            [
+                w2 + x2 - y2 - z2,
+                2 * xy - 2 * wz,
+                2 * wy + 2 * xz,
+                2 * wz + 2 * xy,
+                w2 - x2 + y2 - z2,
+                2 * yz - 2 * wx,
+                2 * xz - 2 * wy,
+                2 * wx + 2 * yz,
+                w2 - x2 - y2 + z2,
+            ],
+            axis=1,
+        ).reshape((-1, 3, 3))
     return rot
 
 
