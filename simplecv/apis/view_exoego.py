@@ -154,6 +154,49 @@ def filter_out_of_bounds_keypoints(
     return uv_stack
 
 
+def compute_vertex_normals_batch(
+    verts: Float32[ndarray, "n_frames n_verts 3"],
+    faces: Int[ndarray, "n_faces 3"],
+    eps: float = 1e-12,
+) -> Float32[ndarray, "n_frames n_verts 3"]:
+    """Compute per-vertex normals for a batch of meshes sharing topology.
+
+    - Accumulates area-weighted face normals to vertices per frame, then normalizes.
+    - Robust to degenerate faces via epsilon guard.
+    """
+    n_frames: int = int(verts.shape[0])
+    n_verts: int = int(verts.shape[1])
+    n_faces: int = int(faces.shape[0])
+
+    faces_i: Int[ndarray, "n_faces 3"] = faces.astype(np.int64)
+    v0: Float32[ndarray, "n_frames n_faces 3"] = verts[:, faces_i[:, 0], :]
+    v1: Float32[ndarray, "n_frames n_faces 3"] = verts[:, faces_i[:, 1], :]
+    v2: Float32[ndarray, "n_frames n_faces 3"] = verts[:, faces_i[:, 2], :]
+
+    e1: Float32[ndarray, "n_frames n_faces 3"] = v1 - v0
+    e2: Float32[ndarray, "n_frames n_faces 3"] = v2 - v0
+    face_normals: Float32[ndarray, "n_frames n_faces 3"] = np.cross(e1, e2)
+
+    vertex_normals: Float32[ndarray, "n_frames n_verts 3"] = np.zeros((n_frames, n_verts, 3), dtype=np.float32)
+    for k in range(n_faces):
+        i0: int = int(faces_i[k, 0])
+        i1: int = int(faces_i[k, 1])
+        i2: int = int(faces_i[k, 2])
+        fn_k: Float32[ndarray, "n_frames 3"] = face_normals[:, k, :]
+        vertex_normals[:, i0, :] = vertex_normals[:, i0, :] + fn_k
+        vertex_normals[:, i1, :] = vertex_normals[:, i1, :] + fn_k
+        vertex_normals[:, i2, :] = vertex_normals[:, i2, :] + fn_k
+
+    norms: Float32[ndarray, "n_frames n_verts 1"] = np.linalg.norm(vertex_normals, axis=-1, keepdims=True).astype(
+        np.float32
+    )
+    denom: Float32[ndarray, "n_frames n_verts 1"] = np.maximum(norms, np.float32(eps))
+    vn_unit: Float32[ndarray, "n_frames n_verts 3"] = (vertex_normals / denom).astype(np.float32)
+    mask: ndarray = norms > eps
+    vn_unit = np.where(mask, vn_unit, np.float32(0.0))
+    return vn_unit
+
+
 def log_exoego_batch(
     exoego_sequence: BaseExoEgoSequence,
     parent_log_path: Path,
@@ -201,6 +244,16 @@ def log_exoego_batch(
         )
 
         ### Send MANO Data, this includes
+        mano_mesh_color_rgba_map: dict[Literal["left", "right"], tuple[int, int, int, int]] = {
+            "right": (255, 0, 0, 255),
+            "left": (0, 0, 255, 255),
+        }
+        mano_verts_color_rgb_map: dict[Literal["left", "right"], tuple[int, int, int]] = {
+            # Opposite of mesh color for visibility
+            "right": (0, 0, 255),
+            "left": (255, 0, 0),
+        }
+
         mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
         if mano_stack is not None:
             from simplecv.ops.mano_np import MANOLayerNP
@@ -245,6 +298,13 @@ def log_exoego_batch(
                     ),
                     static=True,
                 )
+                n_frames_verts: int = len(verts)
+                verts_base_color_rgb: tuple[int, int, int] = mano_verts_color_rgb_map[mano_layer.side]
+                verts_colors: UInt8[ndarray, "n_frames n_verts=778 3"] = np.full(
+                    (n_frames_verts, verts.shape[1], 3),
+                    verts_base_color_rgb,
+                    dtype=np.uint8,
+                )
                 rr.send_columns(
                     f"{parent_log_path}/mano_{mano_layer.side}_verts",
                     indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(xyzc_stack)])],
@@ -254,24 +314,30 @@ def log_exoego_batch(
                                 verts,
                                 "n_frames kpts dim -> (n_frames kpts) dim",
                             ),
+                            colors=rearrange(verts_colors, "n_frames kpts dim -> (n_frames kpts) dim"),
                         ).partition(lengths=[778] * len(verts)),
                     ],
                 )
 
                 # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
                 faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
+                mesh_color_rgba: tuple[int, int, int, int] = mano_mesh_color_rgba_map[mano_layer.side]
                 mesh_entity_path: Path = parent_log_path / f"mano_{mano_layer.side}_mesh"
                 rr.log(
                     f"{mesh_entity_path}",
                     rr.Mesh3D.from_fields(
                         triangle_indices=faces_np,
+                        albedo_factor=mesh_color_rgba,
                     ),
                     static=True,
                 )
 
-                # Stream vertex positions over time under the same entity using send_columns
-                verts_np: Float32[ndarray, "n_frames 778 3"] = verts
+                # Stream vertex positions and normals over time under the same entity using send_columns
+                verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
                 n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
+                vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+                    verts_np[0:n_frames_mesh], faces_np
+                )
                 rr.send_columns(
                     f"{mesh_entity_path}",
                     indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mesh])],
@@ -279,6 +345,10 @@ def log_exoego_batch(
                         *rr.Mesh3D.columns(
                             vertex_positions=rearrange(
                                 verts_np[0:n_frames_mesh],
+                                "n v d -> (n v) d",
+                            ),
+                            vertex_normals=rearrange(
+                                vertex_normals[0:n_frames_mesh],
                                 "n v d -> (n v) d",
                             ),
                         ).partition(lengths=[verts_np.shape[1]] * n_frames_mesh),
