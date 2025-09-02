@@ -314,15 +314,21 @@ class MANOLayerNP:
         self.root_trans: Float32[ndarray, "1 3"] = r
 
     def __call__(
-        self, p: Float32[ndarray, "b n_poses=48"], t: Float32[ndarray, "b dim=3"]
+        self,
+        poses: Float32[ndarray, "b n_poses=48"],
+        translations: Float32[ndarray, "b dim=3"],
     ) -> tuple[Float32[ndarray, "b n_verts=778 dim=3"], Float32[ndarray, "b n_joints=21 dim=3"]]:
-        return self.forward(p, t)
+        return self.forward(poses, translations)
 
     def forward(
-        self, p: Float32[ndarray, "b n_poses=48"], t: Float32[ndarray, "b dim=3"]
+        self,
+        poses: Float32[ndarray, "b n_poses=48"],
+        translations: Float32[ndarray, "b dim=3"],
     ) -> tuple[Float32[ndarray, "b n_verts=778 dim=3"], Float32[ndarray, "b n_joints=21 dim=3"]]:
-        bsz: int = p.shape[0]
-        verts_mm, joints_mm = self._mano_layer(p, np.repeat(self._betas[None, :], bsz, axis=0), t)
+        bsz: int = poses.shape[0]
+        verts_mm, joints_mm = self._mano_layer(
+            poses, np.repeat(self._betas[None, :], bsz, axis=0), translations
+        )
         # Convert to meters
         return verts_mm / 1000.0, joints_mm / 1000.0
 

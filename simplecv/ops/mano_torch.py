@@ -523,23 +523,25 @@ class MANOLayerTorch(Module):
         self.register_buffer("root_trans", r)
 
     def forward(
-        self, p: Float32[Tensor, "b n_poses=48"], t: Float32[Tensor, "b dim=3"]
+        self,
+        poses: Float32[Tensor, "b n_poses=48"],
+        translations: Float32[Tensor, "b dim=3"],
     ) -> tuple[Float32[Tensor, "b n_verts=778 dim=3"], Float32[Tensor, "b n_joints=21 dim=3"]]:
         """
         Forward function.
 
         Args:
-            p (Tensor): A tensor of shape [B, 48] containing the pose.
-            t (Tensor): A tensor of shape [B, 3] containing the translation.
+            poses (Tensor): [B, 48] MANO pose parameters (3 root axis-angle + 45 PCA).
+            translations (Tensor): [B, 3] global translation vectors (meters).
 
         Returns:
             tuple[Tensor, Tensor]:
                 v: A tensor of shape [B, 778, 3] containing the vertices.
                 j: A tensor of shape [B, 21, 3] containing the joints.
         """
-        batch_size: int = p.size(0)
+        batch_size: int = poses.size(0)
         mano_output: tuple[Float32[Tensor, "b n_verts=778 dim=3"], Float32[Tensor, "b n_joints=21 dim=3"]] = (
-            self._mano_layer(p, self.b.expand(batch_size, -1), t)
+            self._mano_layer(poses, self.b.expand(batch_size, -1), translations)
         )
 
         # Convert to meters.
