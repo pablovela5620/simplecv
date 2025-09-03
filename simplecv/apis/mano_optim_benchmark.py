@@ -16,8 +16,9 @@ from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedEgoDatasetUnion
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
+from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS, LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.ops.mano.mano_jax import ManoSimpleLayerJAX
+from simplecv.ops.mano.optim_jax import LossWeights, ManoOptimization
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
@@ -33,6 +34,7 @@ np.set_printoptions(suppress=True)
 class ManoOptimBenchConfig:
     rr_config: RerunTyroConfig
     dataset: AnnotatedEgoDatasetUnion
+    max_frames: int | None = 10
 
 
 def set_annotation_context() -> None:
@@ -95,17 +97,21 @@ def main(cfg: ManoOptimBenchConfig):
     rr.send_blueprint(blueprint)
 
     shortest_timestamp: Int[ndarray, "n_frames"] = min(exo_timestamps, key=len)
+    # limit only the iteration (keep full-length for batch logging consistency)
+    frames_to_iter: Int[ndarray, "n_frames"] = (
+        shortest_timestamp[: cfg.max_frames] if cfg.max_frames is not None else shortest_timestamp
+    )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
 
-    log_exoego_batch(
-        exoego_sequence,
-        parent_log_path=parent_log_path,
-        timeline=timeline,
-        shortest_timestamp=shortest_timestamp,
-        log_ego=False,
-        log_exo=True,
-    )
+    # log_exoego_batch(
+    #     exoego_sequence,
+    #     parent_log_path=parent_log_path,
+    #     timeline=timeline,
+    #     shortest_timestamp=shortest_timestamp,
+    #     log_ego=False,
+    #     log_exo=True,
+    # )
 
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     exo_cam_param_list: list[PinholeParameters] = exo_sequence.exo_cam_list
@@ -128,30 +134,53 @@ def main(cfg: ManoOptimBenchConfig):
         gt_beta: Float[ndarray, "10"] | None = (
             exoego_labels.mano_stack.betas if exoego_labels.mano_stack is not None else None
         )
-        gt_so3: Float32[ndarray, "n_frames n_hands=2 48"] | None = (
-            exoego_labels.mano_stack.so3 if exoego_labels.mano_stack is not None else None
-        )
-        gt_trans: Float32[ndarray, "n_frames n_hands=2 3"] | None = (
-            exoego_labels.mano_stack.trans if exoego_labels.mano_stack is not None else None
-        )
+        # gt_so3: Float32[ndarray, "n_frames n_hands=2 48"] | None = (
+        #     exoego_labels.mano_stack.so3 if exoego_labels.mano_stack is not None else None
+        # )
+        # gt_trans: Float32[ndarray, "n_frames n_hands=2 3"] | None = (
+        #     exoego_labels.mano_stack.trans if exoego_labels.mano_stack is not None else None
+        # )
 
-    mano_fwd_right = jit(ManoSimpleLayerJAX(mano_root=Path("data/"), side="right"))
-    for ts_idx, timestamp in enumerate(tqdm(shortest_timestamp, desc="Logging frames", unit="frame")):
+    # Optimizer over MANO pose (so3) + translation using 2D keypoints across views
+    optimizer_fn = ManoOptimization(
+        beta=gt_beta, Pall=Pall_exo, loss_weights=LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0)
+    )
+    for ts_idx, timestamp in enumerate(tqdm(frames_to_iter, desc="Logging frames", unit="frame")):
         rr.set_time(timeline="video_time", duration=1e-9 * timestamp)
         _bgr_list: list[UInt8[ndarray, "H W 3"]] = exo_video_readers[ts_idx]
 
-        # lets optimize the right hand xyz keypoints only
+        # 2D keypoints per-view for COCO-133 → slice hands (already in Mediapipe order)
+        uv_frame: Float[ndarray, "n_views 133 2"] = uv_exo_stack[ts_idx]
+        uv_left_mediapipe: Float[ndarray, "n_views 21 2"] = uv_frame[:, LEFT_HAND_IDX, :]
+        uv_right_mediapipe: Float[ndarray, "n_views 21 2"] = uv_frame[:, RIGHT_HAND_IDX, :]
 
-        pose: Float32[Array, "b n_poses=48"] = jnp.array(gt_so3[ts_idx : ts_idx + 1, 0], dtype=jnp.float32)
-        th_trans: Float32[Array, "b dim=3"] = jnp.array(gt_trans[ts_idx : ts_idx + 1, 0], dtype=jnp.float32)
-
-        th_betas: Float32[Array, "b n_betas=10"] = (
-            jnp.array(gt_beta[None, :], dtype=jnp.float32) if gt_beta is not None else jnp.zeros((1, 10))
+        # Optimize MANO parameters for both hands from 2D
+        optimization_results, state = optimizer_fn(
+            uv_left_pred_batch=uv_left_mediapipe,
+            uv_right_pred_batch=uv_right_mediapipe,
         )
-        mano_out: tuple[Float32[Array, "b n_verts=778 3"], Float32[Array, "b joints_and_tips=21 3"]] = mano_fwd_right(
-            th_pose_coeffs=pose, th_betas=th_betas, th_trans=th_trans
-        )
-        right_verts: Float32[Array, "b n_verts=778 3"] = mano_out[0] / 1000
-        right_mano_xyz: Float32[Array, "b n_kpts=21 3"] = mano_out[1] / 1000
 
-        rr.log(f"{parent_log_path}/optimized_right_kpts", rr.Points3D(right_mano_xyz))
+        # Extract results
+        xyz_mano_opt: Float[ndarray, "2 21 3"] = optimization_results.xyz_mano
+        from simplecv.print_utils import debug_numpy as lo
+
+        print(f"Optimized 3D keypoints (meters): {lo(xyz_mano_opt)}")
+        # so3_opt: Float[ndarray, "2 48"] = optimization_results.so3
+        # trans_opt: Float[ndarray, "2 3"] = optimization_results.trans
+
+        # Log 3D keypoints for left/right
+        rr.log(f"{parent_log_path}/optimized_left_kpts", rr.Points3D(xyz_mano_opt[0]))
+        rr.log(f"{parent_log_path}/optimized_right_kpts", rr.Points3D(xyz_mano_opt[1]))
+
+        # Also overlay 2D reprojections per exo cam for visual validation
+        for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
+            exo_cam_path: Path = parent_log_path / exo_cam.name
+            exo_pinhole_path: Path = exo_cam_path / "pinhole"
+
+            for side_idx, side_name in enumerate(["left", "right"]):
+                xyz_hom: Float[ndarray, "1 21 4"] = np.concatenate(
+                    [xyz_mano_opt[side_idx][None, ...], np.ones((1, 21, 1), dtype=xyz_mano_opt.dtype)], axis=-1
+                )
+                uv_proj: Float[ndarray, "1 n_views 21 2"] = proj_3d_vectorized(xyz_hom=xyz_hom, P=Pall_exo)
+                uv_proj_cam: Float[ndarray, "21 2"] = uv_proj[0, exo_cam_idx]
+                rr.log(f"{exo_pinhole_path}/optimized_{side_name}", rr.Points2D(uv_proj_cam))

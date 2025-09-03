@@ -1,6 +1,7 @@
 import enum
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, TypedDict
 
 import jax
@@ -11,12 +12,13 @@ from jax import jit
 from jaxopt import LevenbergMarquardt
 from jaxopt._src.levenberg_marquardt import LevenbergMarquardtState
 from jaxtyping import Array, Bool, Float
-from mano_utils import mp_to_mano
 from numpy import ndarray
 
+from simplecv.ops.mano.mano_jax import ManoSimpleLayerJAX
+
 type FwdKinematics = Callable[
-    [Float[Array, "b 48"], Float[Array, "b 1 3"], Float[Array, "1 1"]],
-    Float[Array, "b 21 3"],
+    [Float[Array, "b 48"], Float[Array, "b 10"], Float[Array, "b 3"]],
+    tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]],
 ]
 
 # The residual you’ll hand to jaxopt
@@ -85,8 +87,8 @@ class HandSide(enum.IntEnum):
 
 
 type FwdKinematics = Callable[
-    [Float[Array, "b 48"], Float[Array, "b 1 3"], Float[Array, "1 1"]],
-    Float[Array, "b 21 3"],
+    [Float[Array, "b 48"], Float[Array, "b 10"], Float[Array, "b 3"]],
+    tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]],
 ]
 
 # The residual you’ll hand to jaxopt
@@ -102,10 +104,7 @@ type ResidualFn = Callable[
 ]
 
 
-def make_mv_scaled_residual(
-    xyz_template_left: Float[Array, "21 3"],
-    xyz_template_right: Float[Array, "21 3"],
-) -> tuple[ResidualFn, FwdKinematics, FwdKinematics]:
+def make_mv_scaled_residual() -> tuple[ResidualFn, FwdKinematics, FwdKinematics]:
     """
     Returns a JIT-compiled residual function that can be dropped straight into
     `jaxopt.LevenbergMarquardt`.  No globals leak out – the MANO forward
@@ -122,8 +121,8 @@ def make_mv_scaled_residual(
     # ------------------------------------------------------------------
     # build per-hand forward kinematics (static because templates are constant)
     # ------------------------------------------------------------------
-    mano_fwd_left = jit(JointsOnly(template_joints=xyz_template_left[mp_to_mano, :]))
-    mano_fwd_right = jit(JointsOnly(template_joints=xyz_template_right[mp_to_mano, :]))
+    mano_fwd_left = jit(ManoSimpleLayerJAX(side="left", mano_root=Path("data/")))
+    mano_fwd_right = jit(ManoSimpleLayerJAX(side="right", mano_root=Path("data/")))
 
     # ------------------------------------------------------------------
     # residual – declared once, re-used frame-to-frame
@@ -131,6 +130,7 @@ def make_mv_scaled_residual(
     @jit
     def mv_2d_scaled_residual(
         param_to_optimize: Float[Array, "_"],
+        beta: Float[Array, "b 10"],
         Pall: Float[Array, "b 3 4"],
         uv_pred: Float[Array, "b n_views 21 2"],
         loss_weights: LossWeights,
@@ -155,31 +155,46 @@ def make_mv_scaled_residual(
         """
         batch_size: int = uv_pred.shape[0]
         # extract parameters that are being optimized and add batch dimension
-        scale_param: Float[Array, ""] = param_to_optimize[-1]
-        scale_param: Float[Array, "1 1"] = scale_param.reshape(1, 1)
-        param_to_optimize: Float[Array, "_"] = param_to_optimize[:-1]  #
         param_to_optimize: Float[Array, "1 51"] = param_to_optimize.reshape(batch_size, 51)
 
         so3: Float[Array, "b 48"] = param_to_optimize[:, 0:48]
-        trans: Float[Array, "b 1 3"] = param_to_optimize[:, npj.newaxis, 48:51]
+        trans: Float[Array, "b 3"] = param_to_optimize[:, 48:51]
 
         def left_func(
-            x: tuple[Float[Array, "b 48"], Float[Array, "b 1 3"], Float[Array, "1 1"]],
-        ) -> Float[Array, "b 21 3"]:
+            x: tuple[
+                Float[Array, "b 48"],  # so3 pose
+                Float[Array, "b 10"],  # beta/shape
+                Float[Array, "b 3"],  # translation
+            ],
+        ) -> tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]]:
             return mano_fwd_left(x[0], x[1], x[2])
 
         def right_func(
-            x: tuple[Float[Array, "b 48"], Float[Array, "b 1 3"], Float[Array, "1 1"]],
-        ) -> Float[Array, "b 21 3"]:
+            x: tuple[
+                Float[Array, "b 48"],  # so3 pose
+                Float[Array, "b 10"],  # beta/shape
+                Float[Array, "b 3"],  # translation
+            ],
+        ) -> tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]]:
             return mano_fwd_right(x[0], x[1], x[2])
 
-        xyz_mano: Float[Array, "b 21 3"] = jax.lax.cond(is_left, left_func, right_func, (so3, trans, scale_param))
-        xyz_mano_hom: Float[Array, "b 21 4"] = npj.concatenate([xyz_mano, npj.ones_like(xyz_mano)[..., 0:1]], axis=-1)
+        mano_output: tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]] = jax.lax.cond(
+            is_left, left_func, right_func, (so3, beta, trans)
+        )
+        verts: Float[Array, "b n_verts=778 3"] = mano_output[0]
+        xyz_mano: Float[Array, "b n_kpts=21 3"] = mano_output[1]
+        # ManoSimpleLayerJAX outputs joints in millimeters; convert to meters to
+        # match the camera extrinsics/intrinsics units used in Pall.
+        xyz_mano = xyz_mano / 1000.0
 
-        uv_mano: Float[Array, "b n_views 21 2"] = proj_3d_vectorized(xyz_hom=xyz_mano_hom, P=Pall)
+        xyz_mano_hom: Float[Array, "b n_kpts=21 4"] = npj.concatenate(
+            [xyz_mano, npj.ones_like(xyz_mano)[..., 0:1]], axis=-1
+        )
+
+        uv_mano: Float[Array, "b n_views n_kpts=21 2"] = proj_3d_vectorized(xyz_hom=xyz_mano_hom, P=Pall)
 
         # calculate residuals
-        res_2d: Float[Array, "b n_views 21 2"] = uv_mano - uv_pred
+        res_2d: Float[Array, "b n_views n_kpts=21 2"] = uv_mano - uv_pred
         res_2d = npj.nan_to_num(res_2d * loss_weights["keypoint_2d"], nan=0.0)
 
         # Return the flattened vector of valid, weighted residuals
@@ -188,15 +203,16 @@ def make_mv_scaled_residual(
     return mv_2d_scaled_residual, mano_fwd_left, mano_fwd_right
 
 
-class JointAndScaleOptimization:
+class ManoOptimization:
     def __init__(
         self,
-        xyz_template: Float[ndarray, "2 21 3"],
+        beta: Float[ndarray, "10"],
         Pall: Float[ndarray, "n_views 3 4"],
         loss_weights: LossWeights,
         num_iters: int = 30,
     ) -> None:
         """
+        beta - shape parameters for the entire sequence (for now we assume we have it)
         Pall - n, 3, 4 projection matrix
         loss_weights - dictionary containing how much value to give each portion
             of the cost function (2d, 3d, temporal)
@@ -209,6 +225,7 @@ class JointAndScaleOptimization:
         n_views: int = Pall.shape[0]
 
         self.num_iters: int = num_iters
+        self.beta: Float[Array, "1 10"] = npj.array(beta)[npj.newaxis, ...]
         # Projection Matrix (n, 3, 4) where n is the number of cameras
         self.Pall: Float[Array, "batch 3 4"] = npj.array(Pall)
 
@@ -221,16 +238,11 @@ class JointAndScaleOptimization:
         self.so3_right_prev: Float[Array, "1 48"] = npj.zeros((1, 48))
         self.trans_right_prev: Float[Array, "1 3"] = npj.zeros((1, 3))
 
-        # scale parameter is shared between left and right hand
-        self.scale_init: Float[Array, "1"] = npj.ones((1))  # noqa UP037
-
-        output_fns: tuple[ResidualFn, FwdKinematics, FwdKinematics] = make_mv_scaled_residual(
-            xyz_template_left=npj.array(xyz_template[0]), xyz_template_right=npj.array(xyz_template[1])
-        )
+        output_fns: tuple[ResidualFn, FwdKinematics, FwdKinematics] = make_mv_scaled_residual()
 
         residual_fn: ResidualFn = output_fns[0]
-        self.joint_fwd_left: FwdKinematics = output_fns[1]
-        self.joint_fwd_right: FwdKinematics = output_fns[2]
+        self.mano_fwd_left: FwdKinematics = output_fns[1]
+        self.mano_fwd_right: FwdKinematics = output_fns[2]
 
         # remove the need for two different optimizers, solvers ‘cholesky’, ‘inv’
         self.optimizer = LevenbergMarquardt(
@@ -239,11 +251,11 @@ class JointAndScaleOptimization:
         # add jit
         print("Tracing JIT, can take a while...")
         init_params: Float[Array, "1 51"] = npj.concatenate([self.so3_left_prev, self.trans_left_prev], axis=-1)
-        init_params = npj.concatenate([init_params.flatten(), self.scale_init], axis=0)
 
         uv_batch_init: Float[Array, "n_frames n_views 21 2"] = npj.zeros((1, n_views, 21, 2))
         _, _ = self.optimizer.run(
             init_params.flatten(),
+            beta=self.beta,
             Pall=self.Pall,
             uv_pred=uv_batch_init,
             loss_weights=loss_weights,
@@ -257,7 +269,6 @@ class JointAndScaleOptimization:
         self,
         uv_left_pred_batch: Float[ndarray, "n_views 21 2"],
         uv_right_pred_batch: Float[ndarray, "n_views 21 2"],
-        calibrate: bool = False,
     ) -> tuple[OptimizationResults, LevenbergMarquardtState]:
         """
         pose_predictions_dict
@@ -288,25 +299,20 @@ class JointAndScaleOptimization:
             trans_init: Float[Array, "1 3"] = trans_prev
 
             init_params: Float[Array, "1 51"] = npj.concatenate([so3_init, trans_init], axis=-1)
-            init_params: Float[Array, "_"] = npj.concatenate([init_params.flatten(), self.scale_init], axis=0)
 
             optimized_params, state = self.optimizer(
-                init_params,
+                init_params.flatten(),
+                beta=self.beta,
                 Pall=self.Pall,
                 uv_pred=uv_pred_batch,
                 loss_weights=self.loss_weights,
                 is_left=hand_side == "left",
             )
 
-            # if np.isnan(optimized_params).any():
-            #     continue
+            optimized_params: Float[Array, "b=1 51"] = optimized_params.reshape(1, 51)
 
-            optimized_scale: Float[Array, ""] = optimized_params[-1]
-            optimized_params: Float[Array, "_"] = optimized_params[:-1]
-            optimized_params: Float[Array, "1 51"] = optimized_params.reshape(1, 51)
-
-            so3: Float[Array, "1 48"] = optimized_params[:, 0:48]
-            trans: Float[Array, "1 3"] = optimized_params[:, 48:51]
+            so3: Float[Array, "b=1 48"] = optimized_params[:, 0:48]
+            trans: Float[Array, "b=1 3"] = optimized_params[:, 48:51]
 
             so3_optimized[0 if hand_side == "left" else 1] = np.array(so3[0])
             trans_optimized[0 if hand_side == "left" else 1] = np.array(trans[0])
@@ -317,14 +323,16 @@ class JointAndScaleOptimization:
                     self.so3_left_prev = so3
                     self.trans_left_prev = trans
 
-                    xyz_mano_left: Float[Array, "1 21 3"] = self.joint_fwd_left(so3, trans[:, npj.newaxis, :])
+                    xyz_mano_left_out = self.mano_fwd_left(so3, self.beta, trans)
+                    xyz_mano_left: Float[Array, "b=1 21 3"] = xyz_mano_left_out[1] / 1000.0
                     xyz_mano[0] = np.array(xyz_mano_left[0])
 
                 case "right":
                     self.so3_right_prev = so3
                     self.trans_right_prev = trans
 
-                    xyz_mano_right: Float[Array, "1 21 3"] = self.joint_fwd_right(so3, trans[:, npj.newaxis, :])
+                    xyz_mano_right_out = self.mano_fwd_right(so3, self.beta, trans)
+                    xyz_mano_right: Float[Array, "b=1 21 3"] = xyz_mano_right_out[1] / 1000.0
                     xyz_mano[1] = np.array(xyz_mano_right[0])
 
         optimization_results = OptimizationResults(
