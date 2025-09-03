@@ -9,15 +9,21 @@ from jaxtyping import Float32
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
+from serde import serde
 from serde.yaml import from_yaml
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.hocap_ego import ExoCameraIDs, HocapEgoSequence, HOCapExtrinsicsData
-from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exo.hocap_exo import HocapExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
+
+
+@serde
+class CalibratedMano:
+    betas: Float32[ndarray, "10"]
 
 
 @dataclass
@@ -102,7 +108,25 @@ class HocapSequence(BaseExoEgoSequence):
         )[..., 0:1]
         # create xyzc stack
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.concatenate([coco_xyz_stack, conf_stack], axis=-1)
-        return ExoEgoLabels(xyzc_stack=xyzc_stack)
+
+        # get mano parameters
+        mano_stack: ManoStack = self.load_mano_poses(self.config.root_directory, self.config.sequence_name)
+        return ExoEgoLabels(xyzc_stack=xyzc_stack, mano_stack=mano_stack)
+
+    def load_mano_poses(self, data_path: Path, sequence_name: str) -> ManoStack:
+        subject_mano_yaml: Path = data_path / "calibration" / "mano" / f"subject_{self.config.subject_id}.yaml"
+        assert subject_mano_yaml.exists(), f"Path {subject_mano_yaml} does not exist."
+
+        subject_mano: CalibratedMano = from_yaml(CalibratedMano, subject_mano_yaml.read_text())
+        poses_path: Path = data_path / f"subject_{self.config.subject_id}" / sequence_name
+        assert poses_path.exists(), f"Path {poses_path} does not exist."
+        mano_poses: Path = poses_path / "poses_m.npy"
+        # 0 for right hand, 1 for left hand
+        mano_poses: Float32[ndarray, "num_sides num_frames 51"] = np.load(mano_poses)
+        # permute to num_frames num_sides 51
+        mano_poses: Float32[ndarray, "num_frames num_sides 51"] = np.transpose(mano_poses, (1, 0, 2))
+
+        return ManoStack(betas=subject_mano.betas, poses=mano_poses)
 
     @classmethod
     def iter_episode_sequences(cls, cfg: HocapConfig) -> Generator["HocapSequence", None, None]:

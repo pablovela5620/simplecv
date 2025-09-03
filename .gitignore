@@ -166,3 +166,13 @@ cython_debug/
 *.egg-info
 data/*
 
+
+# START Ruler Generated Files
+*.bak
+.clinerules
+.clinerules.bak
+.vscode/mcp.json
+.vscode/mcp.json.bak
+AGENTS.md
+AGENTS.md.bak
+# END Ruler Generated Files

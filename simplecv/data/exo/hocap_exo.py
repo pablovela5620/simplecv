@@ -113,11 +113,6 @@ class HOCapIntrinsicsData:
     depth2color: Float32[ndarray, "..."] | None = None
 
 
-@serde
-class CalibratedMano:
-    betas: Float32[ndarray, "10"]
-
-
 def quat_to_mat(quat: Float[ndarray, "batch 7"]) -> Float[ndarray, "batch 4 4"]:
     """Convert quaternion to rotation matrix."""
     # Placeholder for quaternion to rotation matrix conversion

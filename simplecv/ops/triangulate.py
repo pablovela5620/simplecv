@@ -58,7 +58,7 @@ def batch_triangulate(
     num_joints: int = keypoints_2d.shape[1]
 
     # Count views where each joint is visible
-    visibility_count: Int[ndarray, "nJoints"] = (keypoints_2d[:, :, -1] > 0).sum(axis=0)  # noqa: UP037
+    visibility_count: Int[ndarray, "nJoints"] = (keypoints_2d[:, :, -1] > 0).sum(axis=0)
     valid_joints = np.where(visibility_count >= min_views)[0]
 
     # Filter keypoints by valid joints
