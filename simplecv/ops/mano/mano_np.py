@@ -11,7 +11,7 @@ from jaxtyping import Float, Float32, Float64, Int64
 from numpy import ndarray
 from serde.pickle import from_pickle
 
-from simplecv.ops.mano_utils import MANOData
+from simplecv.ops.mano.mano_utils import MANOData
 
 
 def quat2mat(quat: Float[ndarray, "_ 4"]) -> Float[ndarray, "_ 3 3"]:

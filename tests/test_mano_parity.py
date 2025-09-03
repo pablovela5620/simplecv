@@ -12,7 +12,7 @@ from jaxtyping import Float32
 from numpy import ndarray
 from torch import Tensor
 
-from simplecv.ops import mano_jax, mano_np, mano_torch
+from simplecv.ops.mano import mano_jax, mano_np, mano_torch
 
 # ----------------------
 # Small functional parity
@@ -200,7 +200,7 @@ def test_mano_np_matches_torch_on_hocap_sample() -> None:
 
         # JAX layer
         try:
-            from simplecv.ops.mano_jax import MANOLayerJAX
+            from simplecv.ops.mano.mano_jax import MANOLayerJAX
         except Exception:
             pytest.skip("JAX MANO layer not available; skipping JAX parity")
         layer_j = MANOLayerJAX(side=side, betas=betas, mano_root_dir=mano_root)

@@ -27,3 +27,8 @@ class MANOData:
     def __post_init__(self):
         # Ensure that the data is in the expected format
         self.betas: Float64[ndarray, "10"] = np.zeros(self.shapedirs.shape[-1])
+
+
+# convert joints between mediapipe and mano format
+mp_to_mano: list[int] = [0, 5, 6, 7, 9, 10, 11, 17, 18, 19, 13, 14, 15, 1, 2, 3, 8, 12, 20, 16, 4]
+mano_to_mp: list[int] = [0, 13, 14, 15, 20, 1, 2, 3, 16, 4, 5, 6, 17, 10, 11, 12, 19, 7, 8, 9, 18]

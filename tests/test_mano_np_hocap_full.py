@@ -6,8 +6,8 @@ from beartype.door import die_if_unbearable
 from jaxtyping import Float32
 from numpy import ndarray
 
-from simplecv.ops import mano_np, mano_torch
-from simplecv.ops.mano_jax import MANOLayerJAX
+from simplecv.ops.mano import mano_np, mano_torch
+from simplecv.ops.mano.mano_jax import MANOLayerJAX
 
 ROOT = Path("/mnt/8tb/data/hocap/datasets")
 SUBJECT = "8"

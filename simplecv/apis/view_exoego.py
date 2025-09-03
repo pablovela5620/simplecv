@@ -256,7 +256,7 @@ def log_exoego_batch(
 
         mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
         if mano_stack is not None:
-            from simplecv.ops.mano_np import MANOLayerNP
+            from simplecv.ops.mano.mano_np import MANOLayerNP
 
             mano_layers = [
                 MANOLayerNP(side="right", betas=mano_stack.betas),

@@ -12,7 +12,7 @@ from serde.pickle import from_pickle
 from torch import Tensor
 from torch.nn import Module
 
-from simplecv.ops.mano_utils import MANOData
+from simplecv.ops.mano.mano_utils import MANOData
 
 
 def quat2mat(quat: Float[Tensor, "_ 4"]) -> Float[Tensor, "_ 3 3"]:
