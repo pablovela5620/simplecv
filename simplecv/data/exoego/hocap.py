@@ -5,6 +5,7 @@ from typing import Literal, get_args
 
 import numpy as np
 import rerun as rr
+from einops import rearrange
 from jaxtyping import Float32
 from natsort import natsorted
 from numpy import ndarray
@@ -120,13 +121,17 @@ class HocapSequence(BaseExoEgoSequence):
         subject_mano: CalibratedMano = from_yaml(CalibratedMano, subject_mano_yaml.read_text())
         poses_path: Path = data_path / f"subject_{self.config.subject_id}" / sequence_name
         assert poses_path.exists(), f"Path {poses_path} does not exist."
-        mano_poses: Path = poses_path / "poses_m.npy"
+        mano_poses_path: Path = poses_path / "poses_m.npy"
         # 0 for right hand, 1 for left hand
-        mano_poses: Float32[ndarray, "num_sides num_frames 51"] = np.load(mano_poses)
+        poses_raw: Float32[ndarray, "num_sides num_frames 51"] = np.load(mano_poses_path)
         # permute to num_frames num_sides 51
-        mano_poses: Float32[ndarray, "num_frames num_sides 51"] = np.transpose(mano_poses, (1, 0, 2))
+        poses_nfhs: Float32[ndarray, "num_frames num_sides 51"] = rearrange(
+            poses_raw, "num_sides num_frames pose -> num_frames num_sides pose"
+        )
+        so3: Float32[ndarray, "num_frames num_sides 48"] = poses_nfhs[..., :48]
+        trans: Float32[ndarray, "num_frames num_sides 3"] = poses_nfhs[..., 48:51]
 
-        return ManoStack(betas=subject_mano.betas, poses=mano_poses)
+        return ManoStack(betas=subject_mano.betas, so3=so3, trans=trans)
 
     @classmethod
     def iter_episode_sequences(cls, cfg: HocapConfig) -> Generator["HocapSequence", None, None]:

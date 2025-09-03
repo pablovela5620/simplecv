@@ -128,8 +128,11 @@ def main(cfg: ManoOptimBenchConfig):
         gt_beta: Float[ndarray, "10"] | None = (
             exoego_labels.mano_stack.betas if exoego_labels.mano_stack is not None else None
         )
-        gt_poses: Float32[ndarray, "n_frames n_hands=2 51"] | None = (
-            exoego_labels.mano_stack.poses if exoego_labels.mano_stack is not None else None
+        gt_so3: Float32[ndarray, "n_frames n_hands=2 48"] | None = (
+            exoego_labels.mano_stack.so3 if exoego_labels.mano_stack is not None else None
+        )
+        gt_trans: Float32[ndarray, "n_frames n_hands=2 3"] | None = (
+            exoego_labels.mano_stack.trans if exoego_labels.mano_stack is not None else None
         )
 
     mano_fwd_right = jit(ManoSimpleLayerJAX(mano_root=Path("data/"), side="right"))
@@ -139,8 +142,8 @@ def main(cfg: ManoOptimBenchConfig):
 
         # lets optimize the right hand xyz keypoints only
 
-        pose: Float32[Array, "b n_poses=48"] = jnp.array(gt_poses[ts_idx : ts_idx + 1, 0, 0:48], dtype=jnp.float32)
-        th_trans: Float32[Array, "b dim=3"] = jnp.array(gt_poses[ts_idx : ts_idx + 1, 0, 48:51], dtype=jnp.float32)
+        pose: Float32[Array, "b n_poses=48"] = jnp.array(gt_so3[ts_idx : ts_idx + 1, 0], dtype=jnp.float32)
+        th_trans: Float32[Array, "b dim=3"] = jnp.array(gt_trans[ts_idx : ts_idx + 1, 0], dtype=jnp.float32)
 
         th_betas: Float32[Array, "b n_betas=10"] = (
             jnp.array(gt_beta[None, :], dtype=jnp.float32) if gt_beta is not None else jnp.zeros((1, 10))

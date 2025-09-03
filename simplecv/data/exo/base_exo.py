@@ -17,10 +17,20 @@ CamNameType = TypeVar("CamNameType", bound=str)
 
 @dataclass
 class ManoStack:
-    # https://github.com/rerun-io/pi0-lerobot/blob/a2f7f415f48379349bb05c88893c99f07c5209e3/src/pi0_lerobot/apis/visualize_exo_ego.py
-    betas: Float32[ndarray, "10"]  # only a single set for all frames and hands
-    # 0 for right hand, 1 for left hand, p 0:48, t 48:51
-    poses: Float32[ndarray, "num_frames 2 51"]  # 2 hands 51 angles (3*17)
+    """Per-sequence MANO parameters grouped for both hands.
+
+    - betas: One shape vector shared across frames and hands.
+    - so3: Axis-angle pose coefficients (48 = 16 joints x 3) per frame/hand.
+    - trans: Global translation per frame/hand.
+
+    Notes
+    - Hand index convention: 0 = right, 1 = left.
+    - This splits the previous 51-vector (0:48 so3, 48:51 trans) into explicit fields.
+    """
+
+    betas: Float32[ndarray, "10"]
+    so3: Float32[ndarray, "n_frames n_hands=2 48"]
+    trans: Float32[ndarray, "n_frames n_hands=2 3"]
 
 
 @dataclass
@@ -34,8 +44,8 @@ class ExoData:
 
 @dataclass
 class ExoBatchData:
-    uv_stack_dict: dict[str, Float32[ndarray, "num_frames 2 21 2"]]
-    xyz_stack: Float32[ndarray, "num_frames 2 21 3"]
+    uv_stack_dict: dict[str, Float32[ndarray, "n_frames 2 21 2"]]
+    xyz_stack: Float32[ndarray, "n_frames 2 21 3"]
     mano_stack: ManoStack | None = None
 
 

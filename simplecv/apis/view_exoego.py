@@ -262,21 +262,23 @@ def log_exoego_batch(
                 MANOLayerNP(side="right", betas=mano_stack.betas),
                 MANOLayerNP(side="left", betas=mano_stack.betas),
             ]
-            mano_poses: Float32[ndarray, "n_frames n_hands=2 51"] = mano_stack.poses
-            mano_poses: Float32[ndarray, "n_hands=2 n_frames 51"] = rearrange(
-                mano_poses, "n_frames n_hands pose -> n_hands n_frames pose"
+            mano_so3: Float32[ndarray, "n_frames n_hands=2 48"] = mano_stack.so3
+            mano_trans: Float32[ndarray, "n_frames n_hands=2 3"] = mano_stack.trans
+            so3_per_hand: Float32[ndarray, "n_hands=2 n_frames 48"] = rearrange(
+                mano_so3, "n_frames n_hands pose -> n_hands n_frames pose"
+            )
+            trans_per_hand: Float32[ndarray, "n_hands=2 n_frames 3"] = rearrange(
+                mano_trans, "n_frames n_hands dim -> n_hands n_frames dim"
             )
             # Prepare a single COCO-133 buffer (both hands combined)
-            n_frames_mano_total: int = min(mano_poses.shape[1], len(shortest_timestamp))
+            n_frames_mano_total: int = min(so3_per_hand.shape[1], len(shortest_timestamp))
             xyz_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133 3"] = np.full(
                 (n_frames_mano_total, 133, 3), np.nan, dtype=np.float32
             )
             conf_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133"] = np.zeros(
                 (n_frames_mano_total, 133), dtype=np.float32
             )
-            for mano_pose, mano_layer in zip(mano_poses, mano_layers, strict=True):
-                poses: Float32[ndarray, "n_frames 48"] = mano_pose[:, :48]
-                translations: Float32[ndarray, "n_frames 3"] = mano_pose[:, 48:51]
+            for poses, translations, mano_layer in zip(so3_per_hand, trans_per_hand, mano_layers, strict=True):
                 mano_outputs: tuple[
                     Float32[ndarray, "n_frames n_verts=778 3"],
                     Float32[ndarray, "n_frames n_joints=21 3"],
