@@ -11,7 +11,7 @@ from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 
 from simplecv.camera_parameters import PinholeParameters
-from simplecv.configs.exoego_dataset_configs import AnnotatedEgoDatasetUnion
+from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
@@ -37,7 +37,7 @@ np.set_printoptions(suppress=True)
 @dataclass
 class VisualizeConfig:
     rr_config: RerunTyroConfig
-    dataset: AnnotatedEgoDatasetUnion
+    dataset: AnnotatedExoEgoDatasetUnion
     max_exo_videos_to_log: Literal[4, 8] = 8
     log_exo: bool = True
     log_ego: bool = True

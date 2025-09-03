@@ -176,3 +176,5 @@ data/*
 AGENTS.md
 AGENTS.md.bak
 # END Ruler Generated Files
+*MANO_*.pkl
+repomix-output.xml

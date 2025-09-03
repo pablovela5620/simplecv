@@ -23,4 +23,4 @@ if TYPE_CHECKING:  # for IDEs / mypy
 else:
     EgoDatasetUnion = tyro.extras.subcommand_type_from_defaults(dataset_defaults, prefix_names=False)
 
-AnnotatedEgoDatasetUnion = tyro.conf.OmitSubcommandPrefixes[EgoDatasetUnion]
+AnnotatedExoEgoDatasetUnion = tyro.conf.OmitSubcommandPrefixes[EgoDatasetUnion]

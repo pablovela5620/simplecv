@@ -18,7 +18,6 @@ from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS, LEFT_HAND_IDX, RIGHT_HAND_IDX
-from simplecv.ops.mano.mano_jax import ManoSimpleLayerJAX
 from simplecv.ops.mano.optim_jax_multi import LossWeights, ManoOptimization, OptimizationResults
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_log_utils import (
@@ -135,6 +134,12 @@ def main(cfg: ManoOptimBenchConfig):
         gt_beta: Float[ndarray, "10"] | None = (
             exoego_labels.mano_stack.betas if exoego_labels.mano_stack is not None else None
         )
+        # gt_so3: Float32[ndarray, "n_frames n_hands=2 48"] | None = (
+        #     exoego_labels.mano_stack.so3 if exoego_labels.mano_stack is not None else None
+        # )
+        # gt_trans: Float32[ndarray, "n_frames n_hands=2 3"] | None = (
+        #     exoego_labels.mano_stack.trans if exoego_labels.mano_stack is not None else None
+        # )
 
     # Optimizer over MANO pose (so3) + translation using 2D keypoints across views
     optimizer_fn = ManoOptimization(
@@ -159,12 +164,8 @@ def main(cfg: ManoOptimBenchConfig):
 
         # Extract results
         xyz_mano_opt: Float[ndarray, "2 21 3"] = optimization_results.xyz_mano
-        so3_opt: Float[ndarray, "2 48"] = optimization_results.so3
-        trans_opt: Float[ndarray, "2 3"] = optimization_results.trans
-        from simplecv.print_utils import debug_numpy as lo
-
-        print("Left 3D Keypoints", lo(xyz_mano_opt[0]))
-        print("Right 3D Keypoints", lo(xyz_mano_opt[1]))
+        # so3_opt: Float[ndarray, "2 48"] = optimization_results.so3
+        # trans_opt: Float[ndarray, "2 3"] = optimization_results.trans
 
         # Log 3D keypoints for left/right
         rr.log(f"{parent_log_path}/optimized_left_kpts", rr.Points3D(xyz_mano_opt[0]))
