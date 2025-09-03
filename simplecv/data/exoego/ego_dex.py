@@ -66,7 +66,7 @@ class EgoDexSequence(BaseExoEgoSequence):
                 confidences = h5py_file["confidences"]
                 conf_list: list[Float32[ndarray, "n_frames 3"]] = []
                 for joint_name in AVP_ID2NAME.values():
-                    conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]  # noqa: UP037
+                    conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]
                     conf_list.append(conf)
 
                 conf_stack: Float32[ndarray, "n_frames 68"] = np.stack(conf_list, axis=1)

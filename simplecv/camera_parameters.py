@@ -67,7 +67,7 @@ class Extrinsics:
         self, T: Float[ndarray, "4 4"]
     ) -> tuple[Float[ndarray, "3 3"], Float[ndarray, "3"]]:
         R: Float[ndarray, "3 3"] = T[:3, :3]
-        t: Float[ndarray, "3 "] = T[:3, 3]  # noqa: UP037
+        t: Float[ndarray, "3 "] = T[:3, 3]
         return R, t
 
 
@@ -240,12 +240,12 @@ def arctan_projection(
         A numpy array of shape (num_points, 2) representing the 2D image coordinates of the projected points
     """
     # Compute the radial distance of each 3D point from the camera center
-    r: Float[ndarray, "num_points"] = np.sqrt(  # noqa: UP037
+    r: Float[ndarray, "num_points"] = np.sqrt(
         np.sum(np.square(points_3d[:, :2]), axis=-1)
     )
     eps: float = 2.0**-128
     # Compute the angles of the 2D image coordinates with respect to the camera center using arctan2
-    s: Float[ndarray, "num_points"] = np.arctan2(r, points_3d[:, 2]) / np.maximum(  # noqa: UP037
+    s: Float[ndarray, "num_points"] = np.arctan2(r, points_3d[:, 2]) / np.maximum(
         r, eps
     )
     # Scale the angles by the radial distance to obtain the final 2D image coordinates in camera coordinates
@@ -331,14 +331,14 @@ def fisheye_projection(
     points_2d_distorted[:, 1] += camera.intrinsics.cy
 
     # make sure points are within image bounds
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(  # noqa: UP037
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(
         points_2d_distorted[:, 0] >= camera.intrinsics.width,
         points_2d_distorted[:, 1] >= camera.intrinsics.height,
     )
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 0] < 0)  # noqa: UP037
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 1] < 0)  # noqa: UP037
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 0] < 0)
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 1] < 0)
     # make sure points are in front of camera
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_3d_cam[:, 2] < 0)  # noqa: UP037
+    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_3d_cam[:, 2] < 0)
 
     # if out of bounds, set to -1
     points_2d_distorted[out_of_bounds, :] = np.nan

@@ -26,4 +26,4 @@ class MANOData:
 
     def __post_init__(self):
         # Ensure that the data is in the expected format
-        self.betas: Float64[ndarray, "10"] = np.zeros(self.shapedirs.shape[-1])  # noqa: UP037
+        self.betas: Float64[ndarray, "10"] = np.zeros(self.shapedirs.shape[-1])

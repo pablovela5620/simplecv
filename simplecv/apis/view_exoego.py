@@ -584,7 +584,7 @@ def visualize_exo_ego(config: VisualizeConfig):
 
     if ego_sequence is not None and ego_timestamps:
         # Find the timestamp list with the maximum length.
-        shortest_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamps, key=len)  # noqa: UP037
+        shortest_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamps, key=len)
         assert len(shortest_timestamp) == len(ego_sequence), (
             f"Length of timestamps {len(shortest_timestamp)} and sequence {len(ego_sequence)} do not match"
         )

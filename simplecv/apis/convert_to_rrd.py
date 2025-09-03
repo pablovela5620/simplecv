@@ -102,7 +102,7 @@ def convert_ego(config: ConvertEgoConfig) -> None:
             rr.log("/", rr.ViewCoordinates.RUB, static=True)
 
             new_video_path: Path = reencode_video_optimal(input_video_path=ego_sequence.video_path)
-            frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(  # noqa: UP037
+            frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
                 new_video_path, video_log_path=video_log_path, timeline=timeline
             )
             rr.log(

@@ -290,7 +290,7 @@ class MANOLayerNP:
         assert mano_root_dir.exists() and mano_root_dir.is_dir(), f"Invalid MANO root {mano_root_dir}"
 
         self._side: Literal["left", "right"] = side
-        self._betas: Float32[np.ndarray, "10"] = betas  # noqa: UP037
+        self._betas: Float32[np.ndarray, "10"] = betas
 
         self._mano_layer = ManoSimpleLayerNP(
             side=side,

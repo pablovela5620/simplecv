@@ -493,7 +493,7 @@ class MANOLayerTorch(Module):
         assert mano_root_dir.is_dir(), f"{mano_root_dir} is not a directory."
 
         self._side: Literal["left", "right"] = side
-        self._betas: Float32[np.ndarray, "10"] = betas  # noqa: UP037
+        self._betas: Float32[np.ndarray, "10"] = betas
 
         self._mano_layer = ManoSimpleLayer(
             side=side,

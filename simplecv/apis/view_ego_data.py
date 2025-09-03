@@ -121,7 +121,7 @@ def parse_hdf5_file(hdf5_path: Path, video_path: Path) -> EgoDataSequence:
         confidences = h5py_file["confidences"]
         conf_list: list[Float32[ndarray, "n_frames 3"]] = []
         for joint_name in AVP_ID2NAME.values():
-            conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]  # noqa: UP037
+            conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]
             conf_list.append(conf)
 
         conf_stack: Float32[ndarray, "n_frames 68"] = np.stack(conf_list, axis=1)
@@ -214,7 +214,7 @@ def view_ego(config: ViewEgoConfig) -> None:
 
     rr.send_blueprint(blueprint=blueprint)
     new_video_path: Path = reencode_video_optimal(input_video_path=ego_sequence.video_path)
-    frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(  # noqa: UP037
+    frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
         new_video_path, video_log_path=video_log_path, timeline=timeline
     )
 
