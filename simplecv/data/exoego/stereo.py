@@ -6,7 +6,9 @@ import rerun as rr
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
+from simplecv.data.ego.stereo_ego import StereoEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.data.exo.stereo_exo import StereoExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 
@@ -25,14 +27,22 @@ class StereoSequence(BaseExoEgoSequence):
         return None
 
     def _build_ego(self) -> BaseEgoSequence | None:
-        return None
+        return StereoEgoSequence(cfg=self.config)
 
     def _build_exo(self) -> BaseExoSequence | None:
-        return None
+        return StereoExoSequence(cfg=self.config)
 
     def load_labels(self) -> ExoEgoLabels | None:
-        """Load labels for the sequence, if applicable."""
-        return None
+        """No labels available; return an empty COCO-133 buffer to satisfy pipelines."""
+        import numpy as np
+        from jaxtyping import Float32
+        from numpy import ndarray
+
+        # Provide a single empty frame to satisfy downstream batching without real labels
+        xyz = np.full((1, 133, 3), np.nan, dtype=np.float32)
+        conf = np.zeros((1, 133, 1), dtype=np.float32)
+        xyzc_stack: Float32[ndarray, "1 133 4"] = np.concatenate([xyz, conf], axis=-1)
+        return ExoEgoLabels(xyzc_stack=xyzc_stack)
 
     @classmethod
     def iter_episode_sequences(cls, cfg: StereoConfig) -> Generator["StereoSequence", None, None]:
