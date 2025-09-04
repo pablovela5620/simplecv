@@ -16,23 +16,6 @@ from numpy import ndarray
 
 from simplecv.ops.mano.mano_jax import ManoSimpleLayerJAX
 
-type FwdKinematics = Callable[
-    [Float[Array, "b 48"], Float[Array, "b 10"], Float[Array, "b 3"]],
-    tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]],
-]
-
-# The residual you’ll hand to jaxopt
-type ResidualFn = Callable[
-    [
-        Float[Array, "_"],  # flattened params + scale
-        Float[Array, "b 3 4"],  # Pall
-        Float[Array, "b n_views 21 2"],  # uv_pred
-        "LossWeights",
-        bool | Bool[Array, ""],
-    ],
-    Float[Array, "_"],  # flat residual vector
-]
-
 
 @dataclass
 class OptimizationResults:
@@ -73,8 +56,11 @@ def proj_3d_vectorized(
     # [1 n_views, 3, 4] @ [n_frames, 1, 4, 21] -> [n_frames, n_views, 3, 21]
     uv_hom: Float[Array, "n_frames n_views 3 21"] = P @ xyz_hom
     uv_hom = rearrange(uv_hom, "n_frames n_views xyz_hom n_kpts -> n_frames n_views n_kpts xyz_hom")
-    # convert back from homogeneous coordinates
-    uv: Float[Array, "n_frames n_views 21 2"] = uv_hom[..., :2] / uv_hom[..., 2:]
+    # convert back from homogeneous coordinates with robust denom
+    denom = uv_hom[..., 2:]
+    eps = npj.array(1e-8, dtype=denom.dtype)
+    denom_safe = npj.where(npj.abs(denom) < eps, npj.sign(denom) * eps, denom)
+    uv: Float[Array, "n_frames n_views 21 2"] = uv_hom[..., :2] / denom_safe
 
     return uv
 
@@ -233,10 +219,10 @@ class ManoOptimization:
         # use previous values to initialize, there should only ever be 1
         # hand model per frame
         self.so3_left_prev: Float[Array, "1 48"] = npj.zeros((1, 48))
-        self.trans_left_prev: Float[Array, "1 3"] = npj.zeros((1, 3))
+        self.trans_left_prev: Float[Array, "1 3"] = npj.array([[0.0, 0.0, 0.6]])
 
         self.so3_right_prev: Float[Array, "1 48"] = npj.zeros((1, 48))
-        self.trans_right_prev: Float[Array, "1 3"] = npj.zeros((1, 3))
+        self.trans_right_prev: Float[Array, "1 3"] = npj.array([[0.0, 0.0, 0.6]])
 
         output_fns: tuple[ResidualFn, FwdKinematics, FwdKinematics] = make_mv_scaled_residual()
 
@@ -313,6 +299,9 @@ class ManoOptimization:
 
             so3: Float[Array, "b=1 48"] = optimized_params[:, 0:48]
             trans: Float[Array, "b=1 3"] = optimized_params[:, 48:51]
+            # Sanitize potential NaNs/Infs
+            so3 = npj.nan_to_num(so3, nan=0.0, posinf=0.0, neginf=0.0)
+            trans = npj.nan_to_num(trans, nan=0.0, posinf=0.0, neginf=0.0)
 
             so3_optimized[0 if hand_side == "left" else 1] = np.array(so3[0])
             trans_optimized[0 if hand_side == "left" else 1] = np.array(trans[0])
@@ -320,20 +309,29 @@ class ManoOptimization:
             # pass optimized values to mano to extract 3d joints
             match hand_side:
                 case "left":
-                    self.so3_left_prev = so3
-                    self.trans_left_prev = trans
-
                     xyz_mano_left_out = self.mano_fwd_left(so3, self.beta, trans)
                     xyz_mano_left: Float[Array, "b=1 21 3"] = xyz_mano_left_out[1] / 1000.0
-                    xyz_mano[0] = np.array(xyz_mano_left[0])
+                    if np.isfinite(np.array(xyz_mano_left)).all():
+                        self.so3_left_prev = so3
+                        self.trans_left_prev = trans
+                        xyz_mano[0] = np.array(xyz_mano_left[0])
+                    else:
+                        # fallback to previous finite
+                        xyz_prev = self.mano_fwd_left(self.so3_left_prev, self.beta, self.trans_left_prev)[1] / 1000.0
+                        xyz_mano[0] = np.array(xyz_prev[0])
 
                 case "right":
-                    self.so3_right_prev = so3
-                    self.trans_right_prev = trans
-
                     xyz_mano_right_out = self.mano_fwd_right(so3, self.beta, trans)
                     xyz_mano_right: Float[Array, "b=1 21 3"] = xyz_mano_right_out[1] / 1000.0
-                    xyz_mano[1] = np.array(xyz_mano_right[0])
+                    if np.isfinite(np.array(xyz_mano_right)).all():
+                        self.so3_right_prev = so3
+                        self.trans_right_prev = trans
+                        xyz_mano[1] = np.array(xyz_mano_right[0])
+                    else:
+                        xyz_prev = (
+                            self.mano_fwd_right(self.so3_right_prev, self.beta, self.trans_right_prev)[1] / 1000.0
+                        )
+                        xyz_mano[1] = np.array(xyz_prev[0])
 
         optimization_results = OptimizationResults(
             xyz_mano=xyz_mano,

@@ -9,6 +9,7 @@ from simplecv.data.exoego.base_exoego import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.ego_dex import EgoDexConfig
 from simplecv.data.exoego.hocap import HocapConfig
 from simplecv.data.exoego.multicam import MulticamConfig
+from simplecv.data.exoego.stereo import StereoConfig
 
 # ───────────────────── registry → union ─────────────────── #
 dataset_defaults = {
@@ -16,6 +17,7 @@ dataset_defaults = {
     "hocap": HocapConfig(),
     "ego-dex": EgoDexConfig(),
     "multicam": MulticamConfig(),
+    "stereo": StereoConfig(),
 }
 
 if TYPE_CHECKING:  # for IDEs / mypy
