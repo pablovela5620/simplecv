@@ -6,10 +6,8 @@ from typing import Literal
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jax import jit
-from jax import numpy as jnp
 from jaxopt._src.levenberg_marquardt import LevenbergMarquardtState
-from jaxtyping import Array, Float, Float32, Int, UInt8
+from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 from tqdm import tqdm
 
@@ -31,7 +29,13 @@ from simplecv.data.skeleton.coco_133 import (
     RIGHT_HAND_IDX,
 )
 from simplecv.ops.mano.mano_np import ManoSimpleLayerNP
-from simplecv.ops.mano.optim_jax_single_shape import OptimInput, OptimResult, PoseOptimConfig, SingleHandOptim
+from simplecv.ops.mano.optim_jax_single import OptimInput, OptimResult, PoseOptimConfig, SingleHandOptim
+from simplecv.ops.mano.optim_jax_single_shape import (
+    OptimShapeInput,
+    OptimShapeResult,
+    PoseShapeOptimConfig,
+    SingleHandShapeOptim,
+)
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.print_utils import debug_numpy as lo
 from simplecv.rerun_log_utils import (
@@ -137,6 +141,7 @@ def main(cfg: ManoOptimBenchConfig):
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     exo_cam_param_list: list[PinholeParameters] = exo_sequence.exo_cam_list
     chosen_idx: tuple = (0, 5)
+    gt_so3_seq: Float[ndarray, "n_frames 48"] | None = None
     if exoego_labels is not None:
         xyzc_stack: Float[ndarray, "n_frames n_kpts=133 4"] = exoego_labels.xyzc_stack
         xyz_stack: Float[ndarray, "n_frames n_kpts=133 3"] = xyzc_stack[:, :, :3]
@@ -146,7 +151,7 @@ def main(cfg: ManoOptimBenchConfig):
         Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
             [pinhole.projection_matrix for pinhole in exo_cam_param_list]
         )
-        Pall_exo = Pall_exo[list(chosen_idx), :, :]
+        # Pall_exo = Pall_exo[list(chosen_idx), :, :]
         uv_exo_stack: Float[ndarray, "n_frames n_views n_kpts=133 2"] = proj_3d_vectorized(
             xyz_hom=xyz_hom_stack, P=Pall_exo
         )
@@ -156,21 +161,53 @@ def main(cfg: ManoOptimBenchConfig):
         )
         print(uv_exo_stack.shape)
         # beta values for mano
-        gt_beta: Float[ndarray, "10"] | None = (
-            exoego_labels.mano_stack.betas if exoego_labels.mano_stack is not None else None
-        )
+        # gt_beta: Float[ndarray, "10"] | None = (
+        #     exoego_labels.mano_stack.betas if exoego_labels.mano_stack is not None else None
+        # )
+        # Also capture GT pose for the side we optimize against (0=right,1=left)
+        if exoego_labels.mano_stack is not None:
+            side_idx_pose: int = 1 if cfg.single_hand_side == "left" else 0
+            gt_so3_seq: Float32[ndarray, "n_frames 48"] = exoego_labels.mano_stack.so3[:, side_idx_pose, :]
 
+    ###################################
+    # Step 1. Optimize for Mano Shape #
+    ###################################
+    hand_side: Literal["left", "right"] = "left"
+    n_frames_optim: int = 10
+    mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side=hand_side, mano_root=Path("data/"))
+
+    optim_shape_cfg = PoseShapeOptimConfig(Pall=Pall_exo, hand_side=hand_side, n_frames_optim=n_frames_optim)
+    optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
+    # take the first 30 frames and feed them into the optimizer
+    optim_shape_input: OptimShapeInput = OptimShapeInput(
+        uv_pred=uv_exo_stack[:n_frames_optim],
+        beta_init=np.zeros((10,), dtype=np.float32),
+        so3_init=np.zeros((n_frames_optim, 48), dtype=np.float32),
+        trans_init=np.array([[0.0, 0.0, 0.6]]).repeat(n_frames_optim, axis=0).astype(np.float32),
+    )
+    optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
+    optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
+    # from icecream import ic
+
+    # ic(optim_shape_result.beta_optim - gt_beta)
+    # ic(optim_shape_result.beta_optim, gt_beta)
+    ######################################################################
+    # Step 2. With Found Mano Shape, Optimize for pose across all frames #
+    ######################################################################
     # Optimizers over MANO pose (so3) + translation
     optim_cfg = PoseOptimConfig(
-        beta=gt_beta,
+        beta=optim_shape_result.beta_optim,
         Pall=Pall_exo,
-        hand_side="left",
+        hand_side=hand_side,
     )
-    mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side=optim_cfg.hand_side, mano_root=Path("data/"))
+
     optimizer = SingleHandOptim(config=optim_cfg)
+    # so3_init: Float[ndarray, "1 48"] = gt_so3_seq[0:1, ...] if gt_so3_seq is not None else np.zeros((1, 48))
     so3_init: Float[ndarray, "1 48"] = np.zeros((1, 48))
     # start with a reasonable depth
     trans_init: Float[ndarray, "1 3"] = np.array([[0.0, 0.0, 0.6]])
+    # Track pose errors if GT is available
+    pose_mse_list: list[float] = []
     for ts_idx, timestamp in enumerate(tqdm(frames_to_iter, desc="Optimizing Frames", unit="frame")):
         rr.set_time(timeline="video_time", duration=1e-9 * timestamp)
         _bgr_list: list[UInt8[ndarray, "H W 3"]] = exo_video_readers[ts_idx]
@@ -226,3 +263,15 @@ def main(cfg: ManoOptimBenchConfig):
                 albedo_factor=mesh_color_rgba,
             ),
         )
+
+        # ----------------------------------------------
+        # Pose GT comparison (exclude global rotation 0:3)
+        # ----------------------------------------------
+        if gt_so3_seq is not None:
+            gt_pose_frame: Float[ndarray, "48"] = gt_so3_seq[ts_idx]
+            diff: Float[ndarray, "45"] = optim_result.so3_optim[0, 3:48] - gt_pose_frame[3:48]
+            pose_mse = float(np.mean(diff**2))
+            pose_mse_list.append(pose_mse)
+
+    if pose_mse_list:
+        print(f"Average pose MSE over {len(pose_mse_list)} frames: {np.mean(pose_mse_list):.6f}")

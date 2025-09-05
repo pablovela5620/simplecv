@@ -1,11 +1,9 @@
-import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal, TypedDict
 
-import jax
 import jax.numpy as npj
 import numpy as np
 from einops import rearrange
@@ -105,13 +103,25 @@ def make_mv_scaled_residual(side: Literal["left", "right"]) -> tuple[ResidualFn,
 
         res_2d: Float[Array, "b n_views n_kpts=21 2"] = uv_mano - uv_pred
         # sanitize residuals
-        res_2d = npj.nan_to_num(res_2d * loss_weights["keypoint_2d"], nan=0.0, posinf=0.0, neginf=0.0)
+        lambda_2d: Float[Array, ""] = npj.array(loss_weights["keypoint_2d"], dtype=res_2d.dtype)
+        res_2d = npj.nan_to_num(res_2d * lambda_2d, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Pose L2 regularization: append sqrt(lambda_pose) * so3 to residual vector
-        # This yields lambda_pose * ||so3||^2 contribution in least-squares objective.
-        # reg_residual: Float[Array, "b 48"] = loss_weights["pose_reg"] * npj.sqrt(so3)
-        # Concatenate 2D residuals and pose regularization residuals (constant length)
-        return res_2d.flatten()
+        # ------------------------------------------------------------------
+        # Pose L2 regularization (squared L2 of pose params).
+        # For LM, we append sqrt(lambda) * residual so that
+        # the objective becomes ||r_data||^2 + lambda * ||theta||^2.
+        # We exclude the first 3 dims (global rotation) following MANO convention
+        # and regularize only the 45 internal joint parameters, matching the
+        # PyTorch reference: poses[..., 3:48].
+        # TODO this still needs work, seems like good initialization of pose matters alot to avoid craziness
+        # ------------------------------------------------------------------
+        pose_only: Float[Array, "b 45"] = so3[:, 3:48]
+        lambda_pose: Float[Array, ""] = npj.array(loss_weights["pose_reg"], dtype=pose_only.dtype)
+        # If lambda is zero, this stays zero and won't affect residual size
+        reg_residual: Float[Array, "b 45"] = npj.sqrt(lambda_pose) * pose_only
+
+        # Concatenate data term and regularization term and return flattened vector
+        return npj.concatenate([res_2d.reshape((batch_size, -1)), reg_residual], axis=-1).flatten()
 
     return mv_2d_scaled_residual, mano_fwd
 
@@ -124,7 +134,7 @@ class PoseOptimConfig:
     Pall: Float[ndarray, "n_views 3 4"]
     hand_side: Literal["left", "right"] = "left"
     loss_weights: LossWeights = field(
-        default_factory=lambda: LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0, pose_reg=0.02)
+        default_factory=lambda: LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0, pose_reg=0.2)
     )
     n_optim_iters: int = 30
 

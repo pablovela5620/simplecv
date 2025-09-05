@@ -1,11 +1,9 @@
-import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal, TypedDict
 
-import jax
 import jax.numpy as npj
 import numpy as np
 from einops import rearrange
@@ -74,22 +72,27 @@ type ResidualFn = Callable[
     Float[Array, "_"],  # flat residual vector
 ]
 
+import jax
 
-def make_mv_scaled_residual(side: Literal["left", "right"]) -> tuple[ResidualFn, FwdKinematics]:
+
+def make_mv_shape_pose_residual(side: Literal["left", "right"]) -> tuple[ResidualFn, FwdKinematics]:
     """Factory: residual function + FK for the requested hand side."""
     mano_fwd = jit(ManoSimpleLayerJAX(side=side, mano_root=Path("data/")))
 
     @jit
-    def mv_2d_scaled_residual(
+    def mv_2d_shape_pose_residual(
         param_to_optimize: Float[Array, "_"],
-        beta: Float[Array, "b 10"],
         Pall: Float[Array, "b 3 4"],
         uv_pred: Float[Array, "b n_views n_kpts=21 2"],
         loss_weights: LossWeights,
         is_left: bool | Bool[Array, ""],  # not used in single-hand path; kept for signature
     ) -> Float[Array, "_"]:
         batch_size: int = uv_pred.shape[0]
-        params_2d: Float[Array, "b 51"] = param_to_optimize.reshape(batch_size, 51)
+        # because params to optimize start out as a flat array, extract the shape (size 10)
+        beta: Float[Array, "1 10"] = param_to_optimize[0:10][np.newaxis, :]
+        # convert beta to have the same batch as the rest by copying
+        beta: Float[Array, "b 10"] = beta.repeat(batch_size, axis=0)
+        params_2d: Float[Array, "b 51"] = param_to_optimize[10:].reshape(batch_size, 51)
         so3: Float[Array, "b 48"] = params_2d[:, 0:48]
         trans: Float[Array, "b 3"] = params_2d[:, 48:51]
 
@@ -105,59 +108,72 @@ def make_mv_scaled_residual(side: Literal["left", "right"]) -> tuple[ResidualFn,
 
         res_2d: Float[Array, "b n_views n_kpts=21 2"] = uv_mano - uv_pred
         # sanitize residuals
-        res_2d = npj.nan_to_num(res_2d * loss_weights["keypoint_2d"], nan=0.0, posinf=0.0, neginf=0.0)
+        lambda_2d: Float[Array, ""] = npj.array(loss_weights["keypoint_2d"], dtype=res_2d.dtype)
+        res_2d = npj.nan_to_num(res_2d * lambda_2d, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Pose L2 regularization: append sqrt(lambda_pose) * so3 to residual vector
-        # This yields lambda_pose * ||so3||^2 contribution in least-squares objective.
-        # reg_residual: Float[Array, "b 48"] = loss_weights["pose_reg"] * npj.sqrt(so3)
-        # Concatenate 2D residuals and pose regularization residuals (constant length)
-        return res_2d.flatten()
+        # ------------------------------------------------------------------
+        # Pose L2 regularization (squared L2 of pose params).
+        # For LM, we append sqrt(lambda) * residual so that
+        # the objective becomes ||r_data||^2 + lambda * ||theta||^2.
+        # We exclude the first 3 dims (global rotation) following MANO convention
+        # and regularize only the 45 internal joint parameters, matching the
+        # PyTorch reference: poses[..., 3:48].
+        # TODO this still needs work, seems like good initialization of pose matters alot to avoid craziness
+        # ------------------------------------------------------------------
+        pose_only: Float[Array, "b 45"] = so3[:, 3:48]
+        lambda_pose: Float[Array, ""] = npj.array(loss_weights["pose_reg"], dtype=pose_only.dtype)
+        # If lambda is zero, this stays zero and won't affect residual size
+        reg_residual: Float[Array, "b 45"] = npj.sqrt(lambda_pose) * pose_only
 
-    return mv_2d_scaled_residual, mano_fwd
+        # Concatenate data term and regularization term and return flattened vector
+        return npj.concatenate([res_2d.reshape((batch_size, -1)), reg_residual], axis=-1).flatten()
+
+    return mv_2d_shape_pose_residual, mano_fwd
 
 
 @dataclass
-class PoseOptimConfig:
+class PoseShapeOptimConfig:
     """Configuration for pose optimization."""
 
-    beta: Float[ndarray, "10"]
     Pall: Float[ndarray, "n_views 3 4"]
     hand_side: Literal["left", "right"] = "left"
     loss_weights: LossWeights = field(
-        default_factory=lambda: LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0, pose_reg=0.02)
+        default_factory=lambda: LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0, pose_reg=0.2)
     )
+    n_frames_optim: int = 30
     n_optim_iters: int = 30
 
 
 @dataclass
-class OptimInput:
+class OptimShapeInput:
     uv_pred: Float[ndarray, "b n_views n_coco_kpts=133 2"]
+    beta_init: Float[ndarray, "10"]
     so3_init: Float[ndarray, "b 48"]
     trans_init: Float[ndarray, "b 3"]
 
 
 @dataclass
-class OptimResult:
+class OptimShapeResult:
     """Results for a single hand."""
 
+    beta_optim: Float[ndarray, "10"]
     so3_optim: Float[ndarray, "b 48"]
     trans_optim: Float[ndarray, "b 3"]
 
 
-class SingleHandOptim:
-    def __init__(self, *, config: PoseOptimConfig) -> None:
+class SingleHandShapeOptim:
+    def __init__(self, *, config: PoseShapeOptimConfig) -> None:
         """
         Single-hand optimizer over MANO pose (axis-angle 48) + translation (3).
         Should avoid chaning the number of views, this causes retraces in jax jit which is bad
         instead use a validity mask
         """
-        self.cfg: PoseOptimConfig = config
+        self.cfg: PoseShapeOptimConfig = config
 
-        self.beta: Float[Array, "1 10"] = npj.array(self.cfg.beta)[npj.newaxis, ...]
         self.Pall: Float[Array, "n_views 3 4"] = npj.array(self.cfg.Pall)
         self.loss_weights: LossWeights = self.cfg.loss_weights
 
-        residual_fn, self.mano_fwd = make_mv_scaled_residual(self.cfg.hand_side)
+        residual_fn, self.mano_fwd = make_mv_shape_pose_residual(self.cfg.hand_side)
 
         self.optimizer = LevenbergMarquardt(
             residual_fun=residual_fn,
@@ -175,14 +191,18 @@ class SingleHandOptim:
         # important to always have the same number of views while optimizing to avoid retraces.
         # bad views just need to be cleared via a mask (uv_pred - uv_optim) * valid_mask
 
-        so3_init: Float[Array, "1 48"] = npj.zeros((1, 48))
+        # single handshape for all frames/views
+        beta_init: Float[Array, "10"] = npj.zeros(10)
+        so3_init: Float[Array, "n_frames 48"] = npj.zeros((self.cfg.n_frames_optim, 48))
         # Sensible depth prior (meters) to aid convergence
-        trans_init: Float[Array, "1 3"] = npj.array([[0.0, 0.0, 0.6]])
-        init_params: Float[Array, "1 51"] = npj.concatenate([so3_init, trans_init], axis=-1)
-        uv_batch_init: Float[Array, "1 n_views 21 2"] = npj.zeros((1, n_views, 21, 2))
+        trans_init: Float[Array, "n_frames 3"] = npj.array([[0.0, 0.0, 0.6]] * self.cfg.n_frames_optim)
+        init_params: Float[Array, "n_frames 51"] = npj.concatenate([so3_init, trans_init], axis=-1)
+        init_params: Float[Array, "_"] = init_params.flatten()
+        full_init_params: Float[Array, "_"] = npj.concatenate([beta_init, init_params], axis=-1)
+
+        uv_batch_init: Float[Array, "n_frames n_views 21 2"] = npj.zeros((self.cfg.n_frames_optim, n_views, 21, 2))
         _ = self.optimizer.run(
-            init_params.flatten(),
-            beta=self.beta,
+            full_init_params,
             Pall=self.Pall,
             uv_pred=uv_batch_init,
             loss_weights=self.loss_weights,
@@ -193,41 +213,48 @@ class SingleHandOptim:
 
     def __call__(
         self,
-        optim_input: OptimInput,
-    ) -> tuple[OptimResult, LevenbergMarquardtState]:
-        uv_pred_batched: Float[Array, "b=1 n_views 133 2"] = npj.array(optim_input.uv_pred)
+        optim_input: OptimShapeInput,
+    ) -> tuple[OptimShapeResult, LevenbergMarquardtState]:
+        uv_pred_batched: Float[Array, "n_frames n_views 133 2"] = npj.array(optim_input.uv_pred)
+        n_frames: int = uv_pred_batched.shape[0]
         # filter to either left or right hand idx
         match self.cfg.hand_side:
             case "left":
-                uv_pred_batched: Float[Array, "b=1 n_views 21 2"] = uv_pred_batched[..., LEFT_HAND_IDX, :]
+                uv_pred_batched: Float[Array, "n_frames n_views 21 2"] = uv_pred_batched[..., LEFT_HAND_IDX, :]
             case "right":
-                uv_pred_batched: Float[Array, "b=1 n_views 21 2"] = uv_pred_batched[..., RIGHT_HAND_IDX, :]
+                uv_pred_batched: Float[Array, "n_frames n_views 21 2"] = uv_pred_batched[..., RIGHT_HAND_IDX, :]
 
         # Try multiple inits to escape poor local minima in single-view scenarios
-        so3_init: Float[Array, "b=1 48"] = npj.array(optim_input.so3_init)
-        trans_init: Float[Array, "b=1 3"] = npj.array(optim_input.trans_init)
+        beta_init: Float[Array, "10"] = npj.array(optim_input.beta_init)
+        so3_init: Float[Array, "n_frames 48"] = npj.array(optim_input.so3_init)
+        trans_init: Float[Array, "n_frames 3"] = npj.array(optim_input.trans_init)
 
-        init_params: Float[Array, "1 51"] = npj.concatenate([so3_init, trans_init], axis=-1)
+        init_params: Float[Array, "n_frames 51"] = npj.concatenate([so3_init, trans_init], axis=-1)
+        init_params: Float[Array, "_"] = init_params.flatten()
+        full_init_params: Float[Array, "_"] = npj.concatenate([beta_init, init_params], axis=-1)
 
         optim_tuple: tuple[Float[Array, "_"], LevenbergMarquardtState] = self.optimizer(
-            init_params.flatten(),
-            beta=self.beta,
+            full_init_params,
             Pall=self.Pall,
             uv_pred=uv_pred_batched,
             loss_weights=self.loss_weights,
             is_left=self.cfg.hand_side == "left",
         )
 
-        optimized_params: Float[Array, "b=1 51"] = optim_tuple[0].reshape(1, 51)
+        optimized_params: Float[Array, "_"] = optim_tuple[0]
+        beta_optim: Float[Array, "10"] = optimized_params[:10]
+        # Drop the 10 shape params before reshaping per-frame (48 pose + 3 trans)
+        optimized_params_2d: Float[Array, "n_frames 51"] = optimized_params[10:].reshape(n_frames, 51)
         state: LevenbergMarquardtState = optim_tuple[1]
 
-        so3: Float[Array, "b=1 48"] = optimized_params[:, 0:48]
-        trans: Float[Array, "b=1 3"] = optimized_params[:, 48:51]
+        so3: Float[Array, "n_frames 48"] = optimized_params_2d[:, 0:48]
+        trans: Float[Array, "n_frames 3"] = optimized_params_2d[:, 48:51]
         # Sanitize any potential NaNs/Infs from the optimizer
         so3 = npj.nan_to_num(so3, nan=0.0, posinf=0.0, neginf=0.0)
         trans = npj.nan_to_num(trans, nan=0.0, posinf=0.0, neginf=0.0)
 
-        results = OptimResult(
+        results = OptimShapeResult(
+            beta_optim=np.array(beta_optim),
             so3_optim=np.array(so3),
             trans_optim=np.array(trans),
         )
