@@ -1,7 +1,8 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
+import enum
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from timeit import default_timer as timer
 from typing import Literal, TypedDict
 
 import jax
@@ -14,188 +15,220 @@ from jaxopt._src.levenberg_marquardt import LevenbergMarquardtState
 from jaxtyping import Array, Bool, Float
 from numpy import ndarray
 
+from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.ops.mano.mano_jax import ManoSimpleLayerJAX
-from simplecv.ops.mano.optim_jax_single import proj_3d_vectorized
 
 
 class LossWeights(TypedDict):
     keypoint_2d: float
     depth: float
     temp: float
+    pose_reg: float
+
+
+@jit
+def proj_3d_vectorized(
+    xyz_hom: Float[Array, "n_frames n_kpts 4"],
+    P: Float[Array, "n_views 3 4"],
+) -> Float[Array, "n_frames n_views n_kpts 2"]:
+    """
+    Projects 3D points to 2D using the projection matrix for a batch of frames and views.
+
+    xyz_hom: [n_frames, 21, 4]  -> [x, y, z, 1]
+    P:       [n_views, 3, 4]    -> K [R|t]
+
+    returns: [n_frames, n_views, n_kpts, 2]
+    """
+    xyz_hom: Float[Array, "n_frames 1 4 n_kpts"] = rearrange(
+        xyz_hom, "n_frames n_kpts xyz_hom -> n_frames 1 xyz_hom n_kpts"
+    )
+    P_b: Float[Array, "1 n_views 3 4"] = rearrange(P, "n_views n m -> 1 n_views n m")
+    # [1, n_views, 3, 4] @ [n_frames, 1, 4, n_kpts] -> [n_frames, n_views, 3, n_kpts]
+    uv_hom: Float[Array, "n_frames n_views 3 n_kpts"] = P_b @ xyz_hom
+    uv_hom: Float[Array, "n_frames n_views n_kpts 3"] = rearrange(
+        uv_hom, "n_frames n_views xyz_hom n_kpts -> n_frames n_views n_kpts xyz_hom"
+    )
+    # Robust division to avoid Inf/NaN during early iterations (z ≈ 0)
+    denom = uv_hom[..., 2:]
+    eps = npj.array(1e-8, dtype=denom.dtype)
+    denom_safe = npj.where(npj.abs(denom) < eps, npj.sign(denom) * eps, denom)
+    uv = uv_hom[..., :2] / denom_safe
+    return uv
+
+
+type FwdKinematics = Callable[
+    [Float[Array, "b 48"], Float[Array, "b 10"], Float[Array, "b 3"]],
+    tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]],
+]
+
+# jaxopt residual signature
+type ResidualFn = Callable[
+    [
+        Float[Array, "_"],  # flattened params (51)
+        Float[Array, "b 10"],  # betas
+        Float[Array, "b 3 4"],  # Pall
+        Float[Array, "b n_views 21 2"],  # uv_pred
+        "LossWeights",
+        bool | Bool[Array, ""],  # unused (kept for interface parity)
+    ],
+    Float[Array, "_"],  # flat residual vector
+]
+
+
+def make_mv_scaled_residual(side: Literal["left", "right"]) -> tuple[ResidualFn, FwdKinematics]:
+    """Factory: residual function + FK for the requested hand side."""
+    mano_fwd = jit(ManoSimpleLayerJAX(side=side, mano_root=Path("data/")))
+
+    @jit
+    def mv_2d_scaled_residual(
+        param_to_optimize: Float[Array, "_"],
+        beta: Float[Array, "b 10"],
+        Pall: Float[Array, "b 3 4"],
+        uv_pred: Float[Array, "b n_views n_kpts=21 2"],
+        loss_weights: LossWeights,
+        is_left: bool | Bool[Array, ""],  # not used in single-hand path; kept for signature
+    ) -> Float[Array, "_"]:
+        batch_size: int = uv_pred.shape[0]
+        params_2d: Float[Array, "b 51"] = param_to_optimize.reshape(batch_size, 51)
+        so3: Float[Array, "b 48"] = params_2d[:, 0:48]
+        trans: Float[Array, "b 3"] = params_2d[:, 48:51]
+
+        # MANO forward (mm), convert to meters for projection
+        mano_out: tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b n_kpts=21 3"]] = mano_fwd(so3, beta, trans)
+        xyz_mano_mm: Float[Array, "b n_kpts=21 3"] = mano_out[1]
+        xyz_mano: Float[Array, "b n_kpts=21 3"] = xyz_mano_mm / 1000.0
+
+        xyz_mano_hom: Float[Array, "b n_kpts=21 4"] = npj.concatenate(
+            [xyz_mano, npj.ones_like(xyz_mano)[..., 0:1]], axis=-1
+        )
+        uv_mano: Float[Array, "b n_views n_kpts=21 2"] = proj_3d_vectorized(xyz_hom=xyz_mano_hom, P=Pall)
+
+        res_2d: Float[Array, "b n_views n_kpts=21 2"] = uv_mano - uv_pred
+        # sanitize residuals
+        res_2d = npj.nan_to_num(res_2d * loss_weights["keypoint_2d"], nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Pose L2 regularization: append sqrt(lambda_pose) * so3 to residual vector
+        # This yields lambda_pose * ||so3||^2 contribution in least-squares objective.
+        # reg_residual: Float[Array, "b 48"] = loss_weights["pose_reg"] * npj.sqrt(so3)
+        # Concatenate 2D residuals and pose regularization residuals (constant length)
+        return res_2d.flatten()
+
+    return mv_2d_scaled_residual, mano_fwd
 
 
 @dataclass
-class ShapeOptimizationResults:
-    """Results for single-hand, multi-frame shape optimization.
+class PoseOptimConfig:
+    """Configuration for pose optimization."""
 
-    - xyz_mano in meters (per-frame joints)
-    - `so3` and `trans` per frame
-    - shared `betas` across frames
-    """
-
-    xyz_mano: Float[ndarray, "n_frames 21 3"]
-    so3: Float[ndarray, "n_frames 48"]
-    trans: Float[ndarray, "n_frames 3"]
-    betas: Float[ndarray, "10"]
+    beta: Float[ndarray, "10"]
+    Pall: Float[ndarray, "n_views 3 4"]
+    hand_side: Literal["left", "right"] = "left"
+    loss_weights: LossWeights = field(
+        default_factory=lambda: LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0, pose_reg=0.02)
+    )
+    n_optim_iters: int = 30
 
 
-type ResidualFn = (
-    # params_flat, P, uv_pred, loss_weights, is_left
-    tuple[Float[Array, "_"], Float[Array, "n_views 3 4"], Float[Array, "n_frames n_views 21 2"], LossWeights, bool]
-    | Float[Array, "_"]
-)
+@dataclass
+class OptimInput:
+    uv_pred: Float[ndarray, "b n_views n_coco_kpts=133 2"]
+    so3_init: Float[ndarray, "b 48"]
+    trans_init: Float[ndarray, "b 3"]
 
 
-class SingleHandOptimUnknownShape:
-    """Optimizes MANO betas + per-frame pose/translation over a fixed window.
+@dataclass
+class OptimResult:
+    """Results for a single hand."""
 
-    Shapes are fixed for JIT:
-      - `n_frames` (window length) is constant per instance
-      - `n_views` is taken from `Pall` and constant per instance
+    so3_optim: Float[ndarray, "b 48"]
+    trans_optim: Float[ndarray, "b 3"]
 
-    Residual masking is done inside the residual to avoid view slicing and JIT retraces:
-      - Invalid 2D entries (NaN/Inf) contribute zero cost and zero gradient
-      - Optional stereo gating: frames with <2 valid views are masked out entirely
-    """
 
-    def __init__(
-        self,
-        *,
-        hand_side: Literal["left", "right"],
-        Pall: Float[ndarray, "n_views 3 4"],
-        n_frames: int,
-        loss_weights: LossWeights,
-        num_iters: int = 30,
-        stereo_gate: bool = True,
-    ) -> None:
-        self.hand_side = hand_side
-        self.Pall: Float[Array, "n_views 3 4"] = npj.array(Pall)
-        self.n_views: int = int(Pall.shape[0])
-        self.n_frames: int = int(n_frames)
-        self.loss_weights: LossWeights = loss_weights
-        self.stereo_gate: bool = stereo_gate
-        self.num_iters: int = num_iters
+class SingleHandOptim:
+    def __init__(self, *, config: PoseOptimConfig) -> None:
+        """
+        Single-hand optimizer over MANO pose (axis-angle 48) + translation (3).
+        Should avoid chaning the number of views, this causes retraces in jax jit which is bad
+        instead use a validity mask
+        """
+        self.cfg: PoseOptimConfig = config
 
-        # Prepare MANO forward and residual
-        self._mano_fwd = jit(ManoSimpleLayerJAX(side=self.hand_side, mano_root=Path("data/")))
+        self.beta: Float[Array, "1 10"] = npj.array(self.cfg.beta)[npj.newaxis, ...]
+        self.Pall: Float[Array, "n_views 3 4"] = npj.array(self.cfg.Pall)
+        self.loss_weights: LossWeights = self.cfg.loss_weights
 
-        def residual_fun(
-            params_flat: Float[Array, "_"],
-            Pall_in: Float[Array, "n_views 3 4"],
-            uv_pred: Float[Array, "n_frames n_views 21 2"],
-            loss_weights: LossWeights,
-            is_left: bool | Bool[Array, ""],  # kept for parity with other calls
-        ) -> Float[Array, "_"]:
-            # Unpack params: [betas(10), frames * (so3(48)+trans(3))]
-            n_frames = self.n_frames
-            betas: Float[Array, "10"] = params_flat[:10]
-            frame_params: Float[Array, "n_frames 51"] = params_flat[10:].reshape((n_frames, 51))
-            so3: Float[Array, "n_frames 48"] = frame_params[:, :48]
-            trans: Float[Array, "n_frames 3"] = frame_params[:, 48:51]
+        residual_fn, self.mano_fwd = make_mv_scaled_residual(self.cfg.hand_side)
 
-            # Broadcast betas per frame
-            betas_b: Float[Array, "n_frames 10"] = npj.repeat(betas[None, :], repeats=n_frames, axis=0)
-
-            # MANO forward (mm) → meters
-            _, joints_mm = self._mano_fwd(so3, betas_b, trans)
-            xyz_m: Float[Array, "n_frames 21 3"] = joints_mm / 1000.0
-            xyz_hom: Float[Array, "n_frames 21 4"] = npj.concatenate(
-                [xyz_m, npj.ones_like(xyz_m)[..., 0:1]], axis=-1
-            )
-            uv_proj: Float[Array, "n_frames n_views 21 2"] = proj_3d_vectorized(xyz_hom=xyz_hom, P=Pall_in)
-
-            # Build masks from uv_pred finiteness (keep shape fixed)
-            finite_mask: Float[Array, "n_frames n_views 21 1"] = npj.isfinite(uv_pred).all(axis=-1, keepdims=True)
-            uv_target: Float[Array, "n_frames n_views 21 2"] = npj.nan_to_num(uv_pred, nan=0.0, posinf=0.0, neginf=0.0)
-            res: Float[Array, "n_frames n_views 21 2"] = (uv_proj - uv_target) * finite_mask
-
-            # Stereo gating per frame (mask entire frame if fewer than 2 valid views)
-            if self.stereo_gate:
-                views_ok: Bool[Array, "n_frames n_views"] = npj.isfinite(uv_pred).all(axis=(2, 3))
-                has_stereo: Float[Array, "n_frames 1 1 1"] = (
-                    (npj.sum(views_ok.astype(npj.int32), axis=1) >= 2).astype(npj.float32).reshape((n_frames, 1, 1, 1))
-                )
-                res = res * has_stereo
-
-            res = npj.nan_to_num(res * loss_weights["keypoint_2d"], nan=0.0, posinf=0.0, neginf=0.0)
-            return res.flatten()
-
-        self._residual_fun = jit(residual_fun)
-        self._lm = LevenbergMarquardt(
-            residual_fun=self._residual_fun,
-            maxiter=self.num_iters,
+        self.optimizer = LevenbergMarquardt(
+            residual_fun=residual_fn,
+            maxiter=self.cfg.n_optim_iters,
             solver="cholesky",
             jit=True,
             xtol=1e-6,
             gtol=1e-6,
         )
 
-        # Warmup JIT trace with zeros
-        print("Tracing JIT (learn-shape), can take a while...")
-        init_params = self._init_params()
-        uv_zeros: Float[Array, "n_frames n_views 21 2"] = npj.zeros((self.n_frames, self.n_views, 21, 2))
-        _ = self._lm.run(
-            init_params,
-            Pall_in=self.Pall,
-            uv_pred=uv_zeros,
-            loss_weights=self.loss_weights,
-            is_left=(self.hand_side == "left"),
-        )
-        self._lm_run = jit(self._lm.run)
-        print("Trace Done (learn-shape)")
+        # Trace JIT once
+        print("Tracing JIT, can take a while...")
+        start_trace_time: float = timer()
+        n_views: int = self.Pall.shape[0]
+        # important to always have the same number of views while optimizing to avoid retraces.
+        # bad views just need to be cleared via a mask (uv_pred - uv_optim) * valid_mask
 
-    def _init_params(self, beta_init: Float[ndarray, "10"] | None = None) -> Float[Array, "_"]:
-        # Default betas=0 if not provided
-        if beta_init is None:
-            betas0: Float[Array, "10"] = npj.zeros((10,), dtype=npj.float32)
-        else:
-            betas0 = npj.array(beta_init, dtype=npj.float32)
-        # Per-frame pose/trans init
-        so30: Float[Array, "n_frames 48"] = npj.zeros((self.n_frames, 48), dtype=npj.float32)
-        trans0: Float[Array, "n_frames 3"] = npj.zeros((self.n_frames, 3), dtype=npj.float32)
-        trans0 = trans0.at[:, 2].set(0.6)  # z-prior in meters
-        frame_params: Float[Array, "n_frames 51"] = npj.concatenate([so30, trans0], axis=-1)
-        return npj.concatenate([betas0, frame_params.flatten()])
+        so3_init: Float[Array, "1 48"] = npj.zeros((1, 48))
+        # Sensible depth prior (meters) to aid convergence
+        trans_init: Float[Array, "1 3"] = npj.array([[0.0, 0.0, 0.6]])
+        init_params: Float[Array, "1 51"] = npj.concatenate([so3_init, trans_init], axis=-1)
+        uv_batch_init: Float[Array, "1 n_views 21 2"] = npj.zeros((1, n_views, 21, 2))
+        _ = self.optimizer.run(
+            init_params.flatten(),
+            beta=self.beta,
+            Pall=self.Pall,
+            uv_pred=uv_batch_init,
+            loss_weights=self.loss_weights,
+            is_left=(self.cfg.hand_side == "left"),
+        )
+        self.optimizer = jit(self.optimizer.run)
+        print(f"Trace Done in {timer() - start_trace_time:.2f}s")
 
     def __call__(
         self,
-        uv_pred: Float[ndarray, "n_frames n_views 21 2"],
-        beta_init: Float[ndarray, "10"] | None = None,
-    ) -> tuple[ShapeOptimizationResults, LevenbergMarquardtState]:
-        # Sanity: fixed shapes expected per instance
-        assert uv_pred.shape[0] == self.n_frames, "uv_pred n_frames mismatch"
-        assert uv_pred.shape[1] == self.n_views, "uv_pred n_views mismatch"
+        optim_input: OptimInput,
+    ) -> tuple[OptimResult, LevenbergMarquardtState]:
+        uv_pred_batched: Float[Array, "b=1 n_views 133 2"] = npj.array(optim_input.uv_pred)
+        # filter to either left or right hand idx
+        match self.cfg.hand_side:
+            case "left":
+                uv_pred_batched: Float[Array, "b=1 n_views 21 2"] = uv_pred_batched[..., LEFT_HAND_IDX, :]
+            case "right":
+                uv_pred_batched: Float[Array, "b=1 n_views 21 2"] = uv_pred_batched[..., RIGHT_HAND_IDX, :]
 
-        init_params = self._init_params(beta_init)
-        optimized_params, state = self._lm_run(
-            init_params,
-            Pall_in=self.Pall,
-            uv_pred=npj.array(uv_pred),
+        # Try multiple inits to escape poor local minima in single-view scenarios
+        so3_init: Float[Array, "b=1 48"] = npj.array(optim_input.so3_init)
+        trans_init: Float[Array, "b=1 3"] = npj.array(optim_input.trans_init)
+
+        init_params: Float[Array, "1 51"] = npj.concatenate([so3_init, trans_init], axis=-1)
+
+        optim_tuple: tuple[Float[Array, "_"], LevenbergMarquardtState] = self.optimizer(
+            init_params.flatten(),
+            beta=self.beta,
+            Pall=self.Pall,
+            uv_pred=uv_pred_batched,
             loss_weights=self.loss_weights,
-            is_left=(self.hand_side == "left"),
+            is_left=self.cfg.hand_side == "left",
         )
 
-        # Unpack
-        betas: Float[Array, "10"] = optimized_params[:10]
-        frame_params: Float[Array, "n_frames 51"] = optimized_params[10:].reshape((self.n_frames, 51))
-        so3: Float[Array, "n_frames 48"] = frame_params[:, :48]
-        trans: Float[Array, "n_frames 3"] = frame_params[:, 48:51]
+        optimized_params: Float[Array, "b=1 51"] = optim_tuple[0].reshape(1, 51)
+        state: LevenbergMarquardtState = optim_tuple[1]
 
-        # Final forward to joints in meters
-        betas_b: Float[Array, "n_frames 10"] = npj.repeat(betas[None, :], repeats=self.n_frames, axis=0)
-        _, joints_mm = self._mano_fwd(so3, betas_b, trans)
-        xyz_m: Float[ndarray, "n_frames 21 3"] = np.array(joints_mm / 1000.0)
+        so3: Float[Array, "b=1 48"] = optimized_params[:, 0:48]
+        trans: Float[Array, "b=1 3"] = optimized_params[:, 48:51]
+        # Sanitize any potential NaNs/Infs from the optimizer
+        so3 = npj.nan_to_num(so3, nan=0.0, posinf=0.0, neginf=0.0)
+        trans = npj.nan_to_num(trans, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Safety: ensure finiteness
-        if not np.isfinite(xyz_m).all():
-            # Fall back to NaN-to-num rather than raising, to keep downstream logging resilient
-            xyz_m = np.nan_to_num(xyz_m, nan=0.0, posinf=0.0, neginf=0.0)
-
-        results = ShapeOptimizationResults(
-            xyz_mano=xyz_m,
-            so3=np.array(so3),
-            trans=np.array(trans),
-            betas=np.array(betas),
+        results = OptimResult(
+            so3_optim=np.array(so3),
+            trans_optim=np.array(trans),
         )
         return results, state
-
