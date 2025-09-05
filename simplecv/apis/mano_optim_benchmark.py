@@ -176,7 +176,9 @@ def main(cfg: ManoOptimBenchConfig):
     n_frames_optim: int = 10
     mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side=hand_side, mano_root=Path("data/"))
 
-    optim_shape_cfg = PoseShapeOptimConfig(Pall=Pall_exo, hand_side=hand_side, n_frames_optim=n_frames_optim)
+    optim_shape_cfg = PoseShapeOptimConfig(
+        Pall=Pall_exo, hand_side=hand_side, n_frames_optim=n_frames_optim, n_optim_iters=30
+    )
     optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
     # take the first 30 frames and feed them into the optimizer
     optim_shape_input: OptimShapeInput = OptimShapeInput(
@@ -187,6 +189,9 @@ def main(cfg: ManoOptimBenchConfig):
     )
     optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
     optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
+    beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim
+    # beta_optim: Float[ndarray, "10"] = np.random.randn(10) * 5.0
+
     # from icecream import ic
 
     # ic(optim_shape_result.beta_optim - gt_beta)
@@ -196,7 +201,7 @@ def main(cfg: ManoOptimBenchConfig):
     ######################################################################
     # Optimizers over MANO pose (so3) + translation
     optim_cfg = PoseOptimConfig(
-        beta=optim_shape_result.beta_optim,
+        beta=beta_optim,
         Pall=Pall_exo,
         hand_side=hand_side,
     )
@@ -219,7 +224,7 @@ def main(cfg: ManoOptimBenchConfig):
         optim_result: OptimResult = optim_tuple[0]
         mano_out: tuple[Float32[ndarray, "b n_verts=778 3"], Float32[ndarray, "b joints_and_tips=21 3"]] = mano_layer(
             th_pose_coeffs=optim_result.so3_optim,
-            th_betas=optim_cfg.beta[np.newaxis, :],
+            th_betas=beta_optim[np.newaxis, :],
             th_trans=optim_result.trans_optim,
         )
         # set new init params
