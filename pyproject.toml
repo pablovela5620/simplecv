@@ -164,6 +164,7 @@ torchvision = "*"
 [tool.pixi.feature.cuda128.pypi-dependencies]
 jax = ">=0.6.0,<0.7"
 jaxopt = ">=0.8.5,<0.9"
+lovely-jax = "*"
 
 [tool.pixi.feature.dev]
 platforms = ["linux-64"]
@@ -198,6 +199,7 @@ addopts = "--beartype-packages=tests"
 cuda128 = { features = [
     "cuda128",
 ], solve-group = "cuda128", no-default-feature = true }
+gpu = { features = ["cuda128"], solve-group = "cuda128" }
 dev = { features = ["dev", "cuda128"], solve-group = "cuda128" }
 
 

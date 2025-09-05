@@ -197,6 +197,157 @@ def compute_vertex_normals_batch(
     return vn_unit
 
 
+def log_mano_batch(
+    exoego_sequence: BaseExoEgoSequence,
+    parent_log_path: Path,
+    timeline: str,
+    shortest_timestamp: Int[ndarray, "n_frames"],
+    log_mano: bool,
+) -> None:
+    mano_mesh_color_rgba_map: dict[Literal["left", "right"], tuple[int, int, int, int]] = {
+        "right": (255, 0, 0, 255),
+        "left": (0, 0, 255, 255),
+    }
+    mano_verts_color_rgb_map: dict[Literal["left", "right"], tuple[int, int, int]] = {
+        # Opposite of mesh color for visibility
+        "right": (0, 0, 255),
+        "left": (255, 0, 0),
+    }
+
+    mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
+    if mano_stack is not None and log_mano:
+        from simplecv.ops.mano.mano_np import MANOLayerNP
+
+        mano_layers = [
+            MANOLayerNP(side="right", betas=mano_stack.betas),
+            MANOLayerNP(side="left", betas=mano_stack.betas),
+        ]
+        mano_so3: Float32[ndarray, "n_frames n_hands=2 48"] = mano_stack.so3
+        mano_trans: Float32[ndarray, "n_frames n_hands=2 3"] = mano_stack.trans
+        so3_per_hand: Float32[ndarray, "n_hands=2 n_frames 48"] = rearrange(
+            mano_so3, "n_frames n_hands pose -> n_hands n_frames pose"
+        )
+        trans_per_hand: Float32[ndarray, "n_hands=2 n_frames 3"] = rearrange(
+            mano_trans, "n_frames n_hands dim -> n_hands n_frames dim"
+        )
+        # Prepare a single COCO-133 buffer (both hands combined)
+        n_frames_mano_total: int = min(so3_per_hand.shape[1], len(shortest_timestamp))
+        xyz_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133 3"] = np.full(
+            (n_frames_mano_total, 133, 3), np.nan, dtype=np.float32
+        )
+        conf_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133"] = np.zeros(
+            (n_frames_mano_total, 133), dtype=np.float32
+        )
+        for poses, translations, mano_layer in zip(so3_per_hand, trans_per_hand, mano_layers, strict=True):
+            mano_outputs: tuple[
+                Float32[ndarray, "n_frames n_verts=778 3"],
+                Float32[ndarray, "n_frames n_joints=21 3"],
+            ] = mano_layer(poses, translations)
+            verts: Float32[ndarray, "n_frames n_verts=778 3"] = mano_outputs[0]
+            xyz_mano: Float32[ndarray, "n_frames n_joints=21 3"] = mano_outputs[1]
+
+            # Aggregate MANO joints (21) → into single COCO-133 buffer
+            xyz_mano_np: Float32[ndarray, "n_frames n_joints=21 3"] = xyz_mano
+            hand_idx: ndarray = RIGHT_HAND_IDX if mano_layer.side == "right" else LEFT_HAND_IDX
+            xyz_coco_mano[:, hand_idx, :] = xyz_mano_np[0:n_frames_mano_total]
+            conf_coco_mano[:, hand_idx] = 1.0
+
+            # send verts
+            rr.log(
+                f"{parent_log_path}/mano_{mano_layer.side}_verts",
+                rr.Points3D.from_fields(
+                    show_labels=False,
+                ),
+                static=True,
+            )
+            n_frames_verts: int = len(verts)
+            verts_base_color_rgb: tuple[int, int, int] = mano_verts_color_rgb_map[mano_layer.side]
+            verts_colors: UInt8[ndarray, "n_frames n_verts=778 3"] = np.full(
+                (n_frames_verts, verts.shape[1], 3),
+                verts_base_color_rgb,
+                dtype=np.uint8,
+            )
+            rr.send_columns(
+                f"{parent_log_path}/mano_{mano_layer.side}_verts",
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(xyz_mano_np)])],
+                columns=[
+                    *rr.Points3D.columns(
+                        positions=rearrange(
+                            verts,
+                            "n_frames kpts dim -> (n_frames kpts) dim",
+                        ),
+                        colors=rearrange(verts_colors, "n_frames kpts dim -> (n_frames kpts) dim"),
+                    ).partition(lengths=[778] * len(verts)),
+                ],
+            )
+
+            # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
+            faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
+            mesh_color_rgba: tuple[int, int, int, int] = mano_mesh_color_rgba_map[mano_layer.side]
+            mesh_entity_path: Path = parent_log_path / f"mano_{mano_layer.side}_mesh"
+            rr.log(
+                f"{mesh_entity_path}",
+                rr.Mesh3D.from_fields(
+                    triangle_indices=faces_np,
+                    albedo_factor=mesh_color_rgba,
+                ),
+                static=True,
+            )
+
+            # Stream vertex positions and normals over time under the same entity using send_columns
+            verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
+            n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
+            vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+                verts_np[0:n_frames_mesh], faces_np
+            )
+            rr.send_columns(
+                f"{mesh_entity_path}",
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mesh])],
+                columns=[
+                    *rr.Mesh3D.columns(
+                        vertex_positions=rearrange(
+                            verts_np[0:n_frames_mesh],
+                            "n v d -> (n v) d",
+                        ),
+                        vertex_normals=rearrange(
+                            vertex_normals[0:n_frames_mesh],
+                            "n v d -> (n v) d",
+                        ),
+                    ).partition(lengths=[verts_np.shape[1]] * n_frames_mesh),
+                ],
+            )
+
+        # Log a single combined MANO keypoints stream (both hands)
+        colors_coco: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
+            confidence_scores=conf_coco_mano[..., np.newaxis]
+        )
+        rr.log(
+            f"{parent_log_path}/mano_keypoints",
+            rr.Points3D.from_fields(
+                class_ids=0,
+                keypoint_ids=COCO_133_IDS,
+                show_labels=False,
+            ),
+            static=True,
+        )
+        rr.send_columns(
+            f"{parent_log_path}/mano_keypoints",
+            indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mano_total])],
+            columns=[
+                *rr.Points3D.columns(
+                    positions=rearrange(
+                        xyz_coco_mano,
+                        "n_frames kpts dim -> (n_frames kpts) dim",
+                    ),
+                    colors=rearrange(
+                        colors_coco,
+                        "n_frames kpts dim -> (n_frames kpts) dim",
+                    ),
+                ).partition(lengths=[len(COCO_133_IDS)] * n_frames_mano_total),
+            ],
+        )
+
+
 def log_exoego_batch(
     exoego_sequence: BaseExoEgoSequence,
     parent_log_path: Path,
@@ -204,6 +355,7 @@ def log_exoego_batch(
     shortest_timestamp: Int[ndarray, "n_frames"],
     log_ego: bool = True,
     log_exo: bool = True,
+    log_mano: bool = False,
 ) -> None:
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     if exoego_labels is not None:
@@ -243,149 +395,16 @@ def log_exoego_batch(
             ],
         )
 
-        ### Send MANO Data, this includes
-        mano_mesh_color_rgba_map: dict[Literal["left", "right"], tuple[int, int, int, int]] = {
-            "right": (255, 0, 0, 255),
-            "left": (0, 0, 255, 255),
-        }
-        mano_verts_color_rgb_map: dict[Literal["left", "right"], tuple[int, int, int]] = {
-            # Opposite of mesh color for visibility
-            "right": (0, 0, 255),
-            "left": (255, 0, 0),
-        }
-
-        mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
-        if mano_stack is not None:
-            from simplecv.ops.mano.mano_np import MANOLayerNP
-
-            mano_layers = [
-                MANOLayerNP(side="right", betas=mano_stack.betas),
-                MANOLayerNP(side="left", betas=mano_stack.betas),
-            ]
-            mano_so3: Float32[ndarray, "n_frames n_hands=2 48"] = mano_stack.so3
-            mano_trans: Float32[ndarray, "n_frames n_hands=2 3"] = mano_stack.trans
-            so3_per_hand: Float32[ndarray, "n_hands=2 n_frames 48"] = rearrange(
-                mano_so3, "n_frames n_hands pose -> n_hands n_frames pose"
-            )
-            trans_per_hand: Float32[ndarray, "n_hands=2 n_frames 3"] = rearrange(
-                mano_trans, "n_frames n_hands dim -> n_hands n_frames dim"
-            )
-            # Prepare a single COCO-133 buffer (both hands combined)
-            n_frames_mano_total: int = min(so3_per_hand.shape[1], len(shortest_timestamp))
-            xyz_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133 3"] = np.full(
-                (n_frames_mano_total, 133, 3), np.nan, dtype=np.float32
-            )
-            conf_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133"] = np.zeros(
-                (n_frames_mano_total, 133), dtype=np.float32
-            )
-            for poses, translations, mano_layer in zip(so3_per_hand, trans_per_hand, mano_layers, strict=True):
-                mano_outputs: tuple[
-                    Float32[ndarray, "n_frames n_verts=778 3"],
-                    Float32[ndarray, "n_frames n_joints=21 3"],
-                ] = mano_layer(poses, translations)
-                verts: Float32[ndarray, "n_frames n_verts=778 3"] = mano_outputs[0]
-                xyz_mano: Float32[ndarray, "n_frames n_joints=21 3"] = mano_outputs[1]
-
-                # Aggregate MANO joints (21) → into single COCO-133 buffer
-                xyz_mano_np: Float32[ndarray, "n_frames n_joints=21 3"] = xyz_mano
-                hand_idx: ndarray = RIGHT_HAND_IDX if mano_layer.side == "right" else LEFT_HAND_IDX
-                xyz_coco_mano[:, hand_idx, :] = xyz_mano_np[0:n_frames_mano_total]
-                conf_coco_mano[:, hand_idx] = 1.0
-
-                # send verts
-                rr.log(
-                    f"{parent_log_path}/mano_{mano_layer.side}_verts",
-                    rr.Points3D.from_fields(
-                        show_labels=False,
-                    ),
-                    static=True,
-                )
-                n_frames_verts: int = len(verts)
-                verts_base_color_rgb: tuple[int, int, int] = mano_verts_color_rgb_map[mano_layer.side]
-                verts_colors: UInt8[ndarray, "n_frames n_verts=778 3"] = np.full(
-                    (n_frames_verts, verts.shape[1], 3),
-                    verts_base_color_rgb,
-                    dtype=np.uint8,
-                )
-                rr.send_columns(
-                    f"{parent_log_path}/mano_{mano_layer.side}_verts",
-                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(xyzc_stack)])],
-                    columns=[
-                        *rr.Points3D.columns(
-                            positions=rearrange(
-                                verts,
-                                "n_frames kpts dim -> (n_frames kpts) dim",
-                            ),
-                            colors=rearrange(verts_colors, "n_frames kpts dim -> (n_frames kpts) dim"),
-                        ).partition(lengths=[778] * len(verts)),
-                    ],
-                )
-
-                # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
-                faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
-                mesh_color_rgba: tuple[int, int, int, int] = mano_mesh_color_rgba_map[mano_layer.side]
-                mesh_entity_path: Path = parent_log_path / f"mano_{mano_layer.side}_mesh"
-                rr.log(
-                    f"{mesh_entity_path}",
-                    rr.Mesh3D.from_fields(
-                        triangle_indices=faces_np,
-                        albedo_factor=mesh_color_rgba,
-                    ),
-                    static=True,
-                )
-
-                # Stream vertex positions and normals over time under the same entity using send_columns
-                verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
-                n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
-                vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
-                    verts_np[0:n_frames_mesh], faces_np
-                )
-                rr.send_columns(
-                    f"{mesh_entity_path}",
-                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mesh])],
-                    columns=[
-                        *rr.Mesh3D.columns(
-                            vertex_positions=rearrange(
-                                verts_np[0:n_frames_mesh],
-                                "n v d -> (n v) d",
-                            ),
-                            vertex_normals=rearrange(
-                                vertex_normals[0:n_frames_mesh],
-                                "n v d -> (n v) d",
-                            ),
-                        ).partition(lengths=[verts_np.shape[1]] * n_frames_mesh),
-                    ],
-                )
-
-            # Log a single combined MANO keypoints stream (both hands)
-            colors_coco: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
-                confidence_scores=conf_coco_mano[..., np.newaxis]
-            )
-            rr.log(
-                f"{parent_log_path}/mano_keypoints",
-                rr.Points3D.from_fields(
-                    class_ids=0,
-                    keypoint_ids=COCO_133_IDS,
-                    show_labels=False,
-                ),
-                static=True,
-            )
-            rr.send_columns(
-                f"{parent_log_path}/mano_keypoints",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mano_total])],
-                columns=[
-                    *rr.Points3D.columns(
-                        positions=rearrange(
-                            xyz_coco_mano,
-                            "n_frames kpts dim -> (n_frames kpts) dim",
-                        ),
-                        colors=rearrange(
-                            colors_coco,
-                            "n_frames kpts dim -> (n_frames kpts) dim",
-                        ),
-                    ).partition(lengths=[len(COCO_133_IDS)] * n_frames_mano_total),
-                ],
-            )
+        ############################
+        # batch send all MANO data #
+        ############################
+        log_mano_batch(
+            exoego_sequence=exoego_sequence,
+            parent_log_path=parent_log_path,
+            timeline=timeline,
+            shortest_timestamp=shortest_timestamp,
+            log_mano=log_mano,
+        )
 
     ###########################
     # batch send all exo cams #
