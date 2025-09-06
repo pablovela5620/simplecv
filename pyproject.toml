@@ -1,7 +1,6 @@
 [project]
 name = "simplecv"
 version = "0.6.0"
-version = "0.6.0"
 description = "CV Utilities for Python"
 authors = [{ name = "pablovela5620", email = "pablovela5620@gmail.com" }]
 requires-python = ">= 3.12"
@@ -24,7 +23,6 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["simplecv*", "tools*", "tests*"]
 include = ["simplecv*", "tools*", "tests*"]
 
 [tool.pixi.project]
@@ -174,7 +172,6 @@ channels = ["https://prefix.dev/conda-forge"]
 
 [tool.pixi.feature.dev.dependencies]
 beartype = ">=0.21.0,<0.22"
-beartype = ">=0.21.0,<0.22"
 ruff = ">=0.12.7,<0.13"
 pytest = ">=8.3.3,<9"
 hypothesis = ">=6.112.1,<7"
@@ -197,27 +194,7 @@ markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 # Enable pytest-beartype and jaxtyping's import hook so function boundaries in
 # both the library and tests get runtime shape/dtype checks via beartype.
 addopts = "--beartype-packages=tests"
-pytest = ">=8.3.3,<9"
-hypothesis = ">=6.112.1,<7"
 
-[tool.pixi.feature.dev.pypi-dependencies]
-pytest-beartype = ">=0.2,<1"
-
-[tool.pixi.feature.dev.tasks]
-# Run tests in the dev environment
-tests = { cmd = "pytest -q", description = "Run pytest in the dev environment" }
-lint = { cmd = "ruff check .", description = "Run Ruff linter" }
-test_and_lint = { depends-on = [
-    "tests",
-    "lint",
-], description = "Alias for 'tests'" }
-
-
-[tool.pytest.ini_options]
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
-# Enable pytest-beartype and jaxtyping's import hook so function boundaries in
-# both the library and tests get runtime shape/dtype checks via beartype.
-addopts = "--beartype-packages=tests"
 
 [tool.pixi.environments]
 cuda128 = { features = [
