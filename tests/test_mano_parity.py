@@ -12,7 +12,7 @@ from jaxtyping import Float32
 from numpy import ndarray
 from torch import Tensor
 
-from simplecv.ops import mano_jax, mano_np, mano_torch
+from simplecv.ops.mano import mano_jax, mano_np, mano_torch
 
 # ----------------------
 # Small functional parity
@@ -87,9 +87,7 @@ def test_posemap_and_subflatid_parity(pose: Float32[ndarray, "b=1 48"]) -> None:
 
     rm_t: Float32[ndarray, "b=1 144"] = mano_torch.th_posemap_axisang(p_t).detach().cpu().numpy()
     die_if_unbearable(rm_t, Float32[ndarray, "b=1 144"])  # (1,144)
-    pm_t: Float32[ndarray, "b=1 144"] = (
-        mano_torch.subtract_flat_id(torch.from_numpy(rm_t)).detach().cpu().numpy()
-    )
+    pm_t: Float32[ndarray, "b=1 144"] = mano_torch.subtract_flat_id(torch.from_numpy(rm_t)).detach().cpu().numpy()
     die_if_unbearable(pm_t, Float32[ndarray, "b=1 144"])  # (1,144)
 
     rm_n: Float32[ndarray, "b=1 144"] = mano_np.th_posemap_axisang(pose)
@@ -116,9 +114,7 @@ def test_posemap_and_subflatid_parity(pose: Float32[ndarray, "b=1 48"]) -> None:
 def test_with_zeros_parity(mats: Float32[ndarray, "b=1 3 4"]) -> None:
     die_if_unbearable(mats, Float32[ndarray, "b=1 3 4"])  # (1,3,4)
 
-    m_t: Float32[ndarray, "b=1 4 4"] = (
-        mano_torch.th_with_zeros(torch.from_numpy(mats)).detach().cpu().numpy()
-    )
+    m_t: Float32[ndarray, "b=1 4 4"] = mano_torch.th_with_zeros(torch.from_numpy(mats)).detach().cpu().numpy()
     die_if_unbearable(m_t, Float32[ndarray, "b=1 4 4"])  # (1,4,4)
 
     m_n: Float32[ndarray, "b=1 4 4"] = mano_np.th_with_zeros(mats)
@@ -200,7 +196,7 @@ def test_mano_np_matches_torch_on_hocap_sample() -> None:
 
         # JAX layer
         try:
-            from simplecv.ops.mano_jax import MANOLayerJAX
+            from simplecv.ops.mano.mano_jax import MANOLayerJAX
         except Exception:
             pytest.skip("JAX MANO layer not available; skipping JAX parity")
         layer_j = MANOLayerJAX(side=side, betas=betas, mano_root_dir=mano_root)
