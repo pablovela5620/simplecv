@@ -12,6 +12,8 @@ from serde.json import from_json
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters, rescale_intri
 from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.video_io import VideoReader
+import contextlib
 
 ExoCamName = Literal["p1", "p2", "p3"]
 
@@ -55,10 +57,8 @@ class StereoExoSequence(BaseExoSequence):
             mp4_path: Path = cam / f"{cam.name}.mp4"
             # Clean up broken symlink if present
             if mp4_path.is_symlink() and not mp4_path.exists():
-                try:
+                with contextlib.suppress(OSError):
                     mp4_path.unlink()
-                except OSError:
-                    pass
             if mp4_path.exists():
                 video_paths.append(mp4_path)
                 continue
@@ -84,8 +84,14 @@ class StereoExoSequence(BaseExoSequence):
 
         exo_cam_list: list[PinholeParameters] = []
         for cam_dir in sorted([d for d in exo_dir.iterdir() if d.is_dir()]):
+            # Data format changed: prefer <cam>_calibration.json, fallback to calibration.json
             calib_path: Path = cam_dir / f"{cam_dir.name}_calibration.json"
-            assert calib_path.exists(), f"Missing calibration: {calib_path}"
+            if not calib_path.exists():
+                alt_path = cam_dir / "calibration.json"
+                assert alt_path.exists(), (
+                    f"Missing calibration JSON next to {cam_dir}. Tried: {calib_path.name} and {alt_path.name}"
+                )
+                calib_path = alt_path
             calib: ExoCalib = from_json(ExoCalib, calib_path.read_text())
 
             K = calib.intrinsics.camera_matrix.astype(np.float32)
@@ -100,7 +106,7 @@ class StereoExoSequence(BaseExoSequence):
                 height=height,
             )
 
-            # Match intrinsics to actual video resolution if different (use OpenCV capture)
+            # Match intrinsics to actual video resolution using project helpers
             video_path: Path | None = None
             mp4_path = cam_dir / f"{cam_dir.name}.mp4"
             mov_path = cam_dir / f"{cam_dir.name}.mov"
@@ -109,18 +115,43 @@ class StereoExoSequence(BaseExoSequence):
             elif mov_path.exists():
                 video_path = mov_path
             if video_path is not None:
+                # Map calibration K (defined for intrinsics.image_size) to the actual
+                # video resolution. Same aspect ratio → use rescale_intri.
+                # Different aspect ratio (letterbox/crop) → uniform scale + pad offsets
+                # to preserve geometry and principal point.
                 try:
-                    import cv2
-
-                    cap = cv2.VideoCapture(str(video_path))
-                    if cap.isOpened():
-                        vwidth = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        vheight = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        cap.release()
-                        if vwidth > 0 and vheight > 0 and (vwidth != intri.width or vheight != intri.height):
+                    vr = VideoReader(video_path)
+                    vwidth = int(vr.width)
+                    vheight = int(vr.height)
+                    # If resolutions differ, adjust intrinsics.
+                    if (intri.width is not None and intri.height is not None) and (
+                        vwidth != intri.width or vheight != intri.height
+                    ):
+                        # If aspect ratio matches, simple anisotropic rescale is correct.
+                        ow, oh = float(intri.width), float(intri.height)
+                        if abs((vwidth / vheight) - (ow / oh)) < 1e-6:
                             intri = rescale_intri(intri, target_width=vwidth, target_height=vheight)
+                        else:
+                            # Letterbox/pad case: uniform scale with offsets to maintain principal point alignment
+                            sw = float(vwidth) / ow
+                            sh = float(vheight) / oh
+                            s = min(sw, sh)
+                            content_w = ow * s
+                            content_h = oh * s
+                            pad_x = (float(vwidth) - content_w) * 0.5
+                            pad_y = (float(vheight) - content_h) * 0.5
+
+                            intri = Intrinsics(
+                                camera_conventions=intri.camera_conventions,
+                                fl_x=float(intri.fl_x * s),
+                                fl_y=float(intri.fl_y * s),
+                                cx=float(intri.cx * s + pad_x),
+                                cy=float(intri.cy * s + pad_y),
+                                width=int(vwidth),
+                                height=int(vheight),
+                            )
                 except Exception:
-                    # If OpenCV unavailable or fails, keep original calibration size
+                    # If probe fails, keep original calibration size
                     pass
 
             # OpenCV convention typically provides world->cam (R, t). Use that directly.
