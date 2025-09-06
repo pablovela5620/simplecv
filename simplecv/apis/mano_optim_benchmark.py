@@ -140,7 +140,7 @@ def main(cfg: ManoOptimBenchConfig):
 
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     exo_cam_param_list: list[PinholeParameters] = exo_sequence.exo_cam_list
-    chosen_idx: tuple = (0, 5)
+    # chosen_idx: tuple = (0, 5)
     gt_so3_seq: Float[ndarray, "n_frames 48"] | None = None
     if exoego_labels is not None:
         xyzc_stack: Float[ndarray, "n_frames n_kpts=133 4"] = exoego_labels.xyzc_stack
