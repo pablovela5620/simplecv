@@ -30,7 +30,8 @@ class StereoSequence(BaseExoEgoSequence):
         return StereoEgoSequence(cfg=self.config)
 
     def _build_exo(self) -> BaseExoSequence | None:
-        return StereoExoSequence(cfg=self.config)
+        # return StereoExoSequence(cfg=self.config)
+        return None
 
     def load_labels(self) -> ExoEgoLabels | None:
         """No labels available; return an empty COCO-133 buffer to satisfy pipelines."""
