@@ -11,15 +11,22 @@ from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from serde import serde
+from serde import serde
 from serde.yaml import from_yaml
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.hocap_ego import ExoCameraIDs, HocapEgoSequence, HOCapExtrinsicsData
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exo.hocap_exo import HocapExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
+
+
+@serde
+class CalibratedMano:
+    betas: Float32[ndarray, "10"]
 
 
 @serde
