@@ -6,23 +6,38 @@ from typing import Literal
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jax import jit
-from jax import numpy as jnp
 from jaxopt._src.levenberg_marquardt import LevenbergMarquardtState
-from jaxtyping import Array, Float, Float32, Int, UInt8
+from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 from tqdm import tqdm
 
-from simplecv.apis.view_exoego import create_blueprint, filter_out_of_bounds_keypoints, log_exoego_batch
+from simplecv.apis.view_exoego import (
+    compute_vertex_normals_batch,
+    create_blueprint,
+    filter_out_of_bounds_keypoints,
+    log_exoego_batch,
+)
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
-from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS, LEFT_HAND_IDX, RIGHT_HAND_IDX
-from simplecv.ops.mano.mano_jax import ManoSimpleLayerJAX
-from simplecv.ops.mano.optim_jax_multi import LossWeights, ManoOptimization, OptimizationResults
-from simplecv.ops.mano.optim_jax_single import SingleHandOptimization
+from simplecv.data.skeleton.coco_133 import (
+    COCO_133_ID2NAME,
+    COCO_133_IDS,
+    COCO_133_LINKS,
+    LEFT_HAND_IDX,
+    RIGHT_HAND_IDX,
+)
+from simplecv.ops.mano.mano_np import ManoSimpleLayerNP
+from simplecv.ops.mano.optim_jax_single import OptimInput, OptimResult, PoseOptimConfig, SingleHandOptim
+from simplecv.ops.mano.optim_jax_single_shape import (
+    OptimShapeInput,
+    OptimShapeResult,
+    PoseShapeOptimConfig,
+    SingleHandShapeOptim,
+)
 from simplecv.ops.triangulate import proj_3d_vectorized
+from simplecv.print_utils import debug_numpy as lo
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
     log_pinhole,
@@ -54,8 +69,13 @@ def set_annotation_context() -> None:
                     ],
                     keypoint_connections=COCO_133_LINKS,
                 ),
-                rr.AnnotationInfo(id=1, label="Left Hand"),
-                rr.AnnotationInfo(id=2, label="Right Hand"),
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=1, label="Coco Wholebody - Optimized", color=(255, 0, 0)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in COCO_133_ID2NAME.items()
+                    ],
+                    keypoint_connections=COCO_133_LINKS,
+                ),
             ]
         ),
         static=True,
@@ -107,19 +127,21 @@ def main(cfg: ManoOptimBenchConfig):
         shortest_timestamp[: cfg.max_frames] if cfg.max_frames is not None else shortest_timestamp
     )
 
+    log_exoego_batch(
+        exoego_sequence,
+        parent_log_path=parent_log_path,
+        timeline=timeline,
+        shortest_timestamp=shortest_timestamp,
+        log_ego=False,
+        log_exo=True,
+        log_mano=False,
+    )
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
-
-    # log_exoego_batch(
-    #     exoego_sequence,
-    #     parent_log_path=parent_log_path,
-    #     timeline=timeline,
-    #     shortest_timestamp=shortest_timestamp,
-    #     log_ego=False,
-    #     log_exo=True,
-    # )
 
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     exo_cam_param_list: list[PinholeParameters] = exo_sequence.exo_cam_list
+    # chosen_idx: tuple = (0, 5)
+    gt_so3_seq: Float[ndarray, "n_frames 48"] | None = None
     if exoego_labels is not None:
         xyzc_stack: Float[ndarray, "n_frames n_kpts=133 4"] = exoego_labels.xyzc_stack
         xyz_stack: Float[ndarray, "n_frames n_kpts=133 3"] = xyzc_stack[:, :, :3]
@@ -129,129 +151,132 @@ def main(cfg: ManoOptimBenchConfig):
         Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
             [pinhole.projection_matrix for pinhole in exo_cam_param_list]
         )
+        # Pall_exo = Pall_exo[list(chosen_idx), :, :]
         uv_exo_stack: Float[ndarray, "n_frames n_views n_kpts=133 2"] = proj_3d_vectorized(
             xyz_hom=xyz_hom_stack, P=Pall_exo
         )
+        # any keypoints that are out of frame are turned into nan when margin percentage is 0.0
         uv_exo_stack: Float[ndarray, "n_frames n_views n_kpts=133 2"] = filter_out_of_bounds_keypoints(
-            uv_exo_stack, exo_cam_param_list[0]
+            uv_exo_stack, exo_cam_param_list[0], margin_percentage=0.0
         )
+        print(uv_exo_stack.shape)
         # beta values for mano
-        gt_beta: Float[ndarray, "10"] | None = (
-            exoego_labels.mano_stack.betas if exoego_labels.mano_stack is not None else None
-        )
+        # gt_beta: Float[ndarray, "10"] | None = (
+        #     exoego_labels.mano_stack.betas if exoego_labels.mano_stack is not None else None
+        # )
+        # Also capture GT pose for the side we optimize against (0=right,1=left)
+        if exoego_labels.mano_stack is not None:
+            side_idx_pose: int = 1 if cfg.single_hand_side == "left" else 0
+            gt_so3_seq: Float32[ndarray, "n_frames 48"] = exoego_labels.mano_stack.so3[:, side_idx_pose, :]
 
+    ###################################
+    # Step 1. Optimize for Mano Shape #
+    ###################################
+    hand_side: Literal["left", "right"] = "left"
+    n_frames_optim: int = 10
+    mano_layer: ManoSimpleLayerNP = ManoSimpleLayerNP(side=hand_side, mano_root=Path("data/"))
+
+    optim_shape_cfg = PoseShapeOptimConfig(
+        Pall=Pall_exo, hand_side=hand_side, n_frames_optim=n_frames_optim, n_optim_iters=30
+    )
+    optimizer_shape = SingleHandShapeOptim(config=optim_shape_cfg)
+    # take the first 30 frames and feed them into the optimizer
+    optim_shape_input: OptimShapeInput = OptimShapeInput(
+        uv_pred=uv_exo_stack[:n_frames_optim],
+        beta_init=np.zeros((10,), dtype=np.float32),
+        so3_init=np.zeros((n_frames_optim, 48), dtype=np.float32),
+        trans_init=np.array([[0.0, 0.0, 0.6]]).repeat(n_frames_optim, axis=0).astype(np.float32),
+    )
+    optim_shape_tuple: tuple[OptimShapeResult, LevenbergMarquardtState] = optimizer_shape(optim_shape_input)
+    optim_shape_result: OptimShapeResult = optim_shape_tuple[0]
+    beta_optim: Float[ndarray, "10"] = optim_shape_result.beta_optim
+    # beta_optim: Float[ndarray, "10"] = np.random.randn(10) * 5.0
+
+    # from icecream import ic
+
+    # ic(optim_shape_result.beta_optim - gt_beta)
+    # ic(optim_shape_result.beta_optim, gt_beta)
+    ######################################################################
+    # Step 2. With Found Mano Shape, Optimize for pose across all frames #
+    ######################################################################
     # Optimizers over MANO pose (so3) + translation
-    single_opt_cache: dict[tuple[int, ...], SingleHandOptimization] = {}
-    multi_opt_cache: dict[tuple[int, ...], ManoOptimization] = {}
-    for ts_idx, timestamp in enumerate(tqdm(frames_to_iter, desc="Logging frames", unit="frame")):
+    optim_cfg = PoseOptimConfig(
+        beta=beta_optim,
+        Pall=Pall_exo,
+        hand_side=hand_side,
+    )
+
+    optimizer = SingleHandOptim(config=optim_cfg)
+    # so3_init: Float[ndarray, "1 48"] = gt_so3_seq[0:1, ...] if gt_so3_seq is not None else np.zeros((1, 48))
+    so3_init: Float[ndarray, "1 48"] = np.zeros((1, 48))
+    # start with a reasonable depth
+    trans_init: Float[ndarray, "1 3"] = np.array([[0.0, 0.0, 0.6]])
+    # Track pose errors if GT is available
+    pose_mse_list: list[float] = []
+    for ts_idx, timestamp in enumerate(tqdm(frames_to_iter, desc="Optimizing Frames", unit="frame")):
         rr.set_time(timeline="video_time", duration=1e-9 * timestamp)
         _bgr_list: list[UInt8[ndarray, "H W 3"]] = exo_video_readers[ts_idx]
 
         # 2D keypoints per-view for COCO-133 → slice hands (already in Mediapipe order)
-        uv_frame: Float[ndarray, "n_views 133 2"] = uv_exo_stack[ts_idx]
-        uv_left_mediapipe: Float[ndarray, "n_views 21 2"] = uv_frame[:, LEFT_HAND_IDX, :]
-        uv_right_mediapipe: Float[ndarray, "n_views 21 2"] = uv_frame[:, RIGHT_HAND_IDX, :]
-
-        if cfg.use_single_hand:
-            # Select side
-            side = cfg.single_hand_side.lower()
-            uv_sel = uv_left_mediapipe if side == "left" else uv_right_mediapipe
-            # Keep only camera views where all 2D keypoints are finite; align P accordingly
-            views_all_finite: ndarray = np.isfinite(uv_sel).all(axis=(1, 2))
-            valid_view_indices: ndarray = np.nonzero(views_all_finite)[0]
-            if valid_view_indices.size == 0:
-                print(f"Skipping frame {ts_idx} for {side}: no views with all-finite 2D keypoints")
-                continue
-
-            uv_use: Float[ndarray, "n_views_valid 21 2"] = uv_sel[valid_view_indices]
-            P_use: Float[ndarray, "n_views_valid 3 4"] = Pall_exo[valid_view_indices]
-
-            view_key: tuple[int, ...] = tuple(int(i) for i in valid_view_indices.tolist())
-            if view_key not in single_opt_cache:
-                single_opt_cache[view_key] = SingleHandOptimization(
-                    beta=gt_beta,
-                    Pall=P_use,
-                    hand_side="left" if side == "left" else "right",
-                    loss_weights=LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0),
-                )
-            single_results, state = single_opt_cache[view_key](uv_use)
-            xyz_mano_opt_lr: Float[ndarray, "21 3"] = single_results.xyz_mano
-            from simplecv.print_utils import debug_numpy as lo
-
-            print(f"{side.title()} 3D Keypoints", lo(xyz_mano_opt_lr))
-            # Simple GT metric (ignore NaNs in GT)
-            gt_xyz_lr: Float[ndarray, "21 3"] = xyz_stack[ts_idx, LEFT_HAND_IDX if side == "left" else RIGHT_HAND_IDX]
-            valid = ~np.isnan(gt_xyz_lr).any(axis=-1)
-            if np.any(valid):
-                mae_m = float(np.mean(np.linalg.norm(gt_xyz_lr[valid] - xyz_mano_opt_lr[valid], axis=-1)))
-                print(f"Mean |Δ| to GT ({side}) [m]: {mae_m:.4f}")
-            # Assert no NaNs in optimized result
-            assert np.isfinite(xyz_mano_opt_lr).all(), "NaNs/Infs in optimized 3D keypoints"
-            # Log 3D keypoints for the selected side
-            rr.log(f"{parent_log_path}/optimized_{side}_kpts", rr.Points3D(xyz_mano_opt_lr))
-            # Overlay re-projections
-            xyz_hom_lr: Float[ndarray, "1 21 4"] = np.concatenate(
-                [xyz_mano_opt_lr[None, ...], np.ones((1, 21, 1), dtype=xyz_mano_opt_lr.dtype)], axis=-1
-            )
-            uv_proj_lr: Float[ndarray, "1 n_views 21 2"] = proj_3d_vectorized(xyz_hom=xyz_hom_lr, P=Pall_exo)
-            for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
-                exo_cam_path: Path = parent_log_path / exo_cam.name
-                exo_pinhole_path: Path = exo_cam_path / "pinhole"
-                rr.log(f"{exo_pinhole_path}/optimized_{side}", rr.Points2D(uv_proj_lr[0, exo_cam_idx]))
-            continue  # skip multi-hand branch
-
-        # Multi-hand branch with view alignment, GT checking, and NaN guard
-        views_left_ok: ndarray = np.isfinite(uv_left_mediapipe).all(axis=(1, 2))
-        views_right_ok: ndarray = np.isfinite(uv_right_mediapipe).all(axis=(1, 2))
-        views_ok: ndarray = views_left_ok & views_right_ok
-        valid_idx: ndarray = np.nonzero(views_ok)[0]
-        if valid_idx.size == 0:
-            print("Skipping frame: no views with all-finite 2D keypoints for both hands")
-            continue
-
-        uv_left_use: Float[ndarray, "n_views_valid 21 2"] = uv_left_mediapipe[valid_idx]
-        uv_right_use: Float[ndarray, "n_views_valid 21 2"] = uv_right_mediapipe[valid_idx]
-        P_use: Float[ndarray, "n_views_valid 3 4"] = Pall_exo[valid_idx]
-
-        view_key_mh: tuple[int, ...] = tuple(int(i) for i in valid_idx.tolist())
-        if view_key_mh not in multi_opt_cache:
-            multi_opt_cache[view_key_mh] = ManoOptimization(
-                beta=gt_beta, Pall=P_use, loss_weights=LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0)
-            )
-        optimization_results, state = multi_opt_cache[view_key_mh](
-            uv_left_pred_batch=uv_left_use,
-            uv_right_pred_batch=uv_right_use,
+        uv_frame: Float[ndarray, "n_frames=1 n_views 133 2"] = uv_exo_stack[ts_idx : ts_idx + 1, :, :, :]
+        optim_input: OptimInput = OptimInput(uv_pred=uv_frame, so3_init=so3_init, trans_init=trans_init)
+        optim_tuple: tuple[OptimResult, LevenbergMarquardtState] = optimizer(optim_input)
+        optim_result: OptimResult = optim_tuple[0]
+        mano_out: tuple[Float32[ndarray, "b n_verts=778 3"], Float32[ndarray, "b joints_and_tips=21 3"]] = mano_layer(
+            th_pose_coeffs=optim_result.so3_optim,
+            th_betas=beta_optim[np.newaxis, :],
+            th_trans=optim_result.trans_optim,
         )
-        xyz_mano_opt: Float[ndarray, "2 21 3"] = optimization_results.xyz_mano
-        from simplecv.print_utils import debug_numpy as lo
-        print("Left 3D Keypoints", lo(xyz_mano_opt[0]))
-        print("Right 3D Keypoints", lo(xyz_mano_opt[1]))
+        # set new init params
+        so3_init = optim_result.so3_optim
+        trans_init = optim_result.trans_optim
+        xyz_optim: Float[ndarray, "1 n_kpts=133 3"] = np.full((1, 133, 3), np.nan)
+        match optim_cfg.hand_side:
+            case "left":
+                xyz_optim[..., LEFT_HAND_IDX, :] = mano_out[1] / 1000
+            case "right":
+                xyz_optim[..., RIGHT_HAND_IDX, :] = mano_out[1] / 1000
+        rr.log(
+            f"{parent_log_path}/optim_xyz",
+            rr.Points3D(
+                xyz_optim[0],
+                colors=(0, 255, 0),
+                class_ids=1,
+                keypoint_ids=COCO_133_IDS,
+                show_labels=False,
+            ),
+        )
 
-        # GT metrics and NaN checks
-        gt_left: Float[ndarray, "21 3"] = xyz_stack[ts_idx, LEFT_HAND_IDX]
-        gt_right: Float[ndarray, "21 3"] = xyz_stack[ts_idx, RIGHT_HAND_IDX]
-        valid_l = ~np.isnan(gt_left).any(axis=-1)
-        valid_r = ~np.isnan(gt_right).any(axis=-1)
-        if np.any(valid_l):
-            mae_left = float(np.mean(np.linalg.norm(gt_left[valid_l] - xyz_mano_opt[0][valid_l], axis=-1)))
-            print(f"Mean |Δ| to GT (left) [m]: {mae_left:.4f}")
-        if np.any(valid_r):
-            mae_right = float(np.mean(np.linalg.norm(gt_right[valid_r] - xyz_mano_opt[1][valid_r], axis=-1)))
-            print(f"Mean |Δ| to GT (right) [m]: {mae_right:.4f}")
-        assert np.isfinite(xyz_mano_opt).all(), "NaNs/Infs in optimized 3D keypoints (both hands)"
+        # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
+        faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.th_faces.astype(np.int32)
+        mesh_color_rgba: tuple[int, int, int, int] = (255, 0, 0, 255)
+        mesh_entity_path: Path = parent_log_path / f"mano_{mano_layer.side}_mesh"
 
-        # Log 3D keypoints for left/right
-        rr.log(f"{parent_log_path}/optimized_left_kpts", rr.Points3D(xyz_mano_opt[0]))
-        rr.log(f"{parent_log_path}/optimized_right_kpts", rr.Points3D(xyz_mano_opt[1]))
+        # Stream vertex positions and normals over time under the same entity using send_columns
+        verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = mano_out[0] / 1000
+        n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
+        vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+            verts_np[0:n_frames_mesh], faces_np
+        )
 
-        # Also overlay 2D reprojections per exo cam for visual validation
-        for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
-            exo_cam_path: Path = parent_log_path / exo_cam.name
-            exo_pinhole_path: Path = exo_cam_path / "pinhole"
-            for side_idx, side_name in enumerate(["left", "right"]):
-                xyz_hom: Float[ndarray, "1 21 4"] = np.concatenate(
-                    [xyz_mano_opt[side_idx][None, ...], np.ones((1, 21, 1), dtype=xyz_mano_opt.dtype)], axis=-1
-                )
-                uv_proj: Float[ndarray, "1 n_views 21 2"] = proj_3d_vectorized(xyz_hom=xyz_hom, P=Pall_exo)
-                uv_proj_cam: Float[ndarray, "21 2"] = uv_proj[0, exo_cam_idx]
-                rr.log(f"{exo_pinhole_path}/optimized_{side_name}", rr.Points2D(uv_proj_cam))
+        rr.log(
+            f"{mesh_entity_path}",
+            rr.Mesh3D(
+                vertex_positions=verts_np[0],
+                vertex_normals=vertex_normals[0],
+                triangle_indices=faces_np,
+                albedo_factor=mesh_color_rgba,
+            ),
+        )
+
+        # ----------------------------------------------
+        # Pose GT comparison (exclude global rotation 0:3)
+        # ----------------------------------------------
+        if gt_so3_seq is not None:
+            gt_pose_frame: Float[ndarray, "48"] = gt_so3_seq[ts_idx]
+            diff: Float[ndarray, "45"] = optim_result.so3_optim[0, 3:48] - gt_pose_frame[3:48]
+            pose_mse = float(np.mean(diff**2))
+            pose_mse_list.append(pose_mse)
+
+    if pose_mse_list:
+        print(f"Average pose MSE over {len(pose_mse_list)} frames: {np.mean(pose_mse_list):.6f}")
