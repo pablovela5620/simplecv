@@ -11,7 +11,6 @@ from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from serde import serde
-from serde import serde
 from serde.yaml import from_yaml
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
