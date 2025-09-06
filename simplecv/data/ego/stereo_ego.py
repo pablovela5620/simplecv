@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-from jaxtyping import Float32, Int64
+from jaxtyping import Float32
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from scipy.spatial.transform import Rotation as R
@@ -15,6 +14,7 @@ from serde.json import from_json
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
+from simplecv.video_io import VideoReader
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.stereo import StereoConfig
@@ -76,7 +76,7 @@ class StereoEgoSequence(BaseEgoSequence):
       <root>/<sequence_name>/ego/
         - calibration.json
         - left.mp4, right.mp4
-        - poses_world_coordinates.csv  # applies to LEFT camera
+        - left_poses_world.csv  # per-frame LEFT poses indexed by frame_idx
     """
 
     config: "StereoConfig"
@@ -117,69 +117,77 @@ class StereoEgoSequence(BaseEgoSequence):
         )
 
         # Load left camera cam_T_world per-frame aligned to video frames using left.csv
-        poses_csv: Path = ego_dir / "poses_world_coordinates.csv"
+        # New format: per-side pose CSVs with frame_idx. Use LEFT poses and extrinsics_left_to_right
+        # to compute RIGHT poses to ensure rigid alignment.
+        poses_csv: Path = ego_dir / "left_poses_world.csv"
         assert poses_csv.exists(), f"File {poses_csv} does not exist"
         left_index_csv: Path = ego_dir / "left.csv"
         assert left_index_csv.exists(), f"File {left_index_csv} does not exist"
-
-        # parse pose rows (timestamp -> cam_T_world)
-        pose_rows: list[PoseWorldRow] = []
-        with open(poses_csv, "r", newline="") as f_pose:
-            reader_pose = csv.DictReader(f_pose)
-            for row_dict in reader_pose:
-                pose_rows.append(
-                    PoseWorldRow(**{k: (int(v) if k == "timestamp_ns" else float(v)) for k, v in row_dict.items()})
-                )
-        # ensure sorted by timestamp
-        pose_rows.sort(key=lambda r: r.timestamp_ns)
-
-        # parse left frame timestamps and indices
-        left_frames: list[tuple[int, int]] = []  # (ts_ns, frame_idx)
+        # parse left frames (frame_idx list)
+        left_frames: list[int] = []
         with open(left_index_csv, "r", newline="") as f_left:
             reader_left = csv.DictReader(f_left)
             for row in reader_left:
-                ts_ns = int(row["ts_ns"]) if row.get("ts_ns") is not None else int(row["timestamp_ns"])  # robustness
-                fi = int(row["frame_idx"]) if row.get("frame_idx") is not None else int(row["frame"])  # robustness
-                left_frames.append((ts_ns, fi))
-        # sort by frame index ascending
-        left_frames.sort(key=lambda x: x[1])
+                fi = int(row.get("frame_idx") or row.get("frame"))
+                left_frames.append(fi)
+        left_frames.sort()
 
-        # clamp to actual video frame count to match timestamps used by Rerun
+        # clamp to actual video frame count to match what we log
         try:
-            import cv2
-
-            left_mp4 = ego_dir / "left.mp4"
-            cap = cv2.VideoCapture(str(left_mp4))
-            frame_cnt = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else len(left_frames)
-            cap.release()
+            vr = VideoReader(ego_dir / "left.mp4")
+            frame_cnt = len(vr)
             if len(left_frames) > frame_cnt:
                 left_frames = left_frames[:frame_cnt]
         except Exception:
-            # If OpenCV is unavailable or any error occurs, fall back to existing list
             pass
 
-        # Build per-frame transforms using nearest previous pose timestamp
+        # parse pose rows (frame_idx -> cam_T_world) and sort by frame_idx
+        class _Row:
+            __slots__ = ("frame_idx","tx","ty","tz","qx","qy","qz","qw")
+            def __init__(self, d: dict[str,str]):
+                self.frame_idx = int(d["frame_idx"]) ; self.tx = float(d["tx"]) ; self.ty = float(d["ty"]) ; self.tz = float(d["tz"]) ; self.qx = float(d["qx"]) ; self.qy = float(d["qy"]) ; self.qz = float(d["qz"]) ; self.qw = float(d["qw"]) 
+
+        pose_rows: list[_Row] = []
+        with open(poses_csv, "r", newline="") as f_pose:
+            reader_pose = csv.DictReader(f_pose)
+            for row_dict in reader_pose:
+                pose_rows.append(_Row(row_dict))
+        pose_rows.sort(key=lambda r: r.frame_idx)
+
+        # Build per-frame transforms using nearest previous pose by frame_idx
         right_T_left: Float32[ndarray, "4 4"] = calib.extrinsics_left_to_right.matrix_4x4.astype(np.float32)
+        # Heuristic: baseline often stored in centimeters; convert to meters if too large
+        if np.linalg.norm(right_T_left[:3, 3]) > 1.0:
+            right_T_left[:3, 3] *= 0.01
+        # We use cam_T_world convention. Given right_T_left (right <- left), compute left_T_right.
+        left_T_right: Float32[ndarray, "4 4"] = np.linalg.inv(right_T_left).astype(np.float32)
         left_cam_list: list[PinholeParameters] = []
         right_cam_list: list[PinholeParameters] = []
 
         pose_i = 0
         n_pose = len(pose_rows)
         current_left_T_world: Float32[ndarray, "4 4"] | None = None
-        for ts_ns, _frame_idx in left_frames:
-            # advance pose index while next pose timestamp <= current frame timestamp
-            while pose_i + 1 < n_pose and pose_rows[pose_i + 1].timestamp_ns <= ts_ns:
+        for fi in left_frames:
+            # advance pose index while next pose frame_idx <= current frame_idx
+            while pose_i + 1 < n_pose and pose_rows[pose_i + 1].frame_idx <= fi:
                 pose_i += 1
             # use current pose_i; if none yet, use the first pose
             row = pose_rows[pose_i] if n_pose > 0 else None
             if row is not None:
-                current_left_T_world = _quat_trans_to_mat4(row)
+                current_left_T_world = _quat_trans_to_mat4(
+                    PoseWorldRow(
+                        timestamp_ns=0,
+                        tx=row.tx, ty=row.ty, tz=row.tz,
+                        qx=row.qx, qy=row.qy, qz=row.qz, qw=row.qw,
+                    )
+                )
             # fallback if file empty (shouldn't happen)
             if current_left_T_world is None:
                 current_left_T_world = np.eye(4, dtype=np.float32)
 
             left_cam_T_world = current_left_T_world
-            right_cam_T_world: Float32[ndarray, "4 4"] = right_T_left @ left_cam_T_world
+            # Compose right cam pose in world: right_T_world = left_T_world @ left_T_right
+            right_cam_T_world: Float32[ndarray, "4 4"] = (left_cam_T_world @ left_T_right).astype(np.float32)
 
             # Fill Extrinsics using camera->world (preferred) to match project conventions
             left_extri = Extrinsics(cam_R_world=left_cam_T_world[:3, :3], cam_t_world=left_cam_T_world[:3, 3])
