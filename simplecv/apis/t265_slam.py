@@ -103,7 +103,7 @@ class _VideoStreamEncoder:
             codec.open()
         # Some builds don't require/allow explicit open()
         self._codec = codec
-        self._last_pts_s: float = 0.0
+        self._last_pts_ns: int = 0
 
         self._thr = threading.Thread(target=self._run, name=f"Encoder[{entity_path}]", daemon=True)
         self._thr.start()
@@ -111,13 +111,13 @@ class _VideoStreamEncoder:
         self._log_count = 0
         self._seq = 0
 
-    def enqueue(self, frame_gray: UInt8[ndarray, "h w"], pts: float) -> None:
-        pts_s: float = float(pts)
+    def enqueue(self, frame_gray: UInt8[ndarray, "h w"], pts_ns: int) -> None:
+        pts_ns = int(pts_ns)
         # Drop oldest if full to keep acquisition non-blocking
         if self.q.full():
             with contextlib.suppress(Exception):
                 self.q.get_nowait()
-        self.q.put((frame_gray, pts_s))
+        self.q.put((frame_gray, pts_ns))
 
     def stop(self) -> None:
         self._stop.set()
@@ -125,13 +125,13 @@ class _VideoStreamEncoder:
         # Flush remaining packets
         with contextlib.suppress(Exception):
             for packet in self._codec.encode(None):
-                rr.set_time("video_time", duration=self._last_pts_s)
+                rr.set_time("video_time", duration=np.timedelta64(self._last_pts_ns, "ns"))
                 rr.log(self.entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                frame_np, pts_s = self.q.get(timeout=0.05)
+                frame_np, pts_ns = self.q.get(timeout=0.05)
             except Exception:
                 continue
             try:
@@ -139,18 +139,21 @@ class _VideoStreamEncoder:
                 frame = self._av.VideoFrame.from_ndarray(frame_np, format="gray")
                 frame = frame.reformat(width=self.width, height=self.height, format=self._codec.pix_fmt)
                 # Maintain a monotonic encoder PTS consistent with fps
+                pts_s: float = float(pts_ns) / 1_000_000_000.0
                 frame.pts = int(round(pts_s * float(self.fps)))
                 frame.time_base = self._codec.time_base
 
                 for packet in self._codec.encode(frame):
                     # Log video samples on a single seconds-based timeline
-                    rr.set_time("video_time", duration=float(pts_s))
+                    rr.set_time("video_time", duration=np.timedelta64(pts_ns, "ns"))
                     rr.log(self.entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
                     if self._log_count < 3:
                         with contextlib.suppress(Exception):
-                            print(f"{self.entity_path}: logged {len(bytes(packet))} bytes at {pts_s:.3f}s")
+                            print(
+                                f"{self.entity_path}: logged {len(bytes(packet))} bytes at {pts_ns} ns (~{pts_s:.3f}s)"
+                            )
                         self._log_count += 1
-                self._last_pts_s = float(pts_s)
+                self._last_pts_ns = int(pts_ns)
                 self._seq += 1
             except Exception as e:  # noqa: BLE001
                 if not self._err_printed:
@@ -360,6 +363,7 @@ def main(config: T265Config) -> int:
         start_ts = time.time()
         # Track a relative origin for the video timeline
         video_ts0_ms: float | None = None
+        video_ts0_ns: int | None = None
 
         while True:
             if config.run_seconds is not None and (time.time() - start_ts) >= float(config.run_seconds):
@@ -404,20 +408,22 @@ def main(config: T265Config) -> int:
             left_rect: UInt8[ndarray, "h w"] = cv2.remap(left_np, lm1, lm2, interpolation=cv2.INTER_LINEAR)
             right_rect: UInt8[ndarray, "h w"] = cv2.remap(right_np, rm1, rm2, interpolation=cv2.INTER_LINEAR)
 
-            # Use device timestamp in seconds for the video timeline (relative to first frame)
-            ts_left_s: float
+            # Use device timestamp as nanoseconds for the video timeline (relative to first frame)
+            ts_left_ns: int
             try:
                 ts_left_ms = float(left.get_timestamp())
                 if video_ts0_ms is None:
                     video_ts0_ms = ts_left_ms
-                ts_left_s = (ts_left_ms - video_ts0_ms) / 1000.0
+                    video_ts0_ns = int(round(ts_left_ms * 1_000_000.0))
+                assert video_ts0_ns is not None
+                ts_left_ns = int(round(ts_left_ms * 1_000_000.0)) - video_ts0_ns
             except Exception:
-                ts_left_s = float(time.time() - start_ts)
+                # Fallback to monotonic wall-clock
+                ts_left_ns = int(round((time.time() - start_ts) * 1_000_000_000.0))
 
             # Log rectified pinhole streams (preferred) or fallback to JPEG images
-            if left_vs and right_vs:
-                left_vs.enqueue(left_rect, pts=ts_left_s)
-                right_vs.enqueue(right_rect, pts=ts_left_s)
+            left_vs.enqueue(left_rect, pts_ns=ts_left_ns)
+            right_vs.enqueue(right_rect, pts_ns=ts_left_ns)
 
             # Also log original fisheye images for comparison (optional)
             if config.log_fisheye:
@@ -440,8 +446,8 @@ def main(config: T265Config) -> int:
                 R_mid_world: Float[ndarray, "3 3"] = _quat_to_rot_m33(
                     data.rotation.x, data.rotation.y, data.rotation.z, data.rotation.w
                 )
-                # Ensure pose/camera logs align with the video timeline
-                rr.set_time("video_time", duration=ts_left_s)
+                # Ensure pose/camera logs align with the video timeline (duration in nanoseconds)
+                rr.set_time("video_time", duration=np.timedelta64(ts_left_ns, "ns"))
                 # World_T_mid
                 world_T_mid: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
                 world_T_mid[:3, :3] = R_mid_world
