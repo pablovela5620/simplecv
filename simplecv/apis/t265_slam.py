@@ -3,12 +3,14 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 
 import cv2
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 from jaxtyping import Float, UInt8
 from numpy import ndarray
 
@@ -41,14 +43,18 @@ class T265Config:
     log_fisheye: bool = False
     """If True, also log raw fisheye images under '<base>/left|right/fisheye/image'."""
 
-    stream_rectified_h264: bool = True
-    """If True, stream rectified left/right as H.264 via rr.VideoStream using PyAV in background threads."""
-
     target_fps: int = 30
     """Target FPS for encoder time base and PTS. T265 fisheye is typically 30 FPS."""
 
     run_seconds: float | None = None
     """Optional total run time in seconds. None runs until Ctrl+C."""
+
+    rrd_save_dir: Path | None = Path("data/rrd-save-files")
+    """Directory to save a .rrd recording (MultiSink). If None, don't save.
+
+    The saved file name will be formatted as:
+      {YYYYmmdd_HHMMSS}_t265_slam_rrd_{rerun_version}.rrd
+    """
 
 
 class _VideoStreamEncoder:
@@ -87,7 +93,12 @@ class _VideoStreamEncoder:
         codec.time_base = Fraction(1, self.fps)
         # Low-latency options if available (best-effort)
         with contextlib.suppress(Exception):
-            codec.options = {"preset": "ultrafast", "tune": "zerolatency"}
+            codec.options = {
+                "preset": "ultrafast",
+                "tune": "zerolatency",
+                # Ensure SPS/PPS are present in-stream so remuxing works reliably
+                "x264-params": "repeat-headers=1:keyint=60:scenecut=0",
+            }
         with contextlib.suppress(Exception):
             codec.open()
         # Some builds don't require/allow explicit open()
@@ -158,6 +169,22 @@ def main(config: T265Config) -> int:
 
     # Minimal setup: assume device is connected; no extra validation
     # Rerun is initialized via RerunTyroConfig.__post_init__
+    # Enable MultiSink file saving if requested.
+    try:
+        if config.rrd_save_dir is not None:
+            config.rrd_save_dir.mkdir(parents=True, exist_ok=True)
+            rr_ver = getattr(rr, "__version__", "unknown")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            rrd_file = config.rrd_save_dir / f"{ts}_t265_slam_rrd_{rr_ver}.rrd"
+            # Set MultiSink sinks explicitly (file sink; add grpc sink if desired)
+            sinks: list[rr.Sink] = [rr.GrpcSink(), rr.FileSink(str(rrd_file))]
+            # If you want to also stream to a local viewer, uncomment this:
+            # sinks.append(rr.GrpcSink())
+            rr.set_sinks(*sinks)
+            print(f"Saving Rerun recording to: {rrd_file}")
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: failed to enable rrd saving: {e}")
+
     pipeline = rs.pipeline()
     rs_cfg = rs.config()
     if config.serial:
@@ -176,51 +203,38 @@ def main(config: T265Config) -> int:
         return 2
 
     # Set world coordinates and send a 3D+2D blueprint
-    try:
-        rr.log("/", rr.ViewCoordinates.RUB, static=True)
-        import rerun.blueprint as rrb
+    rr.log("/", rr.ViewCoordinates.RUB, static=True)
 
-        if config.stream_rectified_h264:
-            right_panel_contents = [
-                rrb.Horizontal(
-                    rrb.Spatial2DView(origin=str(config.base_path / "left" / "pinhole" / "video_stream")),
-                    rrb.Spatial2DView(origin=str(config.base_path / "right" / "pinhole" / "video_stream")),
-                )
-            ]
-        else:
-            right_panel_contents = [
-                rrb.Horizontal(
-                    rrb.Spatial2DView(origin=str(config.base_path / "left" / "pinhole" / "image")),
-                    rrb.Spatial2DView(origin=str(config.base_path / "right" / "pinhole" / "image")),
-                )
-            ]
-        if config.log_fisheye:
-            right_panel_contents.append(
-                rrb.Horizontal(
-                    rrb.Spatial2DView(origin=str(config.base_path / "left" / "fisheye" / "image")),
-                    rrb.Spatial2DView(origin=str(config.base_path / "right" / "fisheye" / "image")),
-                )
-            )
-
-        rr.send_blueprint(
-            rrb.Blueprint(
-                rrb.Horizontal(
-                    rrb.Spatial3DView(origin="/"),
-                    rrb.Vertical(*right_panel_contents),
-                    column_shares=[3, 2],
-                ),
-                collapse_panels=True,
+    right_panel_contents = [
+        rrb.Horizontal(
+            rrb.Spatial2DView(origin=str(config.base_path / "left" / "pinhole" / "video_stream")),
+            rrb.Spatial2DView(origin=str(config.base_path / "right" / "pinhole" / "video_stream")),
+        )
+    ]
+    if config.log_fisheye:
+        right_panel_contents.append(
+            rrb.Horizontal(
+                rrb.Spatial2DView(origin=str(config.base_path / "left" / "fisheye" / "image")),
+                rrb.Spatial2DView(origin=str(config.base_path / "right" / "fisheye" / "image")),
             )
         )
-    except Exception:
-        # Blueprint is optional
-        pass
+
+    rr.send_blueprint(
+        rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial3DView(origin="/"),
+                rrb.Vertical(*right_panel_contents),
+                column_shares=[3, 2],
+            ),
+            collapse_panels=True,
+        )
+    )
 
     left_path = config.base_path / "left"
     right_path = config.base_path / "right"
     pose_path = config.base_path / "mid"
 
-    def _quat_to_rot_m33(x: float, y: float, z: float, w: float) -> np.ndarray:
+    def _quat_to_rot_m33(x: float, y: float, z: float, w: float) -> Float[ndarray, "3 3"]:
         """Convert quaternion (x,y,z,w) to 3x3 rotation matrix."""
         xx = x * x
         yy = y * y
@@ -231,7 +245,7 @@ def main(config: T265Config) -> int:
         wx = w * x
         wy = w * y
         wz = w * z
-        return np.array(
+        R: Float[ndarray, "3 3"] = np.array(
             [
                 [1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)],
                 [2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)],
@@ -239,6 +253,7 @@ def main(config: T265Config) -> int:
             ],
             dtype=np.float32,
         )
+        return R
 
     # Query active profile and prepare rectification from fisheye to pinhole
     profile = pipeline.get_active_profile()
@@ -327,23 +342,18 @@ def main(config: T265Config) -> int:
 
     # Optional: threaded H.264 video stream encoders for rectified images
     left_vs = right_vs = None
-    if config.stream_rectified_h264:
-        try:
-            left_vs = _VideoStreamEncoder(
-                entity_path=str(left_path / "pinhole" / "video_stream"),
-                width=new_size[0],
-                height=new_size[1],
-                fps=config.target_fps,
-            )
-            right_vs = _VideoStreamEncoder(
-                entity_path=str(right_path / "pinhole" / "video_stream"),
-                width=new_size[0],
-                height=new_size[1],
-                fps=config.target_fps,
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"Warning: failed to initialize PyAV encoders, falling back to JPEG: {e}")
-            left_vs = right_vs = None
+    left_vs = _VideoStreamEncoder(
+        entity_path=str(left_path / "pinhole" / "video_stream"),
+        width=new_size[0],
+        height=new_size[1],
+        fps=config.target_fps,
+    )
+    right_vs = _VideoStreamEncoder(
+        entity_path=str(right_path / "pinhole" / "video_stream"),
+        width=new_size[0],
+        height=new_size[1],
+        fps=config.target_fps,
+    )
 
     try:
         i = 0
@@ -408,16 +418,6 @@ def main(config: T265Config) -> int:
             if left_vs and right_vs:
                 left_vs.enqueue(left_rect, pts=ts_left_s)
                 right_vs.enqueue(right_rect, pts=ts_left_s)
-            else:
-                rr.set_time("video_time", duration=ts_left_s)
-                rr.log(
-                    str(left_path / "pinhole" / "image"), rr.Image(left_rect).compress(jpeg_quality=config.jpeg_quality)
-                )
-                rr.set_time("video_time", duration=ts_left_s)
-                rr.log(
-                    str(right_path / "pinhole" / "image"),
-                    rr.Image(right_rect).compress(jpeg_quality=config.jpeg_quality),
-                )
 
             # Also log original fisheye images for comparison (optional)
             if config.log_fisheye:
