@@ -52,9 +52,8 @@ class StereoEgoSequence(BaseEgoSequence):
     config: "StereoConfig"
 
     def load_video_paths(self) -> list[Path]:
-        cfg: StereoConfig = self.config
-        assert cfg.rrd_path is not None, "stereo.rrd_path must be provided"
-        rrd_path: Path = cfg.rrd_path
+        assert self.config.rrd_path is not None, "stereo.rrd_path must be provided"
+        rrd_path: Path = self.config.rrd_path
 
         # Create a temporary directory to hold remuxed videos; cleaned on exit
         self._remux_tmpdir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(prefix="stereo_ego_remux_")
@@ -76,11 +75,10 @@ class StereoEgoSequence(BaseEgoSequence):
         return [left_mp4, right_mp4]
 
     def load_ego_cams(self) -> dict[CameraName, list[PinholeParameters]]:
-        cfg: StereoConfig = self.config
-        assert cfg.rrd_path is not None, "stereo.rrd_path must be provided"
+        assert self.config.rrd_path is not None, "stereo.rrd_path must be provided"
 
         # Load recording once
-        rec: Recording = rr.dataframe.load_recording(str(cfg.rrd_path))
+        rec: Recording = rr.dataframe.load_recording(str(self.config.rrd_path))
 
         def load_intrinsics(cam_entity: str) -> Intrinsics:
             cam_entity_pinhole = f"{cam_entity}/pinhole"
