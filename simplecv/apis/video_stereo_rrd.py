@@ -78,10 +78,15 @@ def _setup_output_stream(width: int, height: int, fps: int) -> av.VideoStream:
     """
 
     output_container: OutputContainer = av.open("/dev/null", "w", format="h264")  # Use AnnexB H.264 stream.
-    output_stream: av.VideoStream = output_container.add_stream("libx264")
+    # Explicitly pass the intended framerate to constrain encoder timing.
+    output_stream: av.VideoStream = output_container.add_stream("libx264", rate=fps)
     output_stream.width = int(width)
     output_stream.height = int(height)
+    # Constrain all related timing fields to the desired FPS.
     output_stream.time_base = Fraction(1, fps)
+    # Be explicit on the codec context too; some encoders derive packet timing from here.
+    output_stream.codec_context.framerate = Fraction(int(fps), 1)
+    output_stream.codec_context.time_base = Fraction(1, int(fps))
 
     # Configure for low latency.
     output_stream.codec_context.options = {
@@ -117,6 +122,8 @@ class _VideoStreamEncoder:
         self.q: queue.Queue[tuple[np.ndarray, int]] = queue.Queue(maxsize=8)
         self._stop = threading.Event()
         self.output_stream: av.VideoStream = _setup_output_stream(width, height, fps=fps)
+        self._t0_ns: int | None = None  # First device timestamp (ns) used as zero-point for the timeline
+        self._last_dt_ns: int = 0  # Cached elapsed (ns) since _t0_ns; reused during encoder flush
 
         # Log stream metadata once
         rr.log(self.entity_path, rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
@@ -124,29 +131,45 @@ class _VideoStreamEncoder:
         self._thr = threading.Thread(target=self._run, name=f"Encoder[{entity_path}]", daemon=True)
         self._thr.start()
 
-    def enqueue(self, frame_gray: UInt8[ndarray, "h w"]) -> None:
+    def enqueue(self, frame_gray: UInt8[ndarray, "h w"], ts_ns: int) -> None:
         # Drop oldest if full to keep acquisition non-blocking
         if self.q.full():
             with contextlib.suppress(Exception):
                 self.q.get_nowait()
-        self.q.put((frame_gray,))
+        # Enqueue with device timestamp in nanoseconds
+        self.q.put((frame_gray, int(ts_ns)))
 
     def stop(self) -> None:
         self._stop.set()
         self._thr.join(timeout=2.0)
         # Flush remaining packets
         with contextlib.suppress(Exception):
+            # In low-latency, no-B frames mode, flush should be minimal.
+            # Log any remaining encoded data conservatively per packet.
             for packet in self.output_stream.encode(None):
                 if packet.pts is None:
                     continue
-                rr.set_time(self.timeline, duration=float(packet.pts * packet.time_base))
+                rr.set_time(self.timeline, duration=np.timedelta64(self._last_dt_ns, "ns"))
                 rr.log(self.entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
+
+    def _elapsed_since_start_ns(self, ts_ns: int) -> int:
+        """Return elapsed nanoseconds since first device timestamp.
+
+        Establishes a reference timestamp on first call and updates
+        `_last_dt_ns` for reuse during flush.
+        """
+        if self._t0_ns is None:
+            self._t0_ns: int = ts_ns
+        elapsed_ns: int = int(ts_ns - self._t0_ns)
+        self._last_dt_ns: int = elapsed_ns
+        return elapsed_ns
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                queue_tuple: tuple[np.ndarray] = self.q.get(timeout=0.1)
+                queue_tuple: tuple[np.ndarray, int] = self.q.get(timeout=0.1)
                 frame_np: UInt8[ndarray, "h=800 w=848"] = queue_tuple[0]
+                ts_ns: int = int(queue_tuple[1])
             except queue.Empty:
                 continue
             frame_av: av.VideoFrame = av.VideoFrame.from_ndarray(frame_np, format="gray8")
@@ -154,12 +177,14 @@ class _VideoStreamEncoder:
             # Let the encoder pick I/P frames
             frame_av.pict_type = av.video.frame.PictureType.NONE
 
-            # Encode and stream to Rerun
+            # Normalize device timestamp to elapsed (ns) since stream start
+            elapsed_ns: int = self._elapsed_since_start_ns(ts_ns)
+
+            # Encode and stream to Rerun (packet-by-packet), timestamped by device clock
             for packet in self.output_stream.encode(frame_av):
                 if packet.pts is None:
                     continue
-
-                rr.set_time(self.timeline, duration=float(packet.pts * packet.time_base))
+                rr.set_time(self.timeline, duration=np.timedelta64(elapsed_ns, "ns"))
                 rr.log(self.entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
 
 
@@ -181,27 +206,30 @@ def main(config: VideoStereoConfig) -> int:
     left_path: Path = config.parent_log_path / "left"
     right_path: Path = config.parent_log_path / "right"
 
+    # Start camera input and H.264 encoder
+    pipeline, width, height = _setup_t265_input(config.serial, config.timeout_ms)
+
     left_stream = _VideoStreamEncoder(
         entity_path=str(left_path / "video_stream"),
         timeline="time",
-        width=848,
-        height=800,
+        width=width,
+        height=height,
         fps=30,
     )
 
     right_stream = _VideoStreamEncoder(
         entity_path=str(right_path / "video_stream"),
         timeline="time",
-        width=848,
-        height=800,
+        width=width,
+        height=height,
         fps=30,
     )
 
-    # Start camera input and H.264 encoder
-    pipeline, width, height = _setup_t265_input(config.serial, config.timeout_ms)
     try:
         # Run indefinitely unless a duration is provided
         start_time: float = time.time()
+        last_left_num: int = -1
+        last_right_num: int = -1
         while True:
             if config.run_seconds is not None and (time.time() - start_time) >= float(config.run_seconds):
                 break
@@ -214,8 +242,22 @@ def main(config: VideoStereoConfig) -> int:
             left_np: UInt8[ndarray, "h=800 w=848"] = np.asanyarray(left.get_data())  # type: ignore[assignment]
             right_np: UInt8[ndarray, "h=800 w=848"] = np.asanyarray(right.get_data())  # type: ignore[assignment]
 
-            left_stream.enqueue(left_np)
-            right_stream.enqueue(right_np)
+            left_num = int(left.get_frame_number())
+            right_num = int(right.get_frame_number())
+            left_ts_ns = int(round(float(left.get_timestamp()) * 1_000_000.0))
+            right_ts_ns = int(round(float(right.get_timestamp()) * 1_000_000.0))
+
+            if left_num != last_left_num:
+                left_stream.enqueue(left_np, left_ts_ns)
+                last_left_num = left_num
+            if right_num != last_right_num:
+                right_stream.enqueue(right_np, right_ts_ns)
+                last_right_num = right_num
     finally:
         pipeline.stop()
+        # Ensure encoders flush & stop cleanly before exit
+        with contextlib.suppress(Exception):
+            left_stream.stop()
+        with contextlib.suppress(Exception):
+            right_stream.stop()
     return 0
