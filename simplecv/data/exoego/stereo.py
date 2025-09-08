@@ -8,7 +8,6 @@ from rerun.components.view_coordinates import ViewCoordinates
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.stereo_ego import StereoEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exo.stereo_exo import StereoExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 
@@ -16,8 +15,10 @@ from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 @dataclass
 class StereoConfig(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: StereoSequence)
-    root_directory: Path = Path("data/stereo-sample")
-    sequence_name: str = "ds8"
+    # Ego-only dataset; create empty labels to satisfy pipelines
+    load_labels: bool = True
+    # Required: .rrd file produced by tools/t265_slam.py
+    rrd_path: Path | None = None
 
 
 class StereoSequence(BaseExoEgoSequence):
@@ -30,19 +31,23 @@ class StereoSequence(BaseExoEgoSequence):
         return StereoEgoSequence(cfg=self.config)
 
     def _build_exo(self) -> BaseExoSequence | None:
-        # return StereoExoSequence(cfg=self.config)
+        # Ego-only for now
         return None
 
     def load_labels(self) -> ExoEgoLabels | None:
-        """No labels available; return an empty COCO-133 buffer to satisfy pipelines."""
+        """Return an empty COCO-133 buffer with NaNs, sized to ego length."""
         import numpy as np
         from jaxtyping import Float32
         from numpy import ndarray
 
-        # Provide a single empty frame to satisfy downstream batching without real labels
-        xyz = np.full((1, 133, 3), np.nan, dtype=np.float32)
-        conf = np.zeros((1, 133, 1), dtype=np.float32)
-        xyzc_stack: Float32[ndarray, "1 133 4"] = np.concatenate([xyz, conf], axis=-1)
+        n: int = 0
+        if self.ego_sequence is not None:
+            n = len(self.ego_sequence)
+        if n <= 0:
+            n = 1
+        xyz = np.full((n, 133, 3), np.nan, dtype=np.float32)
+        conf = np.zeros((n, 133, 1), dtype=np.float32)
+        xyzc_stack: Float32[ndarray, "n 133 4"] = np.concatenate([xyz, conf], axis=-1)
         return ExoEgoLabels(xyzc_stack=xyzc_stack)
 
     @classmethod
@@ -79,12 +84,12 @@ class StereoSequence(BaseExoEgoSequence):
         #             sequence_name=seq_dir.name,
         #         )
         #         yield cls(new_cfg)
-        raise NotImplementedError("MulticamSequence.iter_episode_sequences is not implemented.")
+        raise NotImplementedError("StereoSequence.iter_episode_sequences is not implemented.")
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
         """Get mapping from joint ID to joint name."""
-        return rr.ViewCoordinates.RIGHT_HAND_Z_DOWN
+        return rr.ViewCoordinates.RUB
 
     @property
     def image_plane_distance(self) -> int | float:
