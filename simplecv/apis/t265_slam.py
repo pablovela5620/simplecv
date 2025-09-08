@@ -7,8 +7,10 @@ from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 
+import av
 import cv2
 import numpy as np
+import pyrealsense2 as rs  # type: ignore
 import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float, UInt8
@@ -57,6 +59,28 @@ class T265Config:
     """
 
 
+def _setup_output_stream(width: int, height: int):
+    """Create an H.264 encoder stream using PyAV, AnnexB bitstream.
+
+    Keep it close to the Rerun example: minimal options, low latency, no B-frames.
+    Returns an av.video.VideoStream instance.
+    """
+    output_container = av.open("/dev/null", "w", format="h264")  # Use AnnexB H.264 stream.
+    output_stream = output_container.add_stream("libx264")
+    output_stream.width = int(width)
+    output_stream.height = int(height)
+
+    # Configure for low latency.
+    output_stream.codec_context.options = {
+        "tune": "zerolatency",
+        "preset": "veryfast",
+        "x264-params": "repeat-headers=1:keyint=30:min-keyint=30:scenecut=0:open-gop=0",
+    }
+    output_stream.max_b_frames = 0  # Avoid b-frames for lower latency.
+
+    return output_stream
+
+
 class _VideoStreamEncoder:
     """Threaded H.264 encoder + Rerun logger for a single grayscale stream.
 
@@ -71,45 +95,25 @@ class _VideoStreamEncoder:
         height: int,
         fps: int,
     ) -> None:
-        import av  # type: ignore # imported lazily to keep import-time light
-
         self.entity_path: str = entity_path
         self.width: int = int(width)
         self.height: int = int(height)
         self.fps: int = int(fps)
         self.q: "queue.Queue[tuple[np.ndarray, int]]" = queue.Queue(maxsize=8)
         self._stop = threading.Event()
-        self._av = av
+        self.output_stream = _setup_output_stream(width, height)
+        # Ensure encoder timestamps are in units of 1/fps
+        with contextlib.suppress(Exception):
+            self.output_stream.codec_context.time_base = Fraction(1, self.fps)
 
         # Log stream metadata once
         rr.log(self.entity_path, rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
 
-        # Configure raw codec context (no container). We let the encoder assign PTS based on our frame.pts.
-        codec = av.CodecContext.create("h264", "w")
-        codec.width = self.width
-        codec.height = self.height
-        codec.pix_fmt = "yuv420p"
-        codec.framerate = Fraction(self.fps, 1)
-        codec.time_base = Fraction(1, self.fps)
-        # Low-latency options if available (best-effort)
-        with contextlib.suppress(Exception):
-            codec.options = {
-                "preset": "ultrafast",
-                "tune": "zerolatency",
-                # Ensure SPS/PPS are present in-stream so remuxing works reliably
-                "x264-params": "repeat-headers=1:keyint=60:scenecut=0",
-            }
-        with contextlib.suppress(Exception):
-            codec.open()
-        # Some builds don't require/allow explicit open()
-        self._codec = codec
         self._last_pts_ns: int = 0
+        self._seq: int = 0
 
         self._thr = threading.Thread(target=self._run, name=f"Encoder[{entity_path}]", daemon=True)
         self._thr.start()
-        self._err_printed = False
-        self._log_count = 0
-        self._seq = 0
 
     def enqueue(self, frame_gray: UInt8[ndarray, "h w"], pts_ns: int) -> None:
         pts_ns = int(pts_ns)
@@ -124,74 +128,44 @@ class _VideoStreamEncoder:
         self._thr.join(timeout=2.0)
         # Flush remaining packets
         with contextlib.suppress(Exception):
-            for packet in self._codec.encode(None):
+            for packet in self.output_stream.encode(None):
                 rr.set_time("video_time", duration=np.timedelta64(self._last_pts_ns, "ns"))
                 rr.log(self.entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                frame_np, pts_ns = self.q.get(timeout=0.05)
-            except Exception:
+                frame_np, pts_ns = self.q.get(timeout=0.1)
+            except queue.Empty:
                 continue
-            try:
-                # Construct AVFrame from grayscale and convert to encoder pix_fmt
-                frame = self._av.VideoFrame.from_ndarray(frame_np, format="gray")
-                frame = frame.reformat(width=self.width, height=self.height, format=self._codec.pix_fmt)
-                # Maintain a monotonic encoder PTS consistent with fps
-                pts_s: float = float(pts_ns) / 1_000_000_000.0
-                frame.pts = int(round(pts_s * float(self.fps)))
-                frame.time_base = self._codec.time_base
+            # Construct AVFrame from grayscale and convert to encoder pix_fmt
+            frame: av.VideoFrame = av.VideoFrame.from_ndarray(frame_np, format="gray8")
 
-                for packet in self._codec.encode(frame):
-                    # Log video samples on a single seconds-based timeline
-                    rr.set_time("video_time", duration=np.timedelta64(pts_ns, "ns"))
-                    rr.log(self.entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
-                    if self._log_count < 3:
-                        with contextlib.suppress(Exception):
-                            print(
-                                f"{self.entity_path}: logged {len(bytes(packet))} bytes at {pts_ns} ns (~{pts_s:.3f}s)"
-                            )
-                        self._log_count += 1
-                self._last_pts_ns = int(pts_ns)
-                self._seq += 1
-            except Exception as e:  # noqa: BLE001
-                if not self._err_printed:
-                    print(f"Encoder error on {self.entity_path}: {e}")
-                    self._err_printed = True
-                continue
+            # Maintain a monotonic encoder PTS consistent with fps
+            pts_s: float = float(pts_ns) / 1_000_000_000.0
+            frame.pts = int(round(pts_s * float(self.fps)))
+            # Use codec time_base (1/fps); stream.time_base can be None for raw h264
+            tb = getattr(self.output_stream.codec_context, "time_base", None) or Fraction(1, self.fps)
+            frame.time_base = tb
+
+            for packet in self.output_stream.encode(frame):
+                # Log video samples on a single seconds-based timeline
+                rr.set_time("video_time", duration=np.timedelta64(pts_ns, "ns"))
+                rr.log(self.entity_path, rr.VideoStream.from_fields(sample=bytes(packet)))
+            self._last_pts_ns = int(pts_ns)
+            self._seq += 1
 
 
-def main(config: T265Config) -> int:
-    """Stream T265 fisheye images to Rerun (left/right) as compressed images."""
-    try:
-        import pyrealsense2 as rs
-    except Exception as e:  # noqa: BLE001
-        print(f"Failed to import pyrealsense2: {e}")
-        return 1
+def _setup_t265_input(serial: str | None):
+    """Start a T265 pipeline configured for left/right fisheye streams.
 
-    # Minimal setup: assume device is connected; no extra validation
-    # Rerun is initialized via RerunTyroConfig.__post_init__
-    # Enable MultiSink file saving if requested.
-    try:
-        if config.rrd_save_dir is not None:
-            config.rrd_save_dir.mkdir(parents=True, exist_ok=True)
-            rr_ver = getattr(rr, "__version__", "unknown")
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            rrd_file = config.rrd_save_dir / f"{ts}_t265_slam_rrd_{rr_ver}.rrd"
-            # Set MultiSink sinks explicitly (file sink; add grpc sink if desired)
-            sinks: list[rr.Sink] = [rr.GrpcSink(), rr.FileSink(str(rrd_file))]
-            # If you want to also stream to a local viewer, uncomment this:
-            # sinks.append(rr.GrpcSink())
-            rr.set_sinks(*sinks)
-            print(f"Saving Rerun recording to: {rrd_file}")
-    except Exception as e:  # noqa: BLE001
-        print(f"Warning: failed to enable rrd saving: {e}")
+    Returns (pipeline, rs, width, height)
+    """
 
     pipeline = rs.pipeline()
     rs_cfg = rs.config()
-    if config.serial:
-        rs_cfg.enable_device(config.serial)
+    if serial:
+        rs_cfg.enable_device(serial)
 
     # Enable both fisheye streams (848x800 @ 30Hz, Y8)
     rs_cfg.enable_stream(rs.stream.fisheye, 1, 848, 800, rs.format.y8, 30)
@@ -199,11 +173,29 @@ def main(config: T265Config) -> int:
     # Also enable pose for SLAM trajectory
     rs_cfg.enable_stream(rs.stream.pose)
 
-    try:
-        pipeline.start(rs_cfg)
-    except Exception as e:  # noqa: BLE001
-        print(f"Failed to start T265 fisheye streams: {e}")
-        return 2
+    pipeline.start(rs_cfg)
+
+    return pipeline
+
+
+def main(config: T265Config) -> int:
+    """Stream T265 fisheye images to Rerun (left/right) as compressed images."""
+    # Minimal setup: assume device is connected; no extra validation
+    # Rerun is initialized via RerunTyroConfig.__post_init__
+    # Enable MultiSink file saving if requested.
+    if config.rrd_save_dir is not None:
+        config.rrd_save_dir.mkdir(parents=True, exist_ok=True)
+        rr_ver = getattr(rr, "__version__", "unknown")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rrd_file = config.rrd_save_dir / f"{ts}_t265_slam_rrd_{rr_ver}.rrd"
+        # Set MultiSink sinks explicitly (file sink; add grpc sink if desired)
+        sinks: list[rr.Sink] = [rr.GrpcSink(), rr.FileSink(str(rrd_file))]
+        # If you want to also stream to a local viewer, uncomment this:
+        # sinks.append(rr.GrpcSink())
+        rr.set_sinks(*sinks)
+        print(f"Saving Rerun recording to: {rrd_file}")
+
+    pipeline = _setup_t265_input(config.serial)
 
     # Set world coordinates and send a 3D+2D blueprint
     rr.log("/", rr.ViewCoordinates.RUB, static=True)
@@ -359,7 +351,6 @@ def main(config: T265Config) -> int:
     )
 
     try:
-        i = 0
         start_ts = time.time()
         # Track a relative origin for the video timeline
         video_ts0_ms: float | None = None
@@ -371,55 +362,29 @@ def main(config: T265Config) -> int:
             frames = pipeline.wait_for_frames(config.timeout_ms)
 
             # Retrieve left/right fisheye frames
-            left = None
-            right = None
-            try:
-                left = frames.get_fisheye_frame(1)
-                right = frames.get_fisheye_frame(2)
-            except Exception:
-                try:
-                    left = frames.get_frame(rs.stream.fisheye, 1)
-                    right = frames.get_frame(rs.stream.fisheye, 2)
-                except Exception:
-                    pass
 
-            if left is None or right is None:
-                # Robust fallback: iterate frames in the set and pick by stream index
-                for f in frames:
-                    try:
-                        p = f.get_profile()
-                        if p.stream_type() == rs.stream.fisheye:
-                            if p.stream_index() == 1:
-                                left = f
-                            elif p.stream_index() == 2:
-                                right = f
-                    except Exception:
-                        pass
-
-            if left is None or right is None:
-                # Skip if missing either stream in this frameset
-                continue
+            left = frames.get_fisheye_frame(1)
+            right = frames.get_fisheye_frame(2)
 
             # Convert to numpy views (zero-copy where possible)
-            left_np: UInt8[ndarray, "h w"] = np.asanyarray(left.get_data())  # type: ignore[assignment]
-            right_np: UInt8[ndarray, "h w"] = np.asanyarray(right.get_data())  # type: ignore[assignment]
+            left_np: UInt8[ndarray, "h=800 w=848"] = np.asanyarray(left.get_data())  # type: ignore[assignment]
+            right_np: UInt8[ndarray, "h=800 w=848"] = np.asanyarray(right.get_data())  # type: ignore[assignment]
 
             # Rectify to pinhole
-            left_rect: UInt8[ndarray, "h w"] = cv2.remap(left_np, lm1, lm2, interpolation=cv2.INTER_LINEAR)
-            right_rect: UInt8[ndarray, "h w"] = cv2.remap(right_np, rm1, rm2, interpolation=cv2.INTER_LINEAR)
+            left_rect: UInt8[ndarray, "new_h=800 new_w=800"] = cv2.remap(
+                left_np, lm1, lm2, interpolation=cv2.INTER_LINEAR
+            )
+            right_rect: UInt8[ndarray, "new_h=800 new_w=800"] = cv2.remap(
+                right_np, rm1, rm2, interpolation=cv2.INTER_LINEAR
+            )
 
             # Use device timestamp as nanoseconds for the video timeline (relative to first frame)
-            ts_left_ns: int
-            try:
-                ts_left_ms = float(left.get_timestamp())
-                if video_ts0_ms is None:
-                    video_ts0_ms = ts_left_ms
-                    video_ts0_ns = int(round(ts_left_ms * 1_000_000.0))
-                assert video_ts0_ns is not None
-                ts_left_ns = int(round(ts_left_ms * 1_000_000.0)) - video_ts0_ns
-            except Exception:
-                # Fallback to monotonic wall-clock
-                ts_left_ns = int(round((time.time() - start_ts) * 1_000_000_000.0))
+            ts_left_ms = float(left.get_timestamp())
+            if video_ts0_ms is None:
+                video_ts0_ms = ts_left_ms
+                video_ts0_ns = int(round(ts_left_ms * 1_000_000.0))
+            assert video_ts0_ns is not None
+            ts_left_ns = int(round(ts_left_ms * 1_000_000.0)) - video_ts0_ns
 
             # Log rectified pinhole streams (preferred) or fallback to JPEG images
             left_vs.enqueue(left_rect, pts_ns=ts_left_ns)
@@ -482,7 +447,6 @@ def main(config: T265Config) -> int:
 
                 log_pinhole(camera=left_params, cam_log_path=left_path, image_plane_distance=0.01)
                 log_pinhole(camera=right_params, cam_log_path=right_path, image_plane_distance=0.01)
-            i += 1
     except KeyboardInterrupt:
         print("Interrupted by user. Stopping T265 stream…")
     except Exception as e:  # noqa: BLE001
