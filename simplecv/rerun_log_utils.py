@@ -71,6 +71,8 @@ def log_pinhole(
     cam_log_path: Path,
     image_plane_distance: int | float = 0.5,
     static: bool = False,
+    *,
+    recording: rr.RecordingStream | None = None,
 ) -> None:
     """
     Logs the pinhole camera parameters and transformation data.
@@ -98,6 +100,7 @@ def log_pinhole(
             image_plane_distance=image_plane_distance,
         ),
         static=static,
+        recording=recording,
     )
     # camera extrinsics
     rr.log(
@@ -108,10 +111,17 @@ def log_pinhole(
             from_parent=True,
         ),
         static=static,
+        recording=recording,
     )
 
 
-def log_video(video_path: Path, video_log_path: Path, timeline: str = "video_time") -> Int[ndarray, "num_frames"]:
+def log_video(
+    video_path: Path,
+    video_log_path: Path,
+    timeline: str = "video_time",
+    *,
+    recording: rr.RecordingStream | None = None,
+) -> Int[ndarray, "num_frames"]:
     """
     Logs a video asset and its frame timestamps.
 
@@ -124,7 +134,7 @@ def log_video(video_path: Path, video_log_path: Path, timeline: str = "video_tim
     """
     # Log video asset which is referred to by frame references.
     video_asset = rr.AssetVideo(path=video_path)
-    rr.log(str(video_log_path), video_asset, static=True)
+    rr.log(str(video_log_path), video_asset, static=True, recording=recording)
 
     # Send automatically determined video frame timestamps.
     frame_timestamps_ns: Int[ndarray, "num_frames"] = video_asset.read_frame_timestamps_nanos()
@@ -132,8 +142,9 @@ def log_video(video_path: Path, video_log_path: Path, timeline: str = "video_tim
     rr.send_columns(
         f"{video_log_path}",
         # Note timeline values don't have to be the same as the video timestamps.
-        indexes=[rr.TimeColumn("video_time", duration=1e-9 * frame_timestamps_ns)],
+        indexes=[rr.TimeColumn(timeline, duration=1e-9 * frame_timestamps_ns)],
         columns=rr.VideoFrameReference.columns_nanos(frame_timestamps_ns),
+        recording=recording,
     )
     return frame_timestamps_ns
 
