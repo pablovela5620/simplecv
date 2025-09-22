@@ -209,11 +209,6 @@ def log_mano_batch(
         "right": (255, 0, 0, 255),
         "left": (0, 0, 255, 255),
     }
-    mano_verts_color_rgb_map: dict[Literal["left", "right"], tuple[int, int, int]] = {
-        # Opposite of mesh color for visibility
-        "right": (0, 0, 255),
-        "left": (255, 0, 0),
-    }
 
     mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
     if mano_stack is not None and log_mano:
@@ -252,35 +247,6 @@ def log_mano_batch(
             hand_idx: ndarray = RIGHT_HAND_IDX if mano_layer.side == "right" else LEFT_HAND_IDX
             xyz_coco_mano[:, hand_idx, :] = xyz_mano_np[0:n_frames_mano_total]
             conf_coco_mano[:, hand_idx] = 1.0
-
-            # send verts
-            rr.log(
-                f"{parent_log_path}/mano_{mano_layer.side}_verts",
-                rr.Points3D.from_fields(
-                    show_labels=False,
-                ),
-                static=True,
-            )
-            n_frames_verts: int = len(verts)
-            verts_base_color_rgb: tuple[int, int, int] = mano_verts_color_rgb_map[mano_layer.side]
-            verts_colors: UInt8[ndarray, "n_frames n_verts=778 3"] = np.full(
-                (n_frames_verts, verts.shape[1], 3),
-                verts_base_color_rgb,
-                dtype=np.uint8,
-            )
-            rr.send_columns(
-                f"{parent_log_path}/mano_{mano_layer.side}_verts",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(xyz_mano_np)])],
-                columns=[
-                    *rr.Points3D.columns(
-                        positions=rearrange(
-                            verts,
-                            "n_frames kpts dim -> (n_frames kpts) dim",
-                        ),
-                        colors=rearrange(verts_colors, "n_frames kpts dim -> (n_frames kpts) dim"),
-                    ).partition(lengths=[778] * len(verts)),
-                ],
-            )
 
             # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
             faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
@@ -420,7 +386,7 @@ def log_exoego_batch(
             uv_exo_stack, exo_cam_param_list[0]
         )
         for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
-            exo_cam_path: Path = parent_log_path / exo_cam.name
+            exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
             exo_pinhole_path: Path = exo_cam_path / "pinhole"
             uv_exo: Float[ndarray, "n_frames 133 2"] = uv_exo_stack[:, exo_cam_idx, :, :]
             # filter batch with invalid values
@@ -457,7 +423,7 @@ def log_exoego_batch(
         for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
             # We assume that all cameras have the intrinsics
             first_cam: PinholeParameters = ego_cam_param_list[0]
-            cam_log_path: Path = parent_log_path / cam_name
+            cam_log_path: Path = parent_log_path / "ego" / cam_name
             pinhole_log_path: Path = cam_log_path / "pinhole"
             rr.log(
                 f"{pinhole_log_path}",
@@ -564,7 +530,7 @@ def visualize_exo_ego(config: VisualizeConfig):
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
         ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
-        ego_cam_log_paths: list[Path] = [parent_log_path / ego_cam_name for ego_cam_name in ego_cam_dict]
+        ego_cam_log_paths: list[Path] = [parent_log_path / "ego" / ego_cam_name for ego_cam_name in ego_cam_dict]
         ego_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
 
         for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
@@ -577,12 +543,14 @@ def visualize_exo_ego(config: VisualizeConfig):
     if exo_sequence is not None and config.log_exo:
         exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
         exo_video_files: list[Path] = exo_video_readers.video_paths
-        exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
+        exo_cam_log_paths: list[Path] = [
+            parent_log_path / "exo" / exo_cam.name for exo_cam in exo_sequence.exo_cam_list
+        ]
         exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
         # log stationary exo cameras and video assets
         for exo_cam in exo_sequence.exo_cam_list:
-            cam_log_path: Path = parent_log_path / exo_cam.name
+            cam_log_path: Path = parent_log_path / "exo" / exo_cam.name
             log_pinhole(
                 camera=exo_cam,
                 cam_log_path=cam_log_path,
