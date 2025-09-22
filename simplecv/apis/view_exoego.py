@@ -42,6 +42,7 @@ class VisualizeConfig:
     log_exo: bool = True
     log_ego: bool = True
     log_mano: bool = True
+    log_labels: bool = True
 
 
 def set_annotation_context() -> None:
@@ -323,9 +324,10 @@ def log_exoego_batch(
     log_ego: bool = True,
     log_exo: bool = True,
     log_mano: bool = False,
+    log_labels: bool = True,
 ) -> None:
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
-    if exoego_labels is not None:
+    if exoego_labels is not None and log_labels:
         ### Send XYZ coordinates
         xyzc_stack: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
         xyz_stack: Float[ndarray, "n_frames 133 3"] = xyzc_stack[:, :, :3]
@@ -376,7 +378,7 @@ def log_exoego_batch(
     ###########################
     # batch send all exo cams #
     ###########################
-    if exoego_sequence.exo_sequence is not None and log_exo:
+    if exoego_sequence.exo_sequence is not None and log_exo and log_labels:
         exo_cam_param_list: list[PinholeParameters] = exoego_sequence.exo_sequence.exo_cam_list
         Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
             [pinhole.projection_matrix for pinhole in exo_cam_param_list]
@@ -457,59 +459,60 @@ def log_exoego_batch(
                 ],
             )
 
-            # make Pall for specific camera
-            Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
-                [pinhole.projection_matrix for pinhole in ego_cam_param_list]
-            )
-            uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
-
-            # Process in batches to balance memory usage and performance
-            batch_size = min(100, len(xyz_hom_stack))  # Adjust based on available memory
-            for start_idx in range(0, len(xyz_hom_stack), batch_size):
-                end_idx: int = min(start_idx + batch_size, len(xyz_hom_stack))
-
-                # Get batch data
-                xyz_hom_batch = xyz_hom_stack[start_idx:end_idx]  # (batch_frames, 133, 4)
-                P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
-
-                # Use the vectorized projection function on the batch
-                uv_batch: Float[ndarray, "batch_frames batch_frames 133 2"] = proj_3d_vectorized(
-                    xyz_hom=xyz_hom_batch, P=P_batch
+            if log_labels:
+                # make Pall for specific camera
+                Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
+                    [pinhole.projection_matrix for pinhole in ego_cam_param_list]
                 )
+                uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
 
-                # Extract diagonal to get frame-to-frame correspondence
-                batch_len = end_idx - start_idx
-                uv_batch_diagonal = uv_batch[np.arange(batch_len), np.arange(batch_len)]  # (batch_frames, 133, 2)
+                # Process in batches to balance memory usage and performance
+                batch_size = min(100, len(xyz_hom_stack))  # Adjust based on available memory
+                for start_idx in range(0, len(xyz_hom_stack), batch_size):
+                    end_idx: int = min(start_idx + batch_size, len(xyz_hom_stack))
 
-                # Store results
-                uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
+                    # Get batch data
+                    xyz_hom_batch = xyz_hom_stack[start_idx:end_idx]  # (batch_frames, 133, 4)
+                    P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
 
-            uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, first_cam)
-            rr.log(
-                f"{pinhole_log_path}/keypoints",
-                rr.Points2D.from_fields(
-                    class_ids=0,
-                    keypoint_ids=COCO_133_IDS,
-                    show_labels=False,
-                ),
-                static=True,
-            )
-            rr.send_columns(
-                f"{pinhole_log_path}/keypoints",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(uv_ego_stack)])],
-                columns=[
-                    *rr.Points2D.columns(
-                        positions=rearrange(
-                            uv_ego_stack,
-                            "n_frames kpts dim -> (n_frames kpts) dim",
-                        ),
-                        colors=rearrange(
-                            colors,
-                            "n_frames kpts dim -> (n_frames kpts) dim",
-                        ),
-                    ).partition(lengths=[len(COCO_133_IDS)] * len(uv_ego_stack)),
-                ],
-            )
+                    # Use the vectorized projection function on the batch
+                    uv_batch: Float[ndarray, "batch_frames batch_frames 133 2"] = proj_3d_vectorized(
+                        xyz_hom=xyz_hom_batch, P=P_batch
+                    )
+
+                    # Extract diagonal to get frame-to-frame correspondence
+                    batch_len = end_idx - start_idx
+                    uv_batch_diagonal = uv_batch[np.arange(batch_len), np.arange(batch_len)]  # (batch_frames, 133, 2)
+
+                    # Store results
+                    uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
+
+                uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, first_cam)
+                rr.log(
+                    f"{pinhole_log_path}/keypoints",
+                    rr.Points2D.from_fields(
+                        class_ids=0,
+                        keypoint_ids=COCO_133_IDS,
+                        show_labels=False,
+                    ),
+                    static=True,
+                )
+                rr.send_columns(
+                    f"{pinhole_log_path}/keypoints",
+                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(uv_ego_stack)])],
+                    columns=[
+                        *rr.Points2D.columns(
+                            positions=rearrange(
+                                uv_ego_stack,
+                                "n_frames kpts dim -> (n_frames kpts) dim",
+                            ),
+                            colors=rearrange(
+                                colors,
+                                "n_frames kpts dim -> (n_frames kpts) dim",
+                            ),
+                        ).partition(lengths=[len(COCO_133_IDS)] * len(uv_ego_stack)),
+                    ],
+                )
 
 
 def visualize_exo_ego(config: VisualizeConfig):
@@ -587,6 +590,7 @@ def visualize_exo_ego(config: VisualizeConfig):
             log_ego=config.log_ego,
             log_exo=config.log_exo,
             log_mano=config.log_mano,
+            log_labels=config.log_labels,
         )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
