@@ -172,19 +172,20 @@ def confidence_scores_to_rgb(
     n_frames, n_kpts, _ = confidence_scores.shape
     clipped_confidences: Float[ndarray, "n_frames n_kpts 1"] = np.clip(confidence_scores, a_min=0.0, a_max=1.0)
     clipped_confidences: Float[ndarray, "n_frames n_kpts"] = np.squeeze(clipped_confidences, axis=-1)
+    safe_confidences: Float[ndarray, "n_frames n_kpts"] = np.nan_to_num(clipped_confidences, nan=0.0)
 
     colors: UInt8[ndarray, "n_frames n_kpts 3"] = np.zeros((n_frames, n_kpts, 3), dtype=np.uint8)
     # Segment A: red → yellow for conf ≤ 0.5
-    mask_low = clipped_confidences <= 0.5
+    mask_low = safe_confidences <= 0.5
     if mask_low.any():
-        t_low = clipped_confidences[mask_low] * 2.0  # 0‥1
+        t_low = safe_confidences[mask_low] * 2.0  # 0‥1
         colors[..., 0][mask_low] = 255  # red fixed
         colors[..., 1][mask_low] = (t_low * 255).astype(np.uint8)
 
     # Segment B: yellow → green for conf > 0.5
     mask_high = ~mask_low
     if mask_high.any():
-        t_high = (clipped_confidences[mask_high] - 0.5) * 2.0
+        t_high = (safe_confidences[mask_high] - 0.5) * 2.0
         colors[..., 0][mask_high] = ((1.0 - t_high) * 255).astype(np.uint8)
         colors[..., 1][mask_high] = 255  # green fixed
 

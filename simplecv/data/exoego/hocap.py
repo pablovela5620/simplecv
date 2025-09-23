@@ -103,10 +103,10 @@ class HocapSequence(BaseExoEgoSequence):
         # fill in the right and left hand joints
         coco_xyz_stack[:, RIGHT_HAND_IDX, :] = right_xyz
         coco_xyz_stack[:, LEFT_HAND_IDX, :] = left_xyz
-        # generate a confidence stack with all ones if not nan otherwise 0
-        conf_stack: Float32[ndarray, "num_frames 133 1"] = np.where(np.isnan(coco_xyz_stack), 0.0, 1.0).astype(
-            np.float32
-        )[..., 0:1]
+        # propagate NaNs into the confidence channel so downstream averages ignore gaps
+        missing_mask: ndarray = np.isnan(coco_xyz_stack).any(axis=-1)
+        conf_mask: Float32[ndarray, "num_frames 133"] = np.where(missing_mask, np.nan, 1.0).astype(np.float32)
+        conf_stack: Float32[ndarray, "num_frames 133 1"] = conf_mask[..., np.newaxis]
         # create xyzc stack
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.concatenate([coco_xyz_stack, conf_stack], axis=-1)
 
