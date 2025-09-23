@@ -24,6 +24,8 @@ from simplecv.data.skeleton.coco_133 import (
 )
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_log_utils import (
+    Points2DWithConfidence,
+    Points3DWithConfidence,
     RerunTyroConfig,
     confidence_scores_to_rgb,
     log_pinhole,
@@ -285,35 +287,50 @@ def log_mano_batch(
                 ],
             )
 
-        # Log a single combined MANO keypoints stream (both hands)
-        colors_coco: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
-            confidence_scores=conf_coco_mano[..., np.newaxis]
-        )
-        rr.log(
-            f"{parent_log_path}/mano_keypoints",
-            rr.Points3D.from_fields(
-                class_ids=0,
-                keypoint_ids=COCO_133_IDS,
-                show_labels=False,
-            ),
-            static=True,
-        )
-        rr.send_columns(
-            f"{parent_log_path}/mano_keypoints",
-            indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mano_total])],
-            columns=[
-                *rr.Points3D.columns(
-                    positions=rearrange(
-                        xyz_coco_mano,
-                        "n_frames kpts dim -> (n_frames kpts) dim",
-                    ),
-                    colors=rearrange(
-                        colors_coco,
-                        "n_frames kpts dim -> (n_frames kpts) dim",
-                    ),
-                ).partition(lengths=[len(COCO_133_IDS)] * n_frames_mano_total),
-            ],
-        )
+        if n_frames_mano_total > 0:
+            colors_coco: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
+                confidence_scores=conf_coco_mano[..., np.newaxis]
+            )
+            positions_flat: Float32[ndarray, "n_total 3"] = rearrange(
+                xyz_coco_mano,
+                "n_frames kpts dim -> (n_frames kpts) dim",
+            ).astype(np.float32)
+            colors_flat: UInt8[ndarray, "n_total 3"] = rearrange(
+                colors_coco,
+                "n_frames kpts dim -> (n_frames kpts) dim",
+            )
+            confidences_flat: Float32[ndarray, "n_total"] = rearrange(
+                conf_coco_mano,
+                "n_frames kpts -> (n_frames kpts)",
+            ).astype(np.float32)
+            n_keypoints: int = len(COCO_133_IDS)
+            keypoint_lengths: Int[ndarray, "n_frames"] = np.full(n_frames_mano_total, n_keypoints, dtype=np.int32)
+
+            rr.log(
+                f"{parent_log_path}/mano_keypoints",
+                Points3DWithConfidence.from_fields(
+                    class_ids=0,
+                    keypoint_ids=COCO_133_IDS,
+                    show_labels=False,
+                ),
+                static=True,
+            )
+            rr.send_columns(
+                f"{parent_log_path}/mano_keypoints",
+                indexes=[
+                    rr.TimeColumn(
+                        timeline,
+                        duration=1e-9 * shortest_timestamp[0:n_frames_mano_total],
+                    )
+                ],
+                columns=[
+                    *Points3DWithConfidence.columns(
+                        positions=positions_flat,
+                        colors=colors_flat,
+                        confidences=confidences_flat,
+                    ).partition(keypoint_lengths),
+                ],
+            )
 
 
 def log_exoego_batch(
@@ -338,31 +355,48 @@ def log_exoego_batch(
         colors: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
             confidence_scores=conf_stack[..., np.newaxis]
         )
-        rr.log(
-            f"{parent_log_path}/keypoints",
-            rr.Points3D.from_fields(
-                class_ids=0,
-                keypoint_ids=COCO_133_IDS,
-                show_labels=False,
-            ),
-            static=True,
-        )
-        rr.send_columns(
-            f"{parent_log_path}/keypoints",
-            indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(xyzc_stack)])],
-            columns=[
-                *rr.Points3D.columns(
-                    positions=rearrange(
-                        xyz_stack,
-                        "n_frames kpts dim -> (n_frames kpts) dim",
-                    ),
-                    colors=rearrange(
-                        colors,
-                        "n_frames kpts dim -> (n_frames kpts) dim",
-                    ),
-                ).partition(lengths=[len(COCO_133_IDS)] * len(xyzc_stack)),
-            ],
-        )
+        n_frames_total: int = len(xyzc_stack)
+        if n_frames_total > 0:
+            positions_flat: Float[ndarray, "n_total 3"] = rearrange(
+                xyz_stack,
+                "n_frames kpts dim -> (n_frames kpts) dim",
+            ).astype(np.float32)
+            colors_flat: UInt8[ndarray, "n_total 3"] = rearrange(
+                colors,
+                "n_frames kpts dim -> (n_frames kpts) dim",
+            )
+            confidences_flat: Float32[ndarray, "n_total"] = rearrange(
+                conf_stack,
+                "n_frames kpts -> (n_frames kpts)",
+            ).astype(np.float32)
+            n_keypoints: int = len(COCO_133_IDS)
+            keypoint_lengths: Int[ndarray, "n_frames"] = np.full(n_frames_total, n_keypoints, dtype=np.int32)
+
+            rr.log(
+                f"{parent_log_path}/keypoints",
+                Points3DWithConfidence.from_fields(
+                    class_ids=0,
+                    keypoint_ids=COCO_133_IDS,
+                    show_labels=False,
+                ),
+                static=True,
+            )
+            rr.send_columns(
+                f"{parent_log_path}/keypoints",
+                indexes=[
+                    rr.TimeColumn(
+                        timeline,
+                        duration=1e-9 * shortest_timestamp[0:n_frames_total],
+                    )
+                ],
+                columns=[
+                    *Points3DWithConfidence.columns(
+                        positions=positions_flat,
+                        colors=colors_flat,
+                        confidences=confidences_flat,
+                    ).partition(keypoint_lengths),
+                ],
+            )
 
         ############################
         # batch send all MANO data #
@@ -392,9 +426,31 @@ def log_exoego_batch(
             exo_pinhole_path: Path = exo_cam_path / "pinhole"
             uv_exo: Float[ndarray, "n_frames 133 2"] = uv_exo_stack[:, exo_cam_idx, :, :]
             # filter batch with invalid values
+            n_frames_cam: int = len(uv_exo)
+            if n_frames_cam == 0:
+                continue
+            positions_flat_2d: Float[ndarray, "n_total 2"] = rearrange(
+                uv_exo,
+                "n_frames kpts dim -> (n_frames kpts) dim",
+            ).astype(np.float32)
+            colors_cam: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam]
+            colors_flat_2d: UInt8[ndarray, "n_total 3"] = rearrange(
+                colors_cam,
+                "n_frames kpts dim -> (n_frames kpts) dim",
+            )
+            conf_cam: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam]
+            confidences_flat_2d: Float32[ndarray, "n_total"] = rearrange(
+                conf_cam,
+                "n_frames kpts -> (n_frames kpts)",
+            ).astype(np.float32)
+            n_keypoints: int = len(COCO_133_IDS)
+            keypoint_lengths_cam: Int[ndarray, "n_frames"] = np.full(n_frames_cam, n_keypoints, dtype=np.int32)
+
+            # Confidence-aware helper keeps the familiar column API while adding
+            # confidences and per-frame averages internally.
             rr.log(
                 f"{exo_pinhole_path}/keypoints",
-                rr.Points2D.from_fields(
+                Points2DWithConfidence.from_fields(
                     class_ids=0,
                     keypoint_ids=COCO_133_IDS,
                     show_labels=False,
@@ -403,18 +459,18 @@ def log_exoego_batch(
             )
             rr.send_columns(
                 f"{exo_pinhole_path}/keypoints",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(uv_exo)])],
+                indexes=[
+                    rr.TimeColumn(
+                        timeline,
+                        duration=1e-9 * shortest_timestamp[0:n_frames_cam],
+                    )
+                ],
                 columns=[
-                    *rr.Points2D.columns(
-                        positions=rearrange(
-                            uv_exo,
-                            "n_frames kpts dim -> (n_frames kpts) dim",
-                        ),
-                        colors=rearrange(
-                            colors,
-                            "n_frames kpts dim -> (n_frames kpts) dim",
-                        ),
-                    ).partition(lengths=[len(COCO_133_IDS)] * len(uv_exo)),
+                    *Points2DWithConfidence.columns(
+                        positions=positions_flat_2d,
+                        colors=colors_flat_2d,
+                        confidences=confidences_flat_2d,
+                    ).partition(keypoint_lengths_cam),
                 ],
             )
 
@@ -488,31 +544,51 @@ def log_exoego_batch(
                     uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
 
                 uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, first_cam)
-                rr.log(
-                    f"{pinhole_log_path}/keypoints",
-                    rr.Points2D.from_fields(
-                        class_ids=0,
-                        keypoint_ids=COCO_133_IDS,
-                        show_labels=False,
-                    ),
-                    static=True,
-                )
-                rr.send_columns(
-                    f"{pinhole_log_path}/keypoints",
-                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(uv_ego_stack)])],
-                    columns=[
-                        *rr.Points2D.columns(
-                            positions=rearrange(
-                                uv_ego_stack,
-                                "n_frames kpts dim -> (n_frames kpts) dim",
-                            ),
-                            colors=rearrange(
-                                colors,
-                                "n_frames kpts dim -> (n_frames kpts) dim",
-                            ),
-                        ).partition(lengths=[len(COCO_133_IDS)] * len(uv_ego_stack)),
-                    ],
-                )
+                n_frames_cam: int = len(uv_ego_stack)
+                if n_frames_cam > 0:
+                    positions_flat_ego: Float[ndarray, "n_total 2"] = rearrange(
+                        uv_ego_stack,
+                        "n_frames kpts dim -> (n_frames kpts) dim",
+                    ).astype(np.float32)
+                    colors_ego: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam]
+                    colors_flat_ego: UInt8[ndarray, "n_total 3"] = rearrange(
+                        colors_ego,
+                        "n_frames kpts dim -> (n_frames kpts) dim",
+                    )
+                    conf_ego: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam]
+                    confidences_flat_ego: Float32[ndarray, "n_total"] = rearrange(
+                        conf_ego,
+                        "n_frames kpts -> (n_frames kpts)",
+                    ).astype(np.float32)
+                    n_keypoints: int = len(COCO_133_IDS)
+                    keypoint_lengths_ego: Int[ndarray, "n_frames"] = np.full(n_frames_cam, n_keypoints, dtype=np.int32)
+
+                    # Same helper makes the ego path symmetrical with the exo cameras.
+                    rr.log(
+                        f"{pinhole_log_path}/keypoints",
+                        Points2DWithConfidence.from_fields(
+                            class_ids=0,
+                            keypoint_ids=COCO_133_IDS,
+                            show_labels=False,
+                        ),
+                        static=True,
+                    )
+                    rr.send_columns(
+                        f"{pinhole_log_path}/keypoints",
+                        indexes=[
+                            rr.TimeColumn(
+                                timeline,
+                                duration=1e-9 * shortest_timestamp[0:n_frames_cam],
+                            )
+                        ],
+                        columns=[
+                            *Points2DWithConfidence.columns(
+                                positions=positions_flat_ego,
+                                colors=colors_flat_ego,
+                                confidences=confidences_flat_ego,
+                            ).partition(keypoint_lengths_ego),
+                        ],
+                    )
 
 
 def visualize_exo_ego(config: VisualizeConfig):
