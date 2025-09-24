@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 import rerun as rr
@@ -341,12 +341,18 @@ def log_exoego_batch(
     log_ego: bool = True,
     log_exo: bool = True,
     log_mano: bool = False,
-    log_labels: bool = True,
 ) -> None:
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
-    if exoego_labels is not None and log_labels:
+    ##########################
+    # batch send all 3D data #
+    ##########################
+    if exoego_labels is not None:
         ### Send XYZ coordinates
-        xyzc_stack: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
+        xyzc_stack_all: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
+        n_frames_labels: int = len(xyzc_stack_all)
+        n_frames_timestamps: int = len(shortest_timestamp)
+        n_frames_total: int = min(n_frames_labels, n_frames_timestamps)
+        xyzc_stack: Float[ndarray, "n_frames 133 4"] = xyzc_stack_all[0:n_frames_total]
         xyz_stack: Float[ndarray, "n_frames 133 3"] = xyzc_stack[:, :, :3]
         xyz_hom_stack: Float[ndarray, "n_frames 133 4"] = np.concatenate(
             [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
@@ -355,7 +361,6 @@ def log_exoego_batch(
         colors: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
             confidence_scores=conf_stack[..., np.newaxis]
         )
-        n_frames_total: int = len(xyzc_stack)
         if n_frames_total > 0:
             positions_flat: Float[ndarray, "n_total 3"] = rearrange(
                 xyz_stack,
@@ -412,7 +417,7 @@ def log_exoego_batch(
     ###########################
     # batch send all exo cams #
     ###########################
-    if exoego_sequence.exo_sequence is not None and log_exo and log_labels:
+    if exoego_sequence.exo_sequence is not None and log_exo:
         exo_cam_param_list: list[PinholeParameters] = exoego_sequence.exo_sequence.exo_cam_list
         Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
             [pinhole.projection_matrix for pinhole in exo_cam_param_list]
@@ -480,6 +485,143 @@ def log_exoego_batch(
     if exoego_sequence.ego_sequence is not None and log_ego:
         for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
             # We assume that all cameras have the intrinsics
+            cam_log_path: Path = parent_log_path / "ego" / cam_name
+            pinhole_log_path: Path = cam_log_path / "pinhole"
+
+            # make Pall for specific camera
+            Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
+                [pinhole.projection_matrix for pinhole in ego_cam_param_list]
+            )
+            uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
+
+            # Process in batches to balance memory usage and performance
+            batch_size = min(100, len(xyz_hom_stack))  # Adjust based on available memory
+            for start_idx in range(0, len(xyz_hom_stack), batch_size):
+                end_idx: int = min(start_idx + batch_size, len(xyz_hom_stack))
+
+                # Get batch data
+                xyz_hom_batch = xyz_hom_stack[start_idx:end_idx]  # (batch_frames, 133, 4)
+                P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
+
+                # Use the vectorized projection function on the batch
+                uv_batch: Float[ndarray, "batch_frames batch_frames 133 2"] = proj_3d_vectorized(
+                    xyz_hom=xyz_hom_batch, P=P_batch
+                )
+
+                # Extract diagonal to get frame-to-frame correspondence
+                batch_len = end_idx - start_idx
+                uv_batch_diagonal = uv_batch[np.arange(batch_len), np.arange(batch_len)]  # (batch_frames, 133, 2)
+
+                # Store results
+                uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
+
+            uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, ego_cam_param_list[0])
+            n_frames_cam: int = len(uv_ego_stack)
+            if n_frames_cam > 0:
+                positions_flat_ego: Float[ndarray, "n_total 2"] = rearrange(
+                    uv_ego_stack,
+                    "n_frames kpts dim -> (n_frames kpts) dim",
+                ).astype(np.float32)
+                colors_ego: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam]
+                colors_flat_ego: UInt8[ndarray, "n_total 3"] = rearrange(
+                    colors_ego,
+                    "n_frames kpts dim -> (n_frames kpts) dim",
+                )
+                conf_ego: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam]
+                confidences_flat_ego: Float32[ndarray, "n_total"] = rearrange(
+                    conf_ego,
+                    "n_frames kpts -> (n_frames kpts)",
+                ).astype(np.float32)
+                n_keypoints: int = len(COCO_133_IDS)
+                keypoint_lengths_ego: Int[ndarray, "n_frames"] = np.full(n_frames_cam, n_keypoints, dtype=np.int32)
+
+                # Same helper makes the ego path symmetrical with the exo cameras.
+                rr.log(
+                    f"{pinhole_log_path}/keypoints",
+                    Points2DWithConfidence.from_fields(
+                        class_ids=0,
+                        keypoint_ids=COCO_133_IDS,
+                        show_labels=False,
+                    ),
+                    static=True,
+                )
+                rr.send_columns(
+                    f"{pinhole_log_path}/keypoints",
+                    indexes=[
+                        rr.TimeColumn(
+                            timeline,
+                            duration=1e-9 * shortest_timestamp[0:n_frames_cam],
+                        )
+                    ],
+                    columns=[
+                        *Points2DWithConfidence.columns(
+                            positions=positions_flat_ego,
+                            colors=colors_flat_ego,
+                            confidences=confidences_flat_ego,
+                        ).partition(keypoint_lengths_ego),
+                    ],
+                )
+
+
+class LogPaths(NamedTuple):
+    exo_video_log_paths: list[Path] | None
+    ego_video_log_paths: list[Path] | None
+
+
+class SceneSetupResult(NamedTuple):
+    log_paths: LogPaths
+    shortest_timestamp: Int[ndarray, "n_frames"]
+
+
+def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, timeline: str) -> SceneSetupResult:
+    ego_sequence: BaseEgoSequence | None = exoego_sequence.ego_sequence
+    exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
+
+    exo_timestamp_list: list[Int[ndarray, "n_frames"]] = []
+    exo_video_log_paths: list[Path] | None = None
+    if exo_sequence is not None:
+        exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
+        exo_video_files: list[Path] = exo_video_readers.video_paths
+        exo_cam_log_paths: list[Path] = [
+            parent_log_path / "exo" / exo_cam.name for exo_cam in exo_sequence.exo_cam_list
+        ]
+        exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
+
+        # log stationary exo cameras and video assets
+        for exo_cam in exo_sequence.exo_cam_list:
+            cam_log_path: Path = parent_log_path / "exo" / exo_cam.name
+            log_pinhole(
+                camera=exo_cam,
+                cam_log_path=cam_log_path,
+                image_plane_distance=exo_sequence.image_plane_distance,
+                static=True,
+            )
+
+        for video_file, exo_video_log_path in zip(exo_video_files, exo_video_log_paths, strict=True):
+            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+            # Log video asset which is referred to by frame references.
+            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, exo_video_log_path, timeline=timeline)
+            exo_timestamp_list.append(exo_timestamps_ns)
+
+    ego_timestamp_list: list[Int[ndarray, "n_frames"]] = []
+    ego_video_log_paths: list[Path] | None = None
+    if ego_sequence is not None:
+        ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
+        ego_video_files: list[Path] = ego_video_readers.video_paths
+        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
+        ego_cam_log_paths: list[Path] = [parent_log_path / "ego" / ego_cam_name for ego_cam_name in ego_cam_dict]
+        ego_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
+
+        for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
+            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+            # Log video asset which is referred to by frame references.
+            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, ego_video_log_path, timeline=timeline)
+            ego_timestamp_list.append(ego_timestamps_ns)
+
+        # log the ego cameras and their trajectories
+        shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
+        for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
+            # We assume that all cameras have the intrinsics
             first_cam: PinholeParameters = ego_cam_param_list[0]
             cam_log_path: Path = parent_log_path / "ego" / cam_name
             pinhole_log_path: Path = cam_log_path / "pinhole"
@@ -506,7 +648,7 @@ def log_exoego_batch(
             # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
             rr.send_columns(
                 f"{cam_log_path}",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0 : len(batch_world_t_cam)])],
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])],
                 columns=[
                     *rr.Transform3D.columns(
                         translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
@@ -515,149 +657,37 @@ def log_exoego_batch(
                 ],
             )
 
-            if log_labels:
-                # make Pall for specific camera
-                Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
-                    [pinhole.projection_matrix for pinhole in ego_cam_param_list]
-                )
-                uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
+    shortest_timestamp: Int[ndarray, "n_frames"] = min(
+        exo_timestamp_list + ego_timestamp_list,
+        key=len,
+    )
 
-                # Process in batches to balance memory usage and performance
-                batch_size = min(100, len(xyz_hom_stack))  # Adjust based on available memory
-                for start_idx in range(0, len(xyz_hom_stack), batch_size):
-                    end_idx: int = min(start_idx + batch_size, len(xyz_hom_stack))
-
-                    # Get batch data
-                    xyz_hom_batch = xyz_hom_stack[start_idx:end_idx]  # (batch_frames, 133, 4)
-                    P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
-
-                    # Use the vectorized projection function on the batch
-                    uv_batch: Float[ndarray, "batch_frames batch_frames 133 2"] = proj_3d_vectorized(
-                        xyz_hom=xyz_hom_batch, P=P_batch
-                    )
-
-                    # Extract diagonal to get frame-to-frame correspondence
-                    batch_len = end_idx - start_idx
-                    uv_batch_diagonal = uv_batch[np.arange(batch_len), np.arange(batch_len)]  # (batch_frames, 133, 2)
-
-                    # Store results
-                    uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
-
-                uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, first_cam)
-                n_frames_cam: int = len(uv_ego_stack)
-                if n_frames_cam > 0:
-                    positions_flat_ego: Float[ndarray, "n_total 2"] = rearrange(
-                        uv_ego_stack,
-                        "n_frames kpts dim -> (n_frames kpts) dim",
-                    ).astype(np.float32)
-                    colors_ego: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam]
-                    colors_flat_ego: UInt8[ndarray, "n_total 3"] = rearrange(
-                        colors_ego,
-                        "n_frames kpts dim -> (n_frames kpts) dim",
-                    )
-                    conf_ego: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam]
-                    confidences_flat_ego: Float32[ndarray, "n_total"] = rearrange(
-                        conf_ego,
-                        "n_frames kpts -> (n_frames kpts)",
-                    ).astype(np.float32)
-                    n_keypoints: int = len(COCO_133_IDS)
-                    keypoint_lengths_ego: Int[ndarray, "n_frames"] = np.full(n_frames_cam, n_keypoints, dtype=np.int32)
-
-                    # Same helper makes the ego path symmetrical with the exo cameras.
-                    rr.log(
-                        f"{pinhole_log_path}/keypoints",
-                        Points2DWithConfidence.from_fields(
-                            class_ids=0,
-                            keypoint_ids=COCO_133_IDS,
-                            show_labels=False,
-                        ),
-                        static=True,
-                    )
-                    rr.send_columns(
-                        f"{pinhole_log_path}/keypoints",
-                        indexes=[
-                            rr.TimeColumn(
-                                timeline,
-                                duration=1e-9 * shortest_timestamp[0:n_frames_cam],
-                            )
-                        ],
-                        columns=[
-                            *Points2DWithConfidence.columns(
-                                positions=positions_flat_ego,
-                                colors=colors_flat_ego,
-                                confidences=confidences_flat_ego,
-                            ).partition(keypoint_lengths_ego),
-                        ],
-                    )
+    return SceneSetupResult(
+        log_paths=LogPaths(exo_video_log_paths=exo_video_log_paths, ego_video_log_paths=ego_video_log_paths),
+        shortest_timestamp=shortest_timestamp,
+    )
 
 
 def visualize_exo_ego(config: VisualizeConfig):
     start_time: float = timer()
     exoego_sequence: BaseExoEgoSequence = config.dataset.setup()  # one-liner
-    ego_sequence: BaseEgoSequence | None = exoego_sequence.ego_sequence
-    exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
-
     rr.log("/", exoego_sequence.world_coordinate_system, static=True)
     set_annotation_context()
 
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
-    ego_timestamps: list[Int[ndarray, "n_frames"]] = []
-    ego_video_log_paths: list[Path] | None = None
-    if ego_sequence is not None and config.log_ego:
-        ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
-        ego_video_files: list[Path] = ego_video_readers.video_paths
-        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
-        ego_cam_log_paths: list[Path] = [parent_log_path / "ego" / ego_cam_name for ego_cam_name in ego_cam_dict]
-        ego_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
-
-        for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
-            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
-            # Log video asset which is referred to by frame references.
-            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, ego_video_log_path, timeline=timeline)
-            ego_timestamps.append(ego_timestamps_ns)
-
-    exo_video_log_paths: list[Path] | None = None
-    if exo_sequence is not None and config.log_exo:
-        exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
-        exo_video_files: list[Path] = exo_video_readers.video_paths
-        exo_cam_log_paths: list[Path] = [
-            parent_log_path / "exo" / exo_cam.name for exo_cam in exo_sequence.exo_cam_list
-        ]
-        exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
-
-        # log stationary exo cameras and video assets
-        for exo_cam in exo_sequence.exo_cam_list:
-            cam_log_path: Path = parent_log_path / "exo" / exo_cam.name
-            log_pinhole(
-                camera=exo_cam,
-                cam_log_path=cam_log_path,
-                image_plane_distance=exo_sequence.image_plane_distance,
-                static=True,
-            )
-
-        for idx, (video_file, exo_video_log_path) in enumerate(zip(exo_video_files, exo_video_log_paths, strict=True)):
-            if idx >= config.max_exo_videos_to_log:
-                break
-            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
-            # Log video asset which is referred to by frame references.
-            log_video(video_file, exo_video_log_path, timeline=timeline)
+    scene_setup_result: SceneSetupResult = setup_scene(exoego_sequence, parent_log_path, timeline)
+    log_paths: LogPaths = scene_setup_result.log_paths
+    shortest_timestamp: Int[ndarray, "n_frames"] = scene_setup_result.shortest_timestamp
 
     blueprint: rrb.Blueprint = create_blueprint(
-        exo_video_log_paths=exo_video_log_paths,
-        ego_video_log_paths=ego_video_log_paths,
-        max_exo_videos_to_log=config.max_exo_videos_to_log,
+        exo_video_log_paths=log_paths.exo_video_log_paths,
+        ego_video_log_paths=log_paths.ego_video_log_paths,
     )
     rr.send_blueprint(blueprint)
 
-    if ego_sequence is not None and ego_timestamps:
-        # Find the timestamp list with the maximum length.
-        shortest_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamps, key=len)
-        assert len(shortest_timestamp) == len(ego_sequence), (
-            f"Length of timestamps {len(shortest_timestamp)} and sequence {len(ego_sequence)} do not match"
-        )
-
+    if config.log_labels:
         log_exoego_batch(
             exoego_sequence,
             parent_log_path=parent_log_path,
@@ -666,7 +696,6 @@ def visualize_exo_ego(config: VisualizeConfig):
             log_ego=config.log_ego,
             log_exo=config.log_exo,
             log_mano=config.log_mano,
-            log_labels=config.log_labels,
         )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
