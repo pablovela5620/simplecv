@@ -1,3 +1,5 @@
+"""Rerun visualization helpers for combined exo- and ego-centric datasets."""
+
 from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
@@ -33,21 +35,38 @@ from simplecv.rerun_log_utils import (
 )
 from simplecv.video_io import MultiVideoReader
 
+# Improve console readability when inspecting numeric debugging output.
 np.set_printoptions(suppress=True)
 
 
 @dataclass
 class VisualizeConfig:
+    """Structured configuration for running the exo/ego visualization CLI."""
+
     rr_config: RerunTyroConfig
+    """Command-line options for spawning and configuring the Rerun viewer."""
+
     dataset: AnnotatedExoEgoDatasetUnion
+    """Dataset factory capable of producing an annotated ``BaseExoEgoSequence``."""
+
     max_exo_videos_to_log: Literal[4, 8] = 8
+    """Upper bound on the number of exo video panels rendered in the blueprint."""
+
     log_exo: bool = True
+    """Enable logging of exo-camera imagery, intrinsics, and projections."""
+
     log_ego: bool = True
+    """Enable logging of ego-camera imagery, intrinsics, and projections."""
+
     log_mano: bool = True
+    """Enable streaming of MANO meshes and keypoints derived from the dataset."""
+
     log_labels: bool = True
+    """Control whether 2D/3D keypoint annotations are logged alongside videos."""
 
 
 def set_annotation_context() -> None:
+    """Register COCO-133 semantic metadata so subsequent logs show names/edges."""
     rr.log(
         "/",
         rr.AnnotationContext(
@@ -71,26 +90,18 @@ def create_blueprint(
     exo_video_log_paths: list[Path] | None = None,
     max_exo_videos_to_log: Literal[4, 8] = 8,
 ) -> rrb.Blueprint:
-    """Creates a Rerun blueprint for visualizing ego and exo-centric video streams.
-
-    This function constructs a Rerun blueprint layout. It starts with a main 3D
-    spatial view. If ego-centric video paths are provided, it adds a vertical
-    panel on the right with a tab for each ego video. If exo-centric video
-    paths are provided, it adds a horizontal panel at the bottom with a tab for
-    each exo video.
+    """Create a Rerun blueprint for visualizing ego- and exo-centric streams.
 
     Args:
-        ego_video_log_paths: Optional list of paths to ego-centric video logs.
-            If provided, a vertical panel with tabs for each video's 2D view
-            is added to the right of the main 3D view.
-        exo_video_log_paths: Optional list of paths to exo-centric video logs.
-            If provided, a horizontal panel with tabs for each video's 2D view
-            is added below the main view.
-        max_exo_videos_to_log: The maximum number of exo-centric videos to display
-            in the blueprint. Defaults to 8.
+        ego_video_log_paths (list[Path] | None): Optional set of ego video entity
+            roots; each path becomes a tabbed 2D view alongside the spatial view.
+        exo_video_log_paths (list[Path] | None): Optional set of exo video entity
+            roots; each path becomes a tabbed 2D view beneath the spatial view.
+        max_exo_videos_to_log (Literal[4, 8]): Maximum number of exo video panels
+            to materialize when ``exo_video_log_paths`` is provided.
 
     Returns:
-        A `rrb.Blueprint` object defining the layout for the Rerun viewer.
+        rrb.Blueprint: Assembled layout containing the configured views.
     """
     main_view = rrb.Spatial3DView(
         origin="/",
@@ -141,7 +152,20 @@ def filter_out_of_bounds_keypoints(
     camera_params: PinholeParameters,
     margin_percentage: float = 0.2,
 ) -> Float[ndarray, "... 2"]:
-    """Filters out-of-bounds 2D keypoints by setting them to NaN."""
+    """Clamp keypoints to the image bounds with a configurable border margin.
+
+    Args:
+        uv_stack (Float[np.ndarray, "... 2"]): Stacked 2D keypoint coordinates
+            with the last axis holding ``(u, v)`` image coordinates.
+        camera_params (PinholeParameters): Intrinsics describing the sensor used
+            to determine valid image extents.
+        margin_percentage (float): Fractional padding applied beyond the raw
+            image dimensions before clipping.
+
+    Returns:
+        Float[np.ndarray, "... 2"]: Input coordinates with out-of-bounds values
+            replaced by ``NaN`` so Rerun elides those samples during rendering.
+    """
     width: int | float = camera_params.intrinsics.width
     height: int | float = camera_params.intrinsics.height
     margin_x: float = margin_percentage * width
@@ -165,8 +189,17 @@ def compute_vertex_normals_batch(
 ) -> Float32[ndarray, "n_frames n_verts 3"]:
     """Compute per-vertex normals for a batch of meshes sharing topology.
 
-    - Accumulates area-weighted face normals to vertices per frame, then normalizes.
-    - Robust to degenerate faces via epsilon guard.
+    Args:
+        verts (Float32[np.ndarray, "n_frames n_verts 3"]): Batched vertex
+            positions where each frame shares the same triangulation.
+        faces (Int[np.ndarray, "n_faces 3"]): Triangle indices defining the
+            mesh topology that ``verts`` adheres to.
+        eps (float): Small epsilon that prevents division by zero when
+            normalizing degenerate vertices.
+
+    Returns:
+        Float32[np.ndarray, "n_frames n_verts 3"]: Unit-length vertex normals
+            for each frame, zeroed where the norm would be numerically unstable.
     """
     n_frames: int = int(verts.shape[0])
     n_verts: int = int(verts.shape[1])
@@ -208,6 +241,22 @@ def log_mano_batch(
     shortest_timestamp: Int[ndarray, "n_frames"],
     log_mano: bool,
 ) -> None:
+    """Stream MANO meshes and derived COCO joints to Rerun for both hands.
+
+    Args:
+        exoego_sequence (BaseExoEgoSequence): Sequence that may contain MANO
+            pose parameters inside ``exoego_labels``.
+        parent_log_path (Path): Root Rerun entity under which MANO data is
+            organized.
+        timeline (str): Logical timeline label shared across logged modalities.
+        shortest_timestamp (Int[np.ndarray, "n_frames"]): Nanosecond timestamps
+            that define the synchronized slice applied to all logged data.
+        log_mano (bool): Gate controlling whether any MANO data is emitted.
+
+    Returns:
+        None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
+            effects.
+    """
     mano_mesh_color_rgba_map: dict[Literal["left", "right"], tuple[int, int, int, int]] = {
         "right": (255, 0, 0, 255),
         "left": (0, 0, 255, 255),
@@ -342,6 +391,24 @@ def log_exoego_batch(
     log_exo: bool = True,
     log_mano: bool = False,
 ) -> None:
+    """Bulk-log 3D labels plus their ego/exo projections using columnar APIs.
+
+    Args:
+        exoego_sequence (BaseExoEgoSequence): Sequence containing videos,
+            annotations, and camera parameters for ego and exo sensors.
+        parent_log_path (Path): Root entity under which all logged data is
+            organized.
+        timeline (str): Logical timeline name shared between all logged tracks.
+        shortest_timestamp (Int[np.ndarray, "n_frames"]): Nanosecond timestamps
+            representing the synchronized window applied to every stream.
+        log_ego (bool): Enable logging of ego camera projections.
+        log_exo (bool): Enable logging of exo camera projections.
+        log_mano (bool): Enable logging of MANO-derived meshes and keypoints.
+
+    Returns:
+        None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
+            effects.
+    """
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     ##########################
     # batch send all 3D data #
@@ -564,16 +631,44 @@ def log_exoego_batch(
 
 
 class LogPaths(NamedTuple):
+    """Collection of optional Rerun entity roots for video playback.
+
+    Attributes:
+        exo_video_log_paths (list[Path] | None): List of exo video entities to
+            display as 2D panels, if available.
+        ego_video_log_paths (list[Path] | None): List of ego video entities to
+            display as 2D panels, if available.
+    """
     exo_video_log_paths: list[Path] | None
     ego_video_log_paths: list[Path] | None
 
 
 class SceneSetupResult(NamedTuple):
+    """Combined result of scene bootstrapping and shared timing metadata.
+
+    Attributes:
+        log_paths (LogPaths): Optional entity roots for ego/exo videos.
+        shortest_timestamp (Int[np.ndarray, "n_frames"]): Aligned timestamps
+            shared across all logged modalities.
+    """
     log_paths: LogPaths
     shortest_timestamp: Int[ndarray, "n_frames"]
 
 
 def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, timeline: str) -> SceneSetupResult:
+    """Log static assets, videos, and transforms; derive the shared timeline.
+
+    Args:
+        exoego_sequence (BaseExoEgoSequence): Combined ego/exo dataset ready for
+            visualization.
+        parent_log_path (Path): Root entity under which all scene elements are
+            recorded.
+        timeline (str): Logical timeline label for video frame timestamps.
+
+    Returns:
+        SceneSetupResult: Bundle with optional video log paths and the
+            synchronized timestamp vector ``Int[np.ndarray, "n_frames"]``.
+    """
     ego_sequence: BaseEgoSequence | None = exoego_sequence.ego_sequence
     exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
 
@@ -669,6 +764,15 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
 
 
 def visualize_exo_ego(config: VisualizeConfig):
+    """Entry-point used by ``tools/view_exoego.py`` to drive the visualization.
+
+    Args:
+        config (VisualizeConfig): Run configuration describing dataset,
+            logging toggles, and viewer options.
+
+    Returns:
+        None: Side-effectful logging call sequence that feeds the Rerun viewer.
+    """
     start_time: float = timer()
     exoego_sequence: BaseExoEgoSequence = config.dataset.setup()  # one-liner
     rr.log("/", exoego_sequence.world_coordinate_system, static=True)
