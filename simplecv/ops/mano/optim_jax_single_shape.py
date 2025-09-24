@@ -72,8 +72,6 @@ type ResidualFn = Callable[
     Float[Array, "_"],  # flat residual vector
 ]
 
-import jax
-
 
 def make_mv_shape_pose_residual(side: Literal["left", "right"]) -> tuple[ResidualFn, FwdKinematics]:
     """Factory: residual function + FK for the requested hand side."""
