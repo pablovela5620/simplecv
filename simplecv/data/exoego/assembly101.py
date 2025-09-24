@@ -43,6 +43,8 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
 
 
 class Assembly101Sequence(BaseExoEgoSequence):
+    """Assembly101 dataset adapter with 3D annotations expressed in meters."""
+
     config: Assembly101Config
 
     def __getitem__(self, idx):
@@ -55,6 +57,7 @@ class Assembly101Sequence(BaseExoEgoSequence):
         return Assembly101ExoSequence(cfg=self.config)
 
     def load_labels(self) -> ExoEgoLabels:
+        """Load COCO-133 hand keypoints in meters for the current sequence."""
         ### Load 3D keypoints ###
         landmarks3d_dir: Path = self.config.root_directory / "assembly101_camera_and_hand_poses" / "landmarks3D"
         assert landmarks3d_dir.exists(), f"Directory {landmarks3d_dir} does not exist"
@@ -76,8 +79,11 @@ class Assembly101Sequence(BaseExoEgoSequence):
             xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
 
         # Concatenate keypoints from all frames vertically to get a (num_frames 21, 3) array.
-        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
-        num_frames = xyz_stack.shape[0]
+        xyz_stack_mm: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
+        num_frames = xyz_stack_mm.shape[0]
+
+        # Convert millimeter coordinates provided by the dataset to meters.
+        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = xyz_stack_mm * np.float32(1e-3)
 
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
         for f in range(num_frames):
@@ -134,5 +140,5 @@ class Assembly101Sequence(BaseExoEgoSequence):
 
     @property
     def image_plane_distance(self) -> int | float:
-        """Get the image plane distance for the camera."""
-        return 35
+        """Get the image plane distance for the camera in meters."""
+        return 0.035

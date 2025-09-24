@@ -179,6 +179,9 @@ hypothesis = ">=6.112.1,<7"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 pytest-beartype = ">=0.2,<1"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }
+
 
 [tool.pixi.feature.dev.tasks]
 # Run tests in the dev environment

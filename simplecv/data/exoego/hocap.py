@@ -37,6 +37,8 @@ class HocapConfig(BaseExoEgoDatasetConfig):
 
 
 class HocapSequence(BaseExoEgoSequence):
+    """HoloCap dataset adapter emitting 3D annotations in meters."""
+
     config: HocapConfig
 
     def __getitem__(self, idx):
@@ -49,7 +51,7 @@ class HocapSequence(BaseExoEgoSequence):
         return HocapExoSequence(cfg=self.config)
 
     def load_labels(self) -> ExoEgoLabels:
-        """Load labels for the sequence, if applicable."""
+        """Load COCO-133 joints and MANO parameters in meters for this sequence."""
         # 2D keypoints are not available for HoloLens, so we will load 3D labels from the first camera
         calibration_path: Path = self.config.root_directory / "calibration"
         extrinsics_directory: Path = calibration_path / "extrinsics"

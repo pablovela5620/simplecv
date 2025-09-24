@@ -29,6 +29,8 @@ class EgoDexConfig(BaseExoEgoDatasetConfig):
 
 
 class EgoDexSequence(BaseExoEgoSequence):
+    """EgoDex dataset adapter with 3D annotations natively in meters."""
+
     config: EgoDexConfig
 
     def __getitem__(self, idx):
@@ -41,7 +43,7 @@ class EgoDexSequence(BaseExoEgoSequence):
         return None
 
     def load_labels(self) -> ExoEgoLabels | None:
-        """Load labels for the sequence, if applicable."""
+        """Load COCO-133 joint stack in meters for the current episode."""
         xyzc_stack: Float32[ndarray, "n_frames 133 4"] = self._parse_joints()
         return ExoEgoLabels(xyzc_stack=xyzc_stack)
 

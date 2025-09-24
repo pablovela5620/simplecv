@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import numpy as np
 import rerun as rr
 from jaxtyping import Float32
 from numpy import ndarray
@@ -122,6 +123,8 @@ def pick_schema(extrinsics_ego: dict[str, Any]) -> type[EgoExtri843] | type[EgoE
 
 
 class Assembly101EgoSequence(BaseEgoSequence):
+    """Egocentric view loader for Assembly101 with extrinsics in meters."""
+
     config: "Assembly101Config"
 
     def __len__(self) -> int:
@@ -218,7 +221,7 @@ class Assembly101EgoSequence(BaseEgoSequence):
                 cam_T_world = getattr(ego_cam, key)
                 extri: Extrinsics = Extrinsics(
                     world_R_cam=cam_T_world[:3, :3],
-                    world_t_cam=cam_T_world[:3, 3],
+                    world_t_cam=cam_T_world[:3, 3] * np.float32(1e-3),
                 )
                 ego_pinhole_dict[key].append(
                     PinholeParameters(
@@ -262,5 +265,5 @@ class Assembly101EgoSequence(BaseEgoSequence):
 
     @property
     def image_plane_distance(self) -> int | float:
-        """Get the image plane distance for the camera."""
-        return 35
+        """Get the image plane distance for the camera in meters."""
+        return 0.035

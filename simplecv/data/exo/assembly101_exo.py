@@ -78,6 +78,8 @@ class Ego2DKeypoints:
 
 
 class Assembly101ExoSequence(BaseExoSequence):
+    """Assembly101 exocentric view loader with meters-based extrinsics and labels."""
+
     config: "Assembly101Config"
 
     def __len__(self) -> int:
@@ -193,7 +195,7 @@ class Assembly101ExoSequence(BaseExoSequence):
 
             extri = Extrinsics(
                 world_R_cam=exo_camera[:3, :3],
-                world_t_cam=exo_camera[:3, 3],
+                world_t_cam=exo_camera[:3, 3] * np.float32(1e-3),
             )
             pinhole_param = PinholeParameters(
                 name=cam_name,
@@ -256,7 +258,8 @@ class Assembly101ExoSequence(BaseExoSequence):
             xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
 
         # Concatenate keypoints from all frames vertically to get a (num_frames 21, 3) array.
-        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
+        xyz_stack_mm: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
+        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = xyz_stack_mm * np.float32(1e-3)
         return ExoBatchData(uv_stack_dict=uv_stack_dict, xyz_stack=xyz_stack)
 
     @property
@@ -266,8 +269,8 @@ class Assembly101ExoSequence(BaseExoSequence):
 
     @property
     def image_plane_distance(self) -> int | float:
-        """Get the image plane distance for the camera."""
-        return 100
+        """Get the image plane distance for the camera in meters."""
+        return 0.1
 
     # @property
     # def depth_paths(self) -> list[dict[ExoCameraIDs, Path]]:
