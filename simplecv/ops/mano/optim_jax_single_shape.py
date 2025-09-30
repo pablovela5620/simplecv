@@ -22,6 +22,7 @@ class LossWeights(TypedDict):
     depth: float
     temp: float
     pose_reg: float
+    shape_reg: float
 
 
 @jit
@@ -87,9 +88,10 @@ def make_mv_shape_pose_residual(side: Literal["left", "right"]) -> tuple[Residua
     ) -> Float[Array, "_"]:
         batch_size: int = uv_pred.shape[0]
         # because params to optimize start out as a flat array, extract the shape (size 10)
-        beta: Float[Array, "1 10"] = param_to_optimize[0:10][np.newaxis, :]
+        beta_flat: Float[Array, "10"] = param_to_optimize[0:10]
+        beta_singleton: Float[Array, "1 10"] = beta_flat[np.newaxis, :]
         # convert beta to have the same batch as the rest by copying
-        beta: Float[Array, "b 10"] = beta.repeat(batch_size, axis=0)
+        beta: Float[Array, "b 10"] = beta_singleton.repeat(batch_size, axis=0)
         params_2d: Float[Array, "b 51"] = param_to_optimize[10:].reshape(batch_size, 51)
         so3: Float[Array, "b 48"] = params_2d[:, 0:48]
         trans: Float[Array, "b 3"] = params_2d[:, 48:51]
@@ -121,10 +123,20 @@ def make_mv_shape_pose_residual(side: Literal["left", "right"]) -> tuple[Residua
         pose_only: Float[Array, "b 45"] = so3[:, 3:48]
         lambda_pose: Float[Array, ""] = npj.array(loss_weights["pose_reg"], dtype=pose_only.dtype)
         # If lambda is zero, this stays zero and won't affect residual size
-        reg_residual: Float[Array, "b 45"] = npj.sqrt(lambda_pose) * pose_only
+        pose_reg_residual: Float[Array, "b 45"] = npj.sqrt(lambda_pose) * pose_only
+
+        # ------------------------------------------------------------------
+        # Shape L2 regularization (squared L2 of MANO betas).
+        # Regularizes the global hand shape to keep vertices stable when
+        # optimization pushes towards extreme betas.
+        # ------------------------------------------------------------------
+        lambda_shape: Float[Array, ""] = npj.array(loss_weights["shape_reg"], dtype=beta.dtype)
+        shape_reg_residual: Float[Array, "b 10"] = npj.sqrt(lambda_shape) * beta
 
         # Concatenate data term and regularization term and return flattened vector
-        return npj.concatenate([res_2d.reshape((batch_size, -1)), reg_residual], axis=-1).flatten()
+        return npj.concatenate(
+            [res_2d.reshape((batch_size, -1)), pose_reg_residual, shape_reg_residual], axis=-1
+        ).flatten()
 
     return mv_2d_shape_pose_residual, mano_fwd
 
@@ -136,7 +148,13 @@ class PoseShapeOptimConfig:
     Pall: Float[ndarray, "n_views 3 4"]
     hand_side: Literal["left", "right"] = "left"
     loss_weights: LossWeights = field(
-        default_factory=lambda: LossWeights(keypoint_2d=1.0, depth=0.0, temp=0.0, pose_reg=0.2)
+        default_factory=lambda: LossWeights(
+            keypoint_2d=1.0,
+            depth=0.0,
+            temp=0.0,
+            pose_reg=0.2,
+            shape_reg=0.2,
+        )
     )
     n_frames_optim: int = 30
     n_optim_iters: int = 30
