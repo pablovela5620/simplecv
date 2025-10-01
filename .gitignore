@@ -169,9 +169,8 @@ data/*
 *MANO_*.pkl
 repomix-output.xml
 
+
 # START Ruler Generated Files
-/.clinerules
-/.clinerules.bak
 /.codex/config.json
 /.codex/config.json.bak
 /.codex/config.toml

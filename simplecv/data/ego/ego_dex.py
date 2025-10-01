@@ -14,10 +14,11 @@ from simplecv.video_utils import reencode_video_optimal
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.ego_dex import EgoDexConfig
+else:  # pragma: no cover - runtime alias to avoid circular import
+    from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as EgoDexConfig
 
 
-class EgoDexSequence(BaseEgoSequence):
-    config: "EgoDexConfig"
+class EgoDexSequence(BaseEgoSequence[EgoDexConfig]):
 
     def load_video_paths(self) -> list[Path]:
         sequence_path: Path = self.config.root_directory / self.config.split / self.config.sequence_name

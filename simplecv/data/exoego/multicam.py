@@ -18,8 +18,7 @@ class MulticamConfig(BaseExoEgoDatasetConfig):
     sequence_name: str = "card-shuffle1"
 
 
-class MulticamSequence(BaseExoEgoSequence):
-    config: MulticamConfig
+class MulticamSequence(BaseExoEgoSequence[MulticamConfig]):
 
     def __getitem__(self, idx: int) -> None:
         return None
@@ -27,7 +26,7 @@ class MulticamSequence(BaseExoEgoSequence):
     def _build_ego(self) -> None:
         return None
 
-    def _build_exo(self) -> BaseExoSequence | None:
+    def _build_exo(self) -> BaseExoSequence[MulticamConfig] | None:
         return MulticamExoSequence(cfg=self.config)
 
     def load_labels(self) -> ExoEgoLabels | None:

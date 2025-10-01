@@ -17,6 +17,8 @@ from simplecv.video_io import VideoReader
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.stereo import StereoConfig
+else:  # pragma: no cover - runtime alias to avoid circular import
+    from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as StereoConfig
 
 CameraName = Literal["left", "right"]
 
@@ -39,7 +41,7 @@ def _to_numpy_list_of_arrays(arr: pa.ChunkedArray) -> list[np.ndarray]:
     return out
 
 
-class StereoEgoSequence(BaseEgoSequence):
+class StereoEgoSequence(BaseEgoSequence[StereoConfig]):
     """
     Ego stereo sequence loader for left/right cameras.
 
@@ -48,8 +50,6 @@ class StereoEgoSequence(BaseEgoSequence):
     reconstruct per-frame PinholeParameters by querying Transform3D & Pinhole
     components from the recording via the Rerun DataFrame API.
     """
-
-    config: "StereoConfig"
 
     def load_video_paths(self) -> list[Path]:
         assert self.config.rrd_path is not None, "stereo.rrd_path must be provided"

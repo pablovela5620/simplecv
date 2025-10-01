@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
+from typing import Generic, Self, TypeVar
 
 from jaxtyping import Float
 from numpy import ndarray
@@ -11,6 +12,8 @@ from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.image_types import BGRList
+
+ConfigT = TypeVar("ConfigT", bound=BaseExoEgoDatasetConfig)
 
 
 @dataclass
@@ -25,16 +28,16 @@ class ExoEgoLabels:
     mano_stack: ManoStack | None = None
 
 
-class BaseExoEgoSequence(ABC):
-    config: BaseExoEgoDatasetConfig
+class BaseExoEgoSequence(ABC, Generic[ConfigT]):
+    config: ConfigT
 
     def __init__(
         self,
-        cfg: BaseExoEgoDatasetConfig,
+        cfg: ConfigT,
     ) -> None:
-        self.config: BaseExoEgoDatasetConfig = cfg
-        self.ego_sequence: BaseEgoSequence | None = self._build_ego()
-        self.exo_sequence: BaseExoSequence | None = self._build_exo()
+        self.config: ConfigT = cfg
+        self.ego_sequence: BaseEgoSequence[ConfigT] | None = self._build_ego()
+        self.exo_sequence: BaseExoSequence[ConfigT] | None = self._build_exo()
         if self.config.load_labels:
             self._exoego_labels: ExoEgoLabels | None = self.load_labels()
 
@@ -52,11 +55,11 @@ class BaseExoEgoSequence(ABC):
         yield from self.__class__.iter_episode_sequences(self.config)
 
     @abstractmethod
-    def _build_ego(self) -> BaseEgoSequence | None:
+    def _build_ego(self) -> BaseEgoSequence[ConfigT] | None:
         """Build the ego sequence based on the configuration."""
 
     @abstractmethod
-    def _build_exo(self) -> BaseExoSequence | None:
+    def _build_exo(self) -> BaseExoSequence[ConfigT] | None:
         """Build the exo sequence based on the configuration."""
 
     @abstractmethod
@@ -69,7 +72,7 @@ class BaseExoEgoSequence(ABC):
 
     @classmethod
     @abstractmethod
-    def iter_episode_sequences(cls, cfg: BaseExoEgoDatasetConfig) -> Generator["BaseExoEgoSequence", None, None]: ...
+    def iter_episode_sequences(cls: type[Self], cfg: ConfigT) -> Generator[Self, None, None]: ...
 
     # def project_xyz(self):
     # xyz_hom: Float32[ndarray, "21 4"] = np.hstack((xyz, np.ones((21, 1)))).astype(np.float32)

@@ -21,16 +21,15 @@ class StereoConfig(BaseExoEgoDatasetConfig):
     rrd_path: Path | None = None
 
 
-class StereoSequence(BaseExoEgoSequence):
-    config: StereoConfig
+class StereoSequence(BaseExoEgoSequence[StereoConfig]):
 
     def __getitem__(self, idx: int) -> None:
         return None
 
-    def _build_ego(self) -> BaseEgoSequence | None:
+    def _build_ego(self) -> BaseEgoSequence[StereoConfig] | None:
         return StereoEgoSequence(cfg=self.config)
 
-    def _build_exo(self) -> BaseExoSequence | None:
+    def _build_exo(self) -> BaseExoSequence[StereoConfig] | None:
         # Ego-only for now
         return None
 

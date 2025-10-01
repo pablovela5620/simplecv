@@ -14,6 +14,7 @@ from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.ego_dex import EgoDexSequence as EgoSequence
+from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, avp_to_coco_hands
@@ -28,18 +29,16 @@ class EgoDexConfig(BaseExoEgoDatasetConfig):
     episode: int = 0
 
 
-class EgoDexSequence(BaseExoEgoSequence):
+class EgoDexSequence(BaseExoEgoSequence[EgoDexConfig]):
     """EgoDex dataset adapter with 3D annotations natively in meters."""
-
-    config: EgoDexConfig
 
     def __getitem__(self, idx):
         return None
 
-    def _build_ego(self) -> BaseEgoSequence | None:
+    def _build_ego(self) -> BaseEgoSequence[EgoDexConfig] | None:
         return EgoSequence(cfg=self.config)
 
-    def _build_exo(self) -> BaseEgoSequence | None:
+    def _build_exo(self) -> BaseExoSequence[EgoDexConfig] | None:
         return None
 
     def load_labels(self) -> ExoEgoLabels | None:

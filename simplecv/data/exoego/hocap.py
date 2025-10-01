@@ -36,10 +36,8 @@ class HocapConfig(BaseExoEgoDatasetConfig):
     sequence_name: str = "20231024_180733"
 
 
-class HocapSequence(BaseExoEgoSequence):
+class HocapSequence(BaseExoEgoSequence[HocapConfig]):
     """HoloCap dataset adapter emitting 3D annotations in meters."""
-
-    config: HocapConfig
 
     def __getitem__(self, idx):
         return None
@@ -47,7 +45,7 @@ class HocapSequence(BaseExoEgoSequence):
     def _build_ego(self) -> BaseEgoSequence | None:
         return HocapEgoSequence(cfg=self.config)
 
-    def _build_exo(self) -> BaseExoSequence | None:
+    def _build_exo(self) -> BaseExoSequence[HocapConfig] | None:
         return HocapExoSequence(cfg=self.config)
 
     def load_labels(self) -> ExoEgoLabels:

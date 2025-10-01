@@ -124,6 +124,7 @@ av = "*"
 
 hdf5 = ">=1.14.4,<2"
 h5py = ">=3.12.1,<4"
+jupyterlab = ">=4.4.9,<5"
 
 # cuda128 begin
 [tool.pixi.feature.cuda128]

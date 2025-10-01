@@ -17,6 +17,8 @@ from simplecv.video_utils import create_temp_video_from_img_dir
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.hocap import HocapConfig
+else:  # pragma: no cover - runtime alias to avoid circular import
+    from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as HocapConfig
 
 # External (exo) cameras are identified by numerical IDs
 ExoCameraIDs = Literal[
@@ -132,8 +134,7 @@ def quat_to_mat(quat: Float[ndarray, "batch 7"]) -> Float[ndarray, "batch 4 4"]:
     return p
 
 
-class HocapExoSequence(BaseExoSequence):
-    config: "HocapConfig"
+class HocapExoSequence(BaseExoSequence[HocapConfig]):
 
     def __len__(self) -> int:
         assert len(self._video_path_list) > 0, "No videos found."

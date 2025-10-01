@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 from jaxtyping import Float32
 from numpy import ndarray
@@ -13,6 +13,7 @@ from simplecv.image_types import BGRList
 from simplecv.video_io import MultiVideoReader
 
 CamNameType = TypeVar("CamNameType", bound=str)
+ConfigT = TypeVar("ConfigT", bound=BaseExoEgoDatasetConfig)
 
 
 @dataclass
@@ -49,14 +50,14 @@ class ExoBatchData:
     mano_stack: ManoStack | None = None
 
 
-class BaseExoSequence(ABC):
-    config: BaseExoEgoDatasetConfig
+class BaseExoSequence(ABC, Generic[ConfigT]):
+    config: ConfigT
 
     def __init__(
         self,
-        cfg: BaseExoEgoDatasetConfig,
+        cfg: ConfigT,
     ) -> None:
-        self.config: BaseExoEgoDatasetConfig = cfg
+        self.config: ConfigT = cfg
         self._video_path_list: list[Path] = self.load_video_paths()
         self._exo_cam_list: list[PinholeParameters] = self.load_exo_cams()
         self.exo_video_readers: MultiVideoReader = MultiVideoReader(

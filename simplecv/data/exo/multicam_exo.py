@@ -13,10 +13,11 @@ from simplecv.ops.conventions import CameraConventions, convert_pose
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.multicam import MulticamConfig
+else:  # pragma: no cover - runtime alias to avoid circular import
+    from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as MulticamConfig
 
 
-class MulticamExoSequence(BaseExoSequence):
-    config: "MulticamConfig"
+class MulticamExoSequence(BaseExoSequence[MulticamConfig]):
 
     def __len__(self) -> int:
         assert len(self._video_path_list) > 0, "No videos found."

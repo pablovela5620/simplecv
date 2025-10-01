@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 from jaxtyping import Float
 from numpy import ndarray
@@ -13,6 +13,7 @@ from simplecv.image_types import BGRList
 from simplecv.video_io import MultiVideoReader
 
 CamNameType = TypeVar("CamNameType", bound=str)
+ConfigT = TypeVar("ConfigT", bound=BaseExoEgoDatasetConfig)
 
 
 @dataclass
@@ -28,14 +29,14 @@ class EgoLabels:
     # uvc_stack: Float[ndarray, "n_frames n_views 68 3"] | None = None  # 2D landmarks for each view and frame
 
 
-class BaseEgoSequence(ABC):
-    config: BaseExoEgoDatasetConfig
+class BaseEgoSequence(ABC, Generic[ConfigT]):
+    config: ConfigT
 
     def __init__(
         self,
-        cfg: BaseExoEgoDatasetConfig,
+        cfg: ConfigT,
     ) -> None:
-        self.config: BaseExoEgoDatasetConfig = cfg
+        self.config: ConfigT = cfg
         #############
         # LOAD DATA #
         #############

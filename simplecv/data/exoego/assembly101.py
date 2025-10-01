@@ -42,18 +42,16 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
     encoding: Literal["h264", "av1", "av1-720-new"] = "av1-720-new"  # Encoding format of the video files.
 
 
-class Assembly101Sequence(BaseExoEgoSequence):
+class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
     """Assembly101 dataset adapter with 3D annotations expressed in meters."""
-
-    config: Assembly101Config
 
     def __getitem__(self, idx):
         return None
 
-    def _build_ego(self) -> BaseEgoSequence | None:
+    def _build_ego(self) -> BaseEgoSequence[Assembly101Config] | None:
         return Assembly101EgoSequence(cfg=self.config)
 
-    def _build_exo(self) -> BaseExoSequence | None:
+    def _build_exo(self) -> BaseExoSequence[Assembly101Config] | None:
         return Assembly101ExoSequence(cfg=self.config)
 
     def load_labels(self) -> ExoEgoLabels:

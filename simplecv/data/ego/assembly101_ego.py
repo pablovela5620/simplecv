@@ -18,6 +18,8 @@ from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.assembly101 import Assembly101Config
+else:  # pragma: no cover - runtime alias to avoid circular import
+    from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as Assembly101Config
 CameraNames = Literal["e1", "e2", "e3", "e4"]
 SerialNo = Literal[
     "21176875",  # e1
@@ -122,10 +124,8 @@ def pick_schema(extrinsics_ego: dict[str, Any]) -> type[EgoExtri843] | type[EgoE
     return schema
 
 
-class Assembly101EgoSequence(BaseEgoSequence):
+class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
     """Egocentric view loader for Assembly101 with extrinsics in meters."""
-
-    config: "Assembly101Config"
 
     def __len__(self) -> int:
         assert len(self.ego_video_readers) > 0, "No videos found."

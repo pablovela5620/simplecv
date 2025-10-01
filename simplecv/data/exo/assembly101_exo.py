@@ -17,6 +17,8 @@ from simplecv.video_utils import RESOLUTION_MAP, reencode_video_optimal
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.assembly101 import Assembly101Config
+else:  # pragma: no cover - runtime alias to avoid circular import
+    from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as Assembly101Config
 
 
 @serde
@@ -77,10 +79,8 @@ class Ego2DKeypoints:
     C21176623: Hand2DKeypoints = serde_field(rename="21176623:mono10bit")
 
 
-class Assembly101ExoSequence(BaseExoSequence):
+class Assembly101ExoSequence(BaseExoSequence[Assembly101Config]):
     """Assembly101 exocentric view loader with meters-based extrinsics and labels."""
-
-    config: "Assembly101Config"
 
     def __len__(self) -> int:
         assert len(self._video_path_list) > 0, "No videos found."

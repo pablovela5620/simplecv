@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from jaxtyping import Float32
@@ -13,7 +14,11 @@ from serde.json import from_json
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters, rescale_intri
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.video_io import VideoReader
-import contextlib
+
+if TYPE_CHECKING:
+    from simplecv.data.exoego.stereo import StereoConfig
+else:  # pragma: no cover - runtime alias to avoid circular import
+    from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as StereoConfig
 
 ExoCamName = Literal["p1", "p2", "p3"]
 
@@ -41,7 +46,7 @@ class ExoCalib:
     extrinsics: _ExtrinsicsRec
 
 
-class StereoExoSequence(BaseExoSequence):
+class StereoExoSequence(BaseExoSequence[StereoConfig]):
     """Stationary exo cameras (p1, p2, p3) with fixed extrinsics."""
 
     def __getitem__(self, idx: int) -> None:
