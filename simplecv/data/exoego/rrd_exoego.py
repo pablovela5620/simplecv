@@ -2,7 +2,10 @@ from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import rerun as rr
+from jaxtyping import Float32
+from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
@@ -16,13 +19,18 @@ from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 class RRDExoEgoConfig(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: RRDSequence)
     rrd_path: Path = Path("/path/to/rrd/file.rrd")
-    load_labels: bool = False
+    load_labels: bool = True
     # Required: .rrd file produced by tools/t265_slam.py
 
 
 class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     def __getitem__(self, idx: int) -> None:
         return None
+
+    def __len__(self) -> int:  # type: ignore[override]
+        if self.exo_sequence is not None:
+            return len(self.exo_sequence.exo_video_readers)
+        return 0
 
     def _build_ego(self) -> BaseEgoSequence[RRDExoEgoConfig] | None:
         return None
@@ -32,7 +40,13 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     def load_labels(self) -> ExoEgoLabels | None:
         """Return an empty COCO-133 buffer with NaNs, sized to ego length."""
-        raise NotImplementedError("RRD exo-ego labels not implemented yet")
+        if self.exo_sequence is None:
+            return None
+        n_frames: int = len(self.exo_sequence.exo_video_readers)
+        if n_frames <= 0:
+            return None
+        xyzc_stack: Float32[ndarray, "n_frames 133 4"] = np.full((n_frames, 133, 4), np.nan, dtype=np.float32)
+        return ExoEgoLabels(xyzc_stack=xyzc_stack)
 
     @classmethod
     def iter_episode_sequences(cls, cfg: RRDExoEgoConfig) -> Generator["RRDSequence", None, None]:
@@ -41,9 +55,11 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
         """Get mapping from joint ID to joint name."""
-        return rr.ViewCoordinates.RUB
+        return rr.ViewCoordinates.RFU
 
     @property
     def image_plane_distance(self) -> int | float:
         """Get the image plane distance for the camera."""
+        if self.exo_sequence is not None:
+            return self.exo_sequence.image_plane_distance
         return 0.1
