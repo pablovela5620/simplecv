@@ -233,8 +233,8 @@ class T265Config:
     jpeg_quality: int = 75
     """JPEG quality for image compression (lower = smaller & faster). Used only for debug image logging."""
 
-    base_path: Path = Path("t265")
-    """Base entity path for logging (e.g., 't265')."""
+    base_path: Path = Path("/world/ego")
+    """Base entity path for logging (e.g., '/world/ego')."""
 
     rect_fov_deg: float = 110.0
     """Horizontal FOV (degrees) for rectified pinhole images. Typical: 80–110."""
@@ -365,17 +365,22 @@ def main(config: T265Config) -> int:
     rr.log("/", rr.ViewCoordinates.RUB, static=True)
     timeline = "video_time"
 
+    left_pinhole_video_path: Path = config.base_path / "left" / "pinhole" / "video"
+    right_pinhole_video_path: Path = config.base_path / "right" / "pinhole" / "video"
+    left_fisheye_image_path: Path = config.base_path / "left" / "fisheye" / "image"
+    right_fisheye_image_path: Path = config.base_path / "right" / "fisheye" / "image"
+
     right_panel_contents = [
         rrb.Horizontal(
-            rrb.Spatial2DView(origin=str(config.base_path / "left" / "pinhole" / "video_stream")),
-            rrb.Spatial2DView(origin=str(config.base_path / "right" / "pinhole" / "video_stream")),
+            rrb.Spatial2DView(origin=str(left_pinhole_video_path)),
+            rrb.Spatial2DView(origin=str(right_pinhole_video_path)),
         )
     ]
     if config.log_fisheye:
         right_panel_contents.append(
             rrb.Horizontal(
-                rrb.Spatial2DView(origin=str(config.base_path / "left" / "fisheye" / "image")),
-                rrb.Spatial2DView(origin=str(config.base_path / "right" / "fisheye" / "image")),
+                rrb.Spatial2DView(origin=str(left_fisheye_image_path)),
+                rrb.Spatial2DView(origin=str(right_fisheye_image_path)),
             )
         )
 
@@ -392,8 +397,6 @@ def main(config: T265Config) -> int:
 
     left_path = config.base_path / "left"
     right_path = config.base_path / "right"
-    pose_path = config.base_path / "mid"
-
     # Query active profile and prepare rectification from fisheye to pinhole
     pipeline = _setup_t265_input(config.serial)
     rect: RectificationSetup = _init_rectification(pipeline, rect_fov_deg=float(config.rect_fov_deg))
@@ -401,14 +404,14 @@ def main(config: T265Config) -> int:
     # threaded H.264 video stream encoders for rectified images
     left_vs = right_vs = None
     left_vs = _VideoStreamEncoder(
-        entity_path=str(left_path / "pinhole" / "video_stream"),
+        entity_path=str(left_pinhole_video_path),
         timeline=timeline,
         width=rect.width_px,
         height=rect.height_px,
         fps=config.target_fps,
     )
     right_vs = _VideoStreamEncoder(
-        entity_path=str(right_path / "pinhole" / "video_stream"),
+        entity_path=str(right_pinhole_video_path),
         timeline=timeline,
         width=rect.width_px,
         height=rect.height_px,
@@ -459,12 +462,9 @@ def main(config: T265Config) -> int:
 
             # Also log original fisheye images for comparison (optional)
             if config.log_fisheye:
+                rr.log(str(left_fisheye_image_path), rr.Image(left_np).compress(jpeg_quality=config.jpeg_quality))
                 rr.log(
-                    str(left_path / "fisheye" / "image"),
-                    rr.Image(left_np).compress(jpeg_quality=config.jpeg_quality),
-                )
-                rr.log(
-                    str(right_path / "fisheye" / "image"),
+                    str(right_fisheye_image_path),
                     rr.Image(right_np).compress(jpeg_quality=config.jpeg_quality),
                 )
 
@@ -504,9 +504,6 @@ def main(config: T265Config) -> int:
                 ).astype(np.float32)
                 left_cam_t_world: Float[ndarray, "3"] = left_cam_T_world[:3, 3]
                 right_cam_t_world: Float[ndarray, "3"] = right_cam_T_world[:3, 3]
-
-                # Log mid pose
-                rr.log(str(pose_path), rr.Transform3D(translation=t, mat3x3=R_mid_world, from_parent=True))
 
                 # Log per-eye pinhole cameras via helper
                 left_extri = Extrinsics(cam_R_world=left_cam_R_world, cam_t_world=left_cam_t_world)

@@ -24,10 +24,10 @@ CameraName = Literal["left", "right"]
 
 # Fixed Rerun entity/timeline names as produced by t265_slam.py
 TIMELINE: str = "video_time"
-LEFT_VIDEO_ENTITY: str = "t265/left/pinhole/video_stream"
-RIGHT_VIDEO_ENTITY: str = "t265/right/pinhole/video_stream"
-LEFT_CAM_ENTITY: str = "t265/left"
-RIGHT_CAM_ENTITY: str = "t265/right"
+LEFT_VIDEO_ENTITY: str = "/world/ego/left/pinhole/video"
+RIGHT_VIDEO_ENTITY: str = "/world/ego/right/pinhole/video"
+LEFT_CAM_ENTITY: str = "/world/ego/left"
+RIGHT_CAM_ENTITY: str = "/world/ego/right"
 
 
 def _to_numpy_list_of_arrays(arr: pa.ChunkedArray) -> list[np.ndarray]:
@@ -81,7 +81,8 @@ class StereoEgoSequence(BaseEgoSequence[StereoConfig]):
         rec: Recording = rr.dataframe.load_recording(str(self.config.rrd_path))
 
         def load_intrinsics(cam_entity: str) -> Intrinsics:
-            cam_entity_pinhole = f"{cam_entity}/pinhole"
+            cam_entity_norm: str = cam_entity.lstrip("/")
+            cam_entity_pinhole: str = f"{cam_entity_norm}/pinhole"
             view = rec.view(index=TIMELINE, contents=cam_entity_pinhole)
             # Extract K, width, height from Pinhole
             _, k_col, w_col, h_col = view.select(
@@ -122,11 +123,12 @@ class StereoEgoSequence(BaseEgoSequence[StereoConfig]):
             )
 
         def load_extrinsics_series(cam_entity: str) -> tuple[list[np.ndarray], list[np.ndarray]]:
-            view = rec.view(index=TIMELINE, contents=cam_entity)
+            cam_entity_norm: str = cam_entity.lstrip("/")
+            view = rec.view(index=TIMELINE, contents=cam_entity_norm)
             _, t_col, R_col = view.select(
                 TIMELINE,
-                f"{cam_entity}:Transform3D:translation",
-                f"{cam_entity}:Transform3D:mat3x3",
+                f"{cam_entity_norm}:Transform3D:translation",
+                f"{cam_entity_norm}:Transform3D:mat3x3",
             ).read_all()
             t_list = _to_numpy_list_of_arrays(t_col)  # list of (3,) arrays
             R_flat_list = _to_numpy_list_of_arrays(R_col)  # list of (9,) arrays (column-major)
@@ -240,7 +242,8 @@ class StereoEgoSequence(BaseEgoSequence[StereoConfig]):
             comp_descs = []
 
         def _has_component(entity: str, suffix: str) -> bool:
-            target_paths: tuple[str, str] = (entity, f"/{entity}")
+            normalized_entity: str = entity.lstrip("/")
+            target_paths: tuple[str, str] = (normalized_entity, f"/{normalized_entity}")
             for d in comp_descs:
                 try:
                     entity_path = getattr(d, "entity_path", None)
@@ -248,7 +251,14 @@ class StereoEgoSequence(BaseEgoSequence[StereoConfig]):
                 except Exception:
                     entity_path = None
                     component_name = None
-                if entity_path in target_paths and isinstance(component_name, str) and component_name.endswith(suffix):
+                entity_path_str: str | None = None
+                if entity_path is not None:
+                    entity_path_str = str(entity_path)
+                if (
+                    entity_path_str in target_paths
+                    and isinstance(component_name, str)
+                    and component_name.endswith(suffix)
+                ):
                     return True
             return False
 
@@ -270,5 +280,5 @@ class StereoEgoSequence(BaseEgoSequence[StereoConfig]):
             raise AssertionError(
                 "Missing expected entities/components in RRD: "
                 + ", ".join(missing)
-                + ".\nCheck the recording logged by t265_slam.py and entity base path 't265'."
+                + ".\nCheck the recording logged by t265_slam.py and entity base path '/world/ego'."
             )
