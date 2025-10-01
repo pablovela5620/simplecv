@@ -29,7 +29,7 @@ class EgoLabels:
     # uvc_stack: Float[ndarray, "n_frames n_views 68 3"] | None = None  # 2D landmarks for each view and frame
 
 
-class BaseEgoSequence(ABC, Generic[ConfigT]):
+class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
     config: ConfigT
 
     def __init__(
