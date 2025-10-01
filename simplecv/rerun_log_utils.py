@@ -19,8 +19,10 @@ def get_safe_application_id() -> str:
     """Get application ID safely, with fallback if __main__.__file__ doesn't exist"""
     try:
         main = sys.modules.get("__main__")
-        if main and hasattr(main, "__file__"):
-            return Path(main.__file__).stem
+        if main:
+            file_attr = getattr(main, "__file__", None)
+            if isinstance(file_attr, str):
+                return Path(file_attr).stem
     except Exception:
         pass
     return "rerun-application"  # Default fallback
@@ -178,6 +180,49 @@ def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) 
     print(f"Retrieved {len(samples)} video samples.")
 
     return times, samples
+
+
+def write_asset_video_blob(
+    recording: Recording,
+    *,
+    timeline: str,
+    video_entity: str,
+    output_path: Path,
+) -> Path:
+    """Persist an AssetVideo blob from ``recording`` to ``output_path``.
+
+    Args:
+        recording: Loaded Rerun recording containing the asset.
+        timeline: Timeline used to index the recording view.
+        video_entity: Entity path (without a leading ``/``) holding the ``AssetVideo`` component.
+        output_path: Destination path to write the extracted video bytes.
+
+    Returns:
+        Path: The provided ``output_path`` after writing the bytes.
+
+    Raises:
+        ValueError: If no asset video data is present for ``video_entity``.
+    """
+
+    view = recording.view(index=timeline, contents=video_entity)
+    reader = view.select(f"{video_entity}:AssetVideo:blob")
+
+    batch = reader.read_next_batch()
+    while batch is not None:
+        column = batch.column(0)
+        for row_idx in range(batch.num_rows):
+            value = column[row_idx]
+            if value is None:
+                continue
+            data_list = value.as_py()
+            if isinstance(data_list, list) and len(data_list) == 1 and isinstance(data_list[0], list):
+                data_list = data_list[0]
+            video_bytes = bytes(data_list)
+            output_path.write_bytes(video_bytes)
+            return output_path
+        batch = reader.read_next_batch()
+
+    raise ValueError(f"No AssetVideo data found for entity {video_entity}")
 
 
 def mux_h264_to_mp4(times: ChunkedArray, samples: ChunkedArray, output_path: str) -> None:
