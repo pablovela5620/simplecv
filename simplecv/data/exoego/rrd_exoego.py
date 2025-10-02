@@ -9,6 +9,7 @@ from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
+from simplecv.data.ego.rrd_ego import RRDEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exo.rrd_exo import RRDExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
@@ -28,21 +29,40 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         return None
 
     def __len__(self) -> int:  # type: ignore[override]
+        sequence_lengths: list[int] = []
         if self.exo_sequence is not None:
-            return len(self.exo_sequence.exo_video_readers)
+            sequence_lengths.append(len(self.exo_sequence.exo_video_readers))
+        if self.ego_sequence is not None:
+            sequence_lengths.append(len(self.ego_sequence.ego_video_readers))
+        if sequence_lengths:
+            return min(sequence_lengths)
         return 0
 
     def _build_ego(self) -> BaseEgoSequence[RRDExoEgoConfig] | None:
-        return None
+        try:
+            return RRDEgoSequence(self.config)
+        except AssertionError as exc:
+            if "No ego camera streams" in str(exc):
+                return None
+            raise
 
     def _build_exo(self) -> BaseExoSequence[RRDExoEgoConfig] | None:
-        return RRDExoSequence(self.config)
+        try:
+            return RRDExoSequence(self.config)
+        except AssertionError as exc:
+            if "No exo camera streams" in str(exc):
+                return None
+            raise
 
     def load_labels(self) -> ExoEgoLabels | None:
         """Return an empty COCO-133 buffer with NaNs, sized to ego length."""
-        if self.exo_sequence is None:
+        n_frames: int | None = None
+        if self.exo_sequence is not None:
+            n_frames = len(self.exo_sequence.exo_video_readers)
+        elif self.ego_sequence is not None:
+            n_frames = len(self.ego_sequence.ego_video_readers)
+        if n_frames is None:
             return None
-        n_frames: int = len(self.exo_sequence.exo_video_readers)
         if n_frames <= 0:
             return None
         xyzc_stack: Float32[ndarray, "n_frames 133 4"] = np.full((n_frames, 133, 4), np.nan, dtype=np.float32)

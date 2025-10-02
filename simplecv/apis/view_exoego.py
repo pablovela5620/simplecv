@@ -25,11 +25,9 @@ from simplecv.data.skeleton.coco_133 import (
     RIGHT_HAND_IDX,
 )
 from simplecv.ops.triangulate import proj_3d_vectorized
+from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import (
-    Points2DWithConfidence,
-    Points3DWithConfidence,
     RerunTyroConfig,
-    confidence_scores_to_rgb,
     log_pinhole,
     log_video,
 )
@@ -410,6 +408,8 @@ def log_exoego_batch(
             effects.
     """
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
+    if exoego_labels is None:
+        return
     ##########################
     # batch send all 3D data #
     ##########################
@@ -639,6 +639,7 @@ class LogPaths(NamedTuple):
         ego_video_log_paths (list[Path] | None): List of ego video entities to
             display as 2D panels, if available.
     """
+
     exo_video_log_paths: list[Path] | None
     ego_video_log_paths: list[Path] | None
 
@@ -651,6 +652,7 @@ class SceneSetupResult(NamedTuple):
         shortest_timestamp (Int[np.ndarray, "n_frames"]): Aligned timestamps
             shared across all logged modalities.
     """
+
     log_paths: LogPaths
     shortest_timestamp: Int[ndarray, "n_frames"]
 
@@ -716,8 +718,14 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
         # log the ego cameras and their trajectories
         shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
         for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
-            # We assume that all cameras have the intrinsics
-            first_cam: PinholeParameters = ego_cam_param_list[0]
+            if not ego_cam_param_list:
+                continue
+            n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
+            if n_frames_cam <= 0:
+                continue
+            trimmed_cam_params: list[PinholeParameters] = ego_cam_param_list[:n_frames_cam]
+            # We assume that all cameras share intrinsics across frames
+            first_cam: PinholeParameters = trimmed_cam_params[0]
             cam_log_path: Path = parent_log_path / "ego" / cam_name
             pinhole_log_path: Path = cam_log_path / "pinhole"
             rr.log(
@@ -735,10 +743,10 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
                 static=True,
             )
             batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
-                [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in ego_cam_param_list]
+                [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
             )
             batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
-                [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in ego_cam_param_list]
+                [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
             )
             # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
             rr.send_columns(

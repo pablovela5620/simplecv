@@ -15,7 +15,7 @@ from rerun_bindings import Recording
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.rerun_log_utils import mux_h264_to_mp4, read_h264_samples_from_rrd
+from simplecv.rerun_log_utils import mux_h264_to_mp4, read_h264_samples_from_rrd, write_asset_video_blob
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.rrd_exoego import RRDExoEgoConfig
@@ -68,7 +68,13 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
                     mp4_path: Path = Path(self._remux_tmpdir.name) / f"{camera_stream.name}.mp4"
                     mux_h264_to_mp4(times, samples, str(mp4_path))
                 case "asset_video":
-                    mp4_path = self._write_asset_video(camera_stream)
+                    mp4_path = Path(self._remux_tmpdir.name) / f"{camera_stream.name}.mp4"
+                    write_asset_video_blob(
+                        self._recording,
+                        timeline=self._video_timeline,
+                        video_entity=camera_stream.video_entity,
+                        output_path=mp4_path,
+                    )
                 case _:
                     raise ValueError(f"Unsupported data kind for RRD camera stream: {camera_stream.data_kind}")
 
@@ -94,30 +100,6 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
             extrinsics = self._load_extrinsics(recording, camera_stream.transform_entity, timeline)
             exo_cams.append(PinholeParameters(name=camera_stream.name, intrinsics=intrinsics, extrinsics=extrinsics))
         return exo_cams
-
-    def _write_asset_video(self, camera_stream: _RRDCameraStream) -> Path:
-        recording: Recording = getattr(self, "_recording", rr.dataframe.load_recording(str(self.config.rrd_path)))
-        timeline: str = getattr(self, "_video_timeline", self._select_timeline(recording.schema()))
-        view = recording.view(index=timeline, contents=camera_stream.video_entity)
-        reader = view.select(f"{camera_stream.video_entity}:AssetVideo:blob")
-
-        batch = reader.read_next_batch()
-        while batch is not None:
-            column = batch.column(0)
-            for row_idx in range(batch.num_rows):
-                value = column[row_idx]
-                if value is None:
-                    continue
-                data_list = value.as_py()
-                if isinstance(data_list, list) and len(data_list) == 1 and isinstance(data_list[0], list):
-                    data_list = data_list[0]
-                video_bytes = bytes(data_list)
-                mp4_path = Path(self._remux_tmpdir.name) / f"{camera_stream.name}.mp4"
-                mp4_path.write_bytes(video_bytes)
-                return mp4_path
-            batch = reader.read_next_batch()
-
-        raise ValueError(f"No AssetVideo data found for entity {camera_stream.video_entity}")
 
     def _discover_camera_streams(self, schema: Any) -> list[_RRDCameraStream]:
         component_columns = schema.component_columns()
@@ -220,10 +202,8 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
             if isinstance(camera_xyz_value, list) and len(camera_xyz_value) == 3:
                 # Map Rerun axis triplet to known conventions; fall back to RDF.
                 axis_tuple = tuple(int(v) for v in camera_xyz_value)
-                camera_conventions = {  # type: ignore[assignment]
-                    (3, 2, 5): "RDF",
-                    (3, 5, 2): "RUB",
-                }.get(axis_tuple, "RDF")
+                if axis_tuple == (3, 5, 2):
+                    camera_conventions = "RUB"
 
         width: int | None = None
         height: int | None = None
