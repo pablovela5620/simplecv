@@ -35,7 +35,7 @@ view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path dat
 ], description = "View example polycam data" }
 
 
-[tool.pixi.tasks.view-egoexo-data]
+[tool.pixi.tasks.view-exoego-data]
 cmd = "python tools/view_exoego.py"
 
 description = "View example hocap data"
