@@ -140,7 +140,6 @@ RESOLUTION_MAP: dict[Resolution, tuple[int, int]] = {
     "360p": (640, 360),
 }
 
-
 @lru_cache(maxsize=1)
 def _available_ffmpeg_video_encoders() -> set[str]:
     """
@@ -339,12 +338,13 @@ def _encoder_args_for(name: str, available: set[str]) -> list[str]:
 
 
 @lru_cache(maxsize=1)
-def _select_optimal_video_encoder_args() -> list[str]:
+def _select_optimal_video_encoder_args() -> tuple[str, list[str]]:
     """
     Choose ffmpeg video encoder arguments suited for the current platform.
 
     Returns:
-        List of ffmpeg CLI arguments (without output path or audio settings).
+        Tuple containing the encoder name and ffmpeg CLI arguments (without
+        output path or audio settings).
     """
     encoders = _available_ffmpeg_video_encoders()
 
@@ -356,7 +356,7 @@ def _select_optimal_video_encoder_args() -> list[str]:
                 f"Requested encoder '{env_encoder}' not available. "
                 f"Available encoders: {', '.join(sorted(encoders)) or 'none'}"
             )
-        return _encoder_args_for(env_encoder, encoders)
+        return env_encoder, _encoder_args_for(env_encoder, encoders)
 
     # Preferred order: NVIDIA NVENC → Intel QSV → VAAPI → libsvtav1 → libaom → Apple VT → x265 → x264
     priority = [
@@ -373,10 +373,11 @@ def _select_optimal_video_encoder_args() -> list[str]:
 
     for encoder in priority:
         if encoder in encoders:
-            return _encoder_args_for(encoder, encoders)
+            return encoder, _encoder_args_for(encoder, encoders)
 
     # No known encoder: return libx264 defaults to guarantee success.
-    return _encoder_args_for("libx264", encoders)
+    fallback = "libx264"
+    return fallback, _encoder_args_for(fallback, encoders)
 
 
 def reencode_video_optimal(
@@ -390,8 +391,9 @@ def reencode_video_optimal(
     output_directory: Path | None = None,
 ) -> Path:
     """
-    Re-encode an existing video to AV1 (NVENC) and-optionally-down-sample
-    to 1080p / 720p / 360p, keeping everything else unchanged.
+    Re-encode an existing video to AV1 (GPU when possible) and optionally
+    downsample to 1080p / 720p / 360p, keeping everything else unchanged.
+    Falls back to CPU encoders when NVIDIA NVENC is unavailable.
     """
     if not input_video_path.is_file():
         raise FileNotFoundError(f"Input video file not found: {input_video_path}")
@@ -421,7 +423,7 @@ def reencode_video_optimal(
         cmd += ["-vf", f"scale={w}:{h}"]
 
     # ── select encoder arguments based on platform capabilities ────────────
-    video_encoder_args = _select_optimal_video_encoder_args()
+    encoder_name, video_encoder_args = _select_optimal_video_encoder_args()
     cmd += video_encoder_args
     cmd += [
         "-c:a",
@@ -433,7 +435,7 @@ def reencode_video_optimal(
     t0 = timer()
     proc = subprocess.run(cmd, capture_output=True)
     dt = timer() - t0
-    print(f"FFmpeg re-encoding completed in {dt:.2f} s")
+    print(f"FFmpeg re-encoding using {encoder_name} completed in {dt:.2f} s")
 
     if proc.returncode:
         if not save_file and output_path.exists():
