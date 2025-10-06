@@ -1,6 +1,8 @@
 import atexit
+import os
 import subprocess
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
@@ -139,6 +141,244 @@ RESOLUTION_MAP: dict[Resolution, tuple[int, int]] = {
 }
 
 
+@lru_cache(maxsize=1)
+def _available_ffmpeg_video_encoders() -> set[str]:
+    """
+    Probe ffmpeg for available video encoders once and cache the result.
+
+    Returns:
+        A set containing encoder names (e.g. {"libsvtav1", "libx264"}).
+    """
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return set()
+
+    if proc.returncode != 0 or not proc.stdout:
+        return set()
+
+    encoders: set[str] = set()
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        if (
+            not line
+            or line.startswith(("Encoders:", "------", "."))
+            or " =" in line
+        ):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            encoders.add(parts[1])
+
+    return encoders
+
+
+def _encoder_args_for(name: str, available: set[str]) -> list[str]:
+    """
+    Map an encoder name to a list of ffmpeg CLI arguments.
+
+    Args:
+        name: encoder identifier (e.g. "libsvtav1")
+        available: set of encoders discovered in the local ffmpeg build
+
+    Raises:
+        ValueError: if no mapping exists for name.
+    """
+    if name == "av1_nvenc":
+        return [
+            "-c:v",
+            "av1_nvenc",
+            "-preset",
+            os.getenv("SIMPLECV_NVENC_PRESET", "p5"),
+            "-cq",
+            os.getenv("SIMPLECV_NVENC_CQ", "30"),
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-bf",
+            os.getenv("SIMPLECV_NVENC_BFRAMES", "0"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+    if name == "av1_qsv":
+        return [
+            "-c:v",
+            "av1_qsv",
+            "-global_quality",
+            os.getenv("SIMPLECV_QSV_QUALITY", "28"),
+            "-look_ahead",
+            os.getenv("SIMPLECV_QSV_LOOKAHEAD", "1"),
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+    if name == "av1_vaapi":
+        return [
+            "-hwaccel",
+            "vaapi",
+            "-vaapi_device",
+            os.getenv("SIMPLECV_VAAPI_DEVICE", "/dev/dri/renderD128"),
+            "-c:v",
+            "av1_vaapi",
+            "-global_quality",
+            os.getenv("SIMPLECV_VAAPI_QUALITY", "28"),
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+    if name == "libsvtav1":
+        preset = os.getenv("SIMPLECV_LIBSVT_PRESET", "12")
+        svt_params = os.getenv("SIMPLECV_LIBSVT_PARAMS")
+        args = [
+            "-c:v",
+            "libsvtav1",
+            "-preset",
+            preset,
+            "-crf",
+            os.getenv("SIMPLECV_LIBSVT_CRF", "30"),
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        if svt_params:
+            args += ["-svtav1-params", svt_params]
+        return args
+
+    if name == "libaom-av1":
+        return [
+            "-c:v",
+            "libaom-av1",
+            "-cpu-used",
+            os.getenv("SIMPLECV_LIBAOM_SPEED", "8"),
+            "-crf",
+            os.getenv("SIMPLECV_LIBAOM_CRF", "30"),
+            "-b:v",
+            os.getenv("SIMPLECV_LIBAOM_BITRATE", "0"),
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+    if name == "hevc_videotoolbox":
+        args = [
+            "-c:v",
+            "hevc_videotoolbox",
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        # Allow overriding profile/quality via env
+        quality = os.getenv("SIMPLECV_VIDEOTOOLBOX_QUALITY")
+        if quality:
+            args += ["-global_quality", quality]
+        vt_profile = os.getenv("SIMPLECV_VIDEOTOOLBOX_PROFILE")
+        if vt_profile:
+            args += ["-profile:v", vt_profile]
+        # Tag ensures compatibility across Apple decoders.
+        args += ["-tag:v", "hvc1"]
+        return args
+
+    if name == "h264_videotoolbox":
+        args = [
+            "-c:v",
+            "h264_videotoolbox",
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        quality = os.getenv("SIMPLECV_VIDEOTOOLBOX_QUALITY")
+        if quality:
+            args += ["-global_quality", quality]
+        vt_profile = os.getenv("SIMPLECV_VIDEOTOOLBOX_PROFILE")
+        if vt_profile:
+            args += ["-profile:v", vt_profile]
+        return args
+
+    if name == "libx265":
+        return [
+            "-c:v",
+            "libx265",
+            "-preset",
+            os.getenv("SIMPLECV_X265_PRESET", "medium"),
+            "-crf",
+            os.getenv("SIMPLECV_X265_CRF", "28"),
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+    if name == "libx264":
+        return [
+            "-c:v",
+            "libx264",
+            "-preset",
+            os.getenv("SIMPLECV_X264_PRESET", "medium"),
+            "-crf",
+            os.getenv("SIMPLECV_X264_CRF", "23"),
+            "-g",
+            os.getenv("SIMPLECV_GOP", "2"),
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+    raise ValueError(f"No encoder mapping defined for '{name}'")
+
+
+@lru_cache(maxsize=1)
+def _select_optimal_video_encoder_args() -> list[str]:
+    """
+    Choose ffmpeg video encoder arguments suited for the current platform.
+
+    Returns:
+        List of ffmpeg CLI arguments (without output path or audio settings).
+    """
+    encoders = _available_ffmpeg_video_encoders()
+
+    # Respect explicit user override when available.
+    env_encoder = os.getenv("SIMPLECV_VIDEO_ENCODER")
+    if env_encoder:
+        if env_encoder not in encoders:
+            raise RuntimeError(
+                f"Requested encoder '{env_encoder}' not available. "
+                f"Available encoders: {', '.join(sorted(encoders)) or 'none'}"
+            )
+        return _encoder_args_for(env_encoder, encoders)
+
+    # Preferred order: NVIDIA NVENC → Intel QSV → VAAPI → libsvtav1 → libaom → Apple VT → x265 → x264
+    priority = [
+        "av1_nvenc",
+        "av1_qsv",
+        "av1_vaapi",
+        "libsvtav1",
+        "libaom-av1",
+        "hevc_videotoolbox",
+        "h264_videotoolbox",
+        "libx265",
+        "libx264",
+    ]
+
+    for encoder in priority:
+        if encoder in encoders:
+            return _encoder_args_for(encoder, encoders)
+
+    # No known encoder: return libx264 defaults to guarantee success.
+    return _encoder_args_for("libx264", encoders)
+
+
 def reencode_video_optimal(
     input_video_path: Path,
     *,
@@ -180,20 +420,10 @@ def reencode_video_optimal(
         w, h = RESOLUTION_MAP[resize]
         cmd += ["-vf", f"scale={w}:{h}"]
 
-    # ── encoder settings (unchanged) ────────────────────────────────────────
+    # ── select encoder arguments based on platform capabilities ────────────
+    video_encoder_args = _select_optimal_video_encoder_args()
+    cmd += video_encoder_args
     cmd += [
-        "-c:v",
-        "av1_nvenc",
-        "-preset",
-        "p5",  # Balanced preset for AV1 NVENC
-        "-cq",
-        "30",  # Constant Quality level
-        "-g",
-        "2",  # Keyframe interval
-        "-bf",
-        "0",  # Set B-frames to 0 to satisfy GOP length constraint
-        "-pix_fmt",
-        "yuv420p",  # Standard pixel format
         "-c:a",
         "copy",  # Copy audio stream without re-encoding
         str(output_path),
