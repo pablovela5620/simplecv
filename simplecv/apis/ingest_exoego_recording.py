@@ -1,8 +1,10 @@
 import json
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import cast
 
 import rerun as rr
 import rerun.blueprint as rrb
@@ -24,6 +26,8 @@ class IngestConfig:
     """Path to the directory containing 'exo' and/or 'ego' subdirectories with video files."""
     verbose: bool = False
     """Enable verbose console logging during ingestion."""
+    reencode_to_av1: bool = False
+    """Force AV1 MP4 re-encoding (with 720p ceiling) before logging videos."""
 
 
 def validate_exoego_dir(exoego_dir: Path) -> tuple[Path | None, Path | None]:
@@ -161,9 +165,10 @@ def prepare_video_for_logging(
     video_path: Path,
     *,
     verbose: bool = False,
+    reencode_to_av1: bool = False,
 ) -> PrepareVideoForLoggingResult:
     """
-    Ensure ``video_path`` is AV1 encoded, stored as MP4, and respects the 1280x720 ceiling.
+    Optionally ensure ``video_path`` is AV1 encoded, stored as MP4, and respects the 1280x720 ceiling.
 
     Returns:
         A ``PrepareVideoForLoggingResult`` capturing the prepared path, metadata, and
@@ -172,9 +177,17 @@ def prepare_video_for_logging(
     Args:
         video_path: Path to the source video on disk.
         verbose: Whether to emit detailed logging from the underlying encoding utilities.
+        reencode_to_av1: When true, convert non-AV1 content into AV1 MP4 constrained to 720p.
     """
 
     probe_result: VideoProbeResult = probe_video_stream(video_path)
+    if not reencode_to_av1:
+        return PrepareVideoForLoggingResult(
+            prepared_path=video_path,
+            metadata=probe_result,
+            should_cleanup=False,
+        )
+
     needs_reencode: bool = False
     resize_resolution: Resolution | None = None
 
@@ -249,6 +262,7 @@ def ingest_video_directory(
     timeline: str,
     verbose: bool,
     progress_label: str,
+    reencode_to_av1: bool,
 ) -> list[Path]:
     """Ingest the provided videos ensuring uniform encoding and resolution constraints.
 
@@ -260,25 +274,31 @@ def ingest_video_directory(
 
     expected_resolution: tuple[int, int] | None = None
     logged_video_entities: list[Path] = []
-    for entry in tqdm(video_entries, desc=progress_label, leave=False):
+    iterable_entries: Iterable[VideoIngestEntry] = cast(
+        Iterable[VideoIngestEntry],
+        tqdm(video_entries, desc=progress_label, leave=False),
+    )
+    for entry in iterable_entries:
         prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
             video_path=entry.source_path,
             verbose=verbose,
+            reencode_to_av1=reencode_to_av1,
         )
         prepared_path: Path = prepared_video_result.prepared_path
         metadata: VideoProbeResult = prepared_video_result.metadata
         should_cleanup: bool = prepared_video_result.should_cleanup
         actual_resolution: tuple[int, int] = (metadata.width, metadata.height)
 
-        if expected_resolution is None:
-            expected_resolution = actual_resolution
-        elif actual_resolution != expected_resolution:
-            if should_cleanup:
-                prepared_path.unlink(missing_ok=True)
-            raise ValueError(
-                f"Video {entry.source_path} has resolution {actual_resolution} which does not match "
-                f"the expected resolution {expected_resolution}."
-            )
+        if reencode_to_av1:
+            if expected_resolution is None:
+                expected_resolution = actual_resolution
+            elif actual_resolution != expected_resolution:
+                if should_cleanup:
+                    prepared_path.unlink(missing_ok=True)
+                raise ValueError(
+                    f"Video {entry.source_path} has resolution {actual_resolution} which does not match "
+                    f"the expected resolution {expected_resolution}."
+                )
 
         log_video(
             video_path=prepared_path,
@@ -377,6 +397,7 @@ def main(config: IngestConfig) -> None:
             timeline=timeline,
             verbose=config.verbose,
             progress_label="Ingesting exo videos",
+            reencode_to_av1=config.reencode_to_av1,
         )
 
     if ego_entries:
@@ -385,4 +406,5 @@ def main(config: IngestConfig) -> None:
             timeline=timeline,
             verbose=config.verbose,
             progress_label="Ingesting ego videos",
+            reencode_to_av1=config.reencode_to_av1,
         )
