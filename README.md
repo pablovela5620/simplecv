@@ -29,6 +29,19 @@ If you have a polycam zip file or extracted directory (from within the pixi shel
 python tools/view_polycam.py --polycam-zip-path $PATH-TO-POLYCAM-ZIP
 ```
 
+### Ingest Exo/Ego Recordings
+Ingest synchronized exo/ego captures into Rerun (spawns the viewer unless told otherwise).
+```bash
+simplecv-ingest-exoego --exoego-dir data/exoego-examples/adil-correct/adil3/
+```
+
+#### Handy flags
+- `--reencode-to-av1` ensures every clip is resized to ≤720p and re-encoded to AV1 MP4 before logging.
+- `--rr-config.headless` disables the Rerun UI (useful for automated runs).
+- `--rr-config.connect` or `--rr-config.serve` reuse an external/remote Rerun viewer.
+
+The CLI is Tyro-based, so tab completion and `--help` are available by default.
+
 
 ## T265 SLAM
 - **Env:** `t265` feature includes `librealsense==2.53.1` and `pyrealsense2==2.53.1.4623` (see `pyproject.toml`).
