@@ -18,6 +18,9 @@ dependencies = [
     "lovely-numpy>=0.2.13,<0.3",
 ]
 
+[project.scripts]
+simplecv-ingest-exoego = "simplecv.apis.ingest_exoego_recording:entrypoint"
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"

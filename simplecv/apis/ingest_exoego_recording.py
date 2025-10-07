@@ -12,6 +12,8 @@ from natsort import natsorted
 from rerun.blueprint import ContainerLike
 from tqdm.auto import tqdm
 
+import tyro
+
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from simplecv.video_utils import Resolution, reencode_video_optimal
 
@@ -408,3 +410,18 @@ def main(config: IngestConfig) -> None:
             progress_label="Ingesting ego videos",
             reencode_to_av1=config.reencode_to_av1,
         )
+
+
+def entrypoint() -> None:
+    """Entrypoint leveraging Tyro to expose the ingest workflow via CLI."""
+
+    tyro.extras.set_accent_color("bright_cyan")
+    config: IngestConfig = tyro.cli(
+        IngestConfig,
+        description="Given a directory with ego/exo recordings, save them to RRD and visualize them with Rerun.",
+    )
+    main(config=config)
+
+
+if __name__ == "__main__":
+    entrypoint()
