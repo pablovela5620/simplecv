@@ -1,10 +1,8 @@
 import json
 import subprocess
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import cast
 
 import rerun as rr
 import rerun.blueprint as rrb
@@ -25,7 +23,7 @@ class IngestConfig:
     exoego_dir: Path
     """Path to the directory containing 'exo' and/or 'ego' subdirectories with video files."""
     verbose: bool = False
-    """Enable verbose logging with progress bars during ingestion."""
+    """Enable verbose console logging during ingestion."""
 
 
 def validate_exoego_dir(exoego_dir: Path) -> tuple[Path | None, Path | None]:
@@ -159,41 +157,50 @@ def _coerce_int(value: object) -> int | None:
     return None
 
 
-def prepare_video_for_logging(video_path: Path) -> PrepareVideoForLoggingResult:
+def prepare_video_for_logging(
+    video_path: Path,
+    *,
+    verbose: bool = False,
+) -> PrepareVideoForLoggingResult:
     """
     Ensure ``video_path`` is AV1 encoded, stored as MP4, and respects the 1280x720 ceiling.
 
     Returns:
         A ``PrepareVideoForLoggingResult`` capturing the prepared path, metadata, and
         whether the prepared asset is temporary.
+
+    Args:
+        video_path: Path to the source video on disk.
+        verbose: Whether to emit detailed logging from the underlying encoding utilities.
     """
 
-    initial_probe: VideoProbeResult = probe_video_stream(video_path)
+    probe_result: VideoProbeResult = probe_video_stream(video_path)
     needs_reencode: bool = False
     resize_resolution: Resolution | None = None
 
-    if "mp4" not in _format_tokens(initial_probe.format_name):
+    if "mp4" not in _format_tokens(probe_result.format_name):
         needs_reencode = True
-    if initial_probe.codec_name != "av1":
+    if probe_result.codec_name != "av1":
         needs_reencode = True
-    if initial_probe.width > 1280 or initial_probe.height > 720:
+    if probe_result.width > 1280 or probe_result.height > 720:
         resize_resolution = "720p"
         needs_reencode = True
 
     if not needs_reencode:
-        if initial_probe.width > 1280 or initial_probe.height > 720:
+        if probe_result.width > 1280 or probe_result.height > 720:
             raise ValueError(
-                f"{video_path} exceeds the maximum resolution (found {initial_probe.width}x{initial_probe.height})."
+                f"{video_path} exceeds the maximum resolution (found {probe_result.width}x{probe_result.height})."
             )
         return PrepareVideoForLoggingResult(
             prepared_path=video_path,
-            metadata=initial_probe,
+            metadata=probe_result,
             should_cleanup=False,
         )
 
     prepared_video_path: Path = reencode_video_optimal(
         input_video_path=video_path,
         resize=resize_resolution,
+        verbose=verbose,
     )
     prepared_probe: VideoProbeResult = probe_video_stream(prepared_video_path)
 
@@ -253,21 +260,11 @@ def ingest_video_directory(
 
     expected_resolution: tuple[int, int] | None = None
     logged_video_entities: list[Path] = []
-    iterator: Iterable[VideoIngestEntry] = (
-        cast(
-            Iterable[VideoIngestEntry],
-            tqdm(
-                video_entries,
-                desc=progress_label,
-                leave=False,
-            ),
+    for entry in tqdm(video_entries, desc=progress_label, leave=False):
+        prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
+            video_path=entry.source_path,
+            verbose=verbose,
         )
-        if verbose
-        else cast(Iterable[VideoIngestEntry], video_entries)
-    )
-
-    for entry in iterator:
-        prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(video_path=entry.source_path)
         prepared_path: Path = prepared_video_result.prepared_path
         metadata: VideoProbeResult = prepared_video_result.metadata
         should_cleanup: bool = prepared_video_result.should_cleanup
