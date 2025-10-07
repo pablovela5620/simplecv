@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -87,7 +88,14 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
         ego_cam_dict: dict[str, list[PinholeParameters]] = {}
         for stream in streams:
-            intrinsics: Intrinsics = self._load_intrinsics(recording, stream.pinhole_entity, self._video_timeline)
+            try:
+                intrinsics: Intrinsics = self._load_intrinsics(recording, stream.pinhole_entity, self._video_timeline)
+            except ValueError as exc:
+                warnings.warn(
+                    f"Skipping ego camera '{stream.name}' due to missing metadata: {exc}",
+                    stacklevel=2,
+                )
+                continue
             translations, rotations = self._load_extrinsics_series(
                 recording,
                 stream.transform_entity,

@@ -16,8 +16,6 @@ from cv2 import (
 
 from simplecv.image_types import BGRList, ImageBGR
 
-# from mmengine.utils import check_file_exist, mkdir_or_exist, scandir, track_progress
-
 
 class Cache:
     def __init__(self, capacity):
@@ -200,49 +198,6 @@ class VideoReader:
             return None
         return self._cache.get(self._position - 1)
 
-    # def cvt2frames(
-    #     self,
-    #     frame_dir,
-    #     file_start=0,
-    #     filename_tmpl="{:06d}.jpg",
-    #     start=0,
-    #     max_num=0,
-    #     show_progress=True,
-    # ):
-    #     """Convert a video to frame images.
-
-    #     Args:
-    #         frame_dir (str): Output directory to store all the frame images.
-    #         file_start (int): Filenames will start from the specified number.
-    #         filename_tmpl (str): Filename template with the index as the
-    #             placeholder.
-    #         start (int): The starting frame index.
-    #         max_num (int): Maximum number of frames to be written.
-    #         show_progress (bool): Whether to show a progress bar.
-    #     """
-    #     mkdir_or_exist(frame_dir)
-    #     if max_num == 0:
-    #         task_num = self.frame_cnt - start
-    #     else:
-    #         task_num = min(self.frame_cnt - start, max_num)
-    #     if task_num <= 0:
-    #         raise ValueError("start must be less than total frame number")
-    #     if start > 0:
-    #         self._set_real_position(start)
-
-    #     def write_frame(file_idx):
-    #         img = self.read()
-    #         if img is None:
-    #             return
-    #         filename = osp.join(frame_dir, filename_tmpl.format(file_idx))
-    #         cv2.imwrite(filename, img)
-
-    #     if show_progress:
-    #         track_progress(write_frame, range(file_start, file_start + task_num))
-    #     else:
-    #         for i in range(task_num):
-    #             write_frame(file_start + i)
-
     def __len__(self):
         return self.frame_cnt
 
@@ -318,49 +273,3 @@ class MultiVideoReader:
         if idx < 0 or idx >= len(self):
             raise IndexError("Index out of range")
         return [reader[idx] for reader in self.video_readers]
-
-
-# def frames2video(
-#     frame_dir: str,
-#     video_file: str,
-#     fps: float = 30,
-#     fourcc: str = "XVID",
-#     filename_tmpl: str = "{:06d}.jpg",
-#     start: int = 0,
-#     end: int = 0,
-#     show_progress: bool = True,
-# ) -> None:
-#     """Read the frame images from a directory and join them as a video.
-
-#     Args:
-#         frame_dir (str): The directory containing video frames.
-#         video_file (str): Output filename.
-#         fps (float): FPS of the output video.
-#         fourcc (str): Fourcc of the output video, this should be compatible
-#             with the output file type.
-#         filename_tmpl (str): Filename template with the index as the variable.
-#         start (int): Starting frame index.
-#         end (int): Ending frame index.
-#         show_progress (bool): Whether to show a progress bar.
-#     """
-#     if end == 0:
-#         ext = filename_tmpl.split(".")[-1]
-#         end = len([name for name in scandir(frame_dir, ext)])
-#     first_file = osp.join(frame_dir, filename_tmpl.format(start))
-#     check_file_exist(first_file, "The start frame not found: " + first_file)
-#     img = cv2.imread(first_file)
-#     height, width = img.shape[:2]
-#     resolution = (width, height)
-#     vwriter = cv2.VideoWriter(video_file, VideoWriter_fourcc(*fourcc), fps, resolution)
-
-#     def write_frame(file_idx):
-#         filename = osp.join(frame_dir, filename_tmpl.format(file_idx))
-#         img = cv2.imread(filename)
-#         vwriter.write(img)
-
-#     if show_progress:
-#         track_progress(write_frame, range(start, end))
-#     else:
-#         for i in range(start, end):
-#             write_frame(i)
-#     vwriter.release()

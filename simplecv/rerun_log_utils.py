@@ -58,7 +58,7 @@ class RerunTyroConfig:
             # Send logging data to separate `rerun` process.
             # You can omit the argument to connect to the default address,
             # which is `127.0.0.1:9876`.
-            rr.connect_grpc(flush_timeout_sec=None)
+            rr.connect_grpc()
         elif self.save is not None:
             rr.save(self.save)
         elif not self.headless:
@@ -160,9 +160,7 @@ def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) 
     codec = view.select(f"{normalized_entity}:VideoStream:codec")
     first_codec_batch = codec.read_next_batch()
     if first_codec_batch is None:
-        raise ValueError(
-            f"There's no video stream codec specified at {video_entity} for timeline {timeline}."
-        )
+        raise ValueError(f"There's no video stream codec specified at {video_entity} for timeline {timeline}.")
     codec_value = first_codec_batch.column(0)[0][0].as_py()
     if codec_value != rr.VideoCodec.H264.value:
         raise ValueError(

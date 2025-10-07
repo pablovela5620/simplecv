@@ -84,19 +84,21 @@ def set_annotation_context() -> None:
 
 def create_blueprint(
     *,
-    ego_video_log_paths: list[Path] | None = None,
-    exo_video_log_paths: list[Path] | None = None,
+    ego_view_roots: list[Path] | None = None,
+    exo_view_roots: list[Path] | None = None,
     max_exo_videos_to_log: Literal[4, 8] = 8,
 ) -> rrb.Blueprint:
     """Create a Rerun blueprint for visualizing ego- and exo-centric streams.
 
     Args:
-        ego_video_log_paths (list[Path] | None): Optional set of ego video entity
-            roots; each path becomes a tabbed 2D view alongside the spatial view.
-        exo_video_log_paths (list[Path] | None): Optional set of exo video entity
-            roots; each path becomes a tabbed 2D view beneath the spatial view.
+        ego_view_roots (list[Path] | None): Optional entity paths that the ego
+            2D panels should look at (typically either a pinhole entity or a
+            direct video node).
+        exo_view_roots (list[Path] | None): Optional entity paths that the exo
+            2D panels should look at (typically either a pinhole entity or a
+            direct video node).
         max_exo_videos_to_log (Literal[4, 8]): Maximum number of exo video panels
-            to materialize when ``exo_video_log_paths`` is provided.
+            to materialize when ``exo_view_roots`` is provided.
 
     Returns:
         rrb.Blueprint: Assembled layout containing the configured views.
@@ -105,13 +107,13 @@ def create_blueprint(
         origin="/",
     )
 
-    if ego_video_log_paths is not None:
+    if ego_view_roots is not None:
         ego_view = rrb.Vertical(
             contents=[
                 rrb.Tabs(
-                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                    rrb.Spatial2DView(origin=str(view_root)),
                 )
-                for video_log_path in ego_video_log_paths
+                for view_root in ego_view_roots
             ]
         )
         main_view = rrb.Horizontal(
@@ -119,13 +121,13 @@ def create_blueprint(
             column_shares=[4, 1],
         )
 
-    if exo_video_log_paths is not None:
+    if exo_view_roots is not None:
         exo_view = rrb.Horizontal(
             contents=[
                 rrb.Tabs(
-                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                    rrb.Spatial2DView(origin=str(view_root)),
                 )
-                for video_log_path in exo_video_log_paths[:max_exo_videos_to_log]
+                for view_root in exo_view_roots[:max_exo_videos_to_log]
             ]
         )
         main_view = rrb.Vertical(
@@ -631,24 +633,19 @@ def log_exoego_batch(
 
 
 class LogPaths(NamedTuple):
-    """Collection of optional Rerun entity roots for video playback.
+    """Collection of optional Rerun entity roots for 2D video panels."""
 
-    Attributes:
-        exo_video_log_paths (list[Path] | None): List of exo video entities to
-            display as 2D panels, if available.
-        ego_video_log_paths (list[Path] | None): List of ego video entities to
-            display as 2D panels, if available.
-    """
-
-    exo_video_log_paths: list[Path] | None
-    ego_video_log_paths: list[Path] | None
+    exo_view_roots: list[Path] | None
+    """Entities to set as origins for exo video panels."""
+    ego_view_roots: list[Path] | None
+    """Entities to set as origins for ego video panels."""
 
 
 class SceneSetupResult(NamedTuple):
     """Combined result of scene bootstrapping and shared timing metadata.
 
     Attributes:
-        log_paths (LogPaths): Optional entity roots for ego/exo videos.
+        log_paths (LogPaths): Optional entity roots for ego/exo video views.
         shortest_timestamp (Int[np.ndarray, "n_frames"]): Aligned timestamps
             shared across all logged modalities.
     """
@@ -675,90 +672,122 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
     exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
 
     exo_timestamp_list: list[Int[ndarray, "n_frames"]] = []
-    exo_video_log_paths: list[Path] | None = None
+    exo_video_log_paths: list[Path] = []
+    exo_view_roots: list[Path] | None = None
+    logged_exo_pinhole: bool = False
     if exo_sequence is not None:
         exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
         exo_video_files: list[Path] = exo_video_readers.video_paths
-        exo_cam_log_paths: list[Path] = [
-            parent_log_path / "exo" / exo_cam.name for exo_cam in exo_sequence.exo_cam_list
-        ]
-        exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
+        if exo_video_files:
+            for video_file in exo_video_files:
+                assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+                cam_name: str = video_file.stem
+                cam_log_path: Path = parent_log_path / "exo" / cam_name
+                video_log_path: Path = cam_log_path / "pinhole" / "video"
+                exo_video_log_paths.append(video_log_path)
+                exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
+                    video_file,
+                    video_log_path,
+                    timeline=timeline,
+                )
+                exo_timestamp_list.append(exo_timestamps_ns)
 
-        # log stationary exo cameras and video assets
-        for exo_cam in exo_sequence.exo_cam_list:
-            cam_log_path: Path = parent_log_path / "exo" / exo_cam.name
-            log_pinhole(
-                camera=exo_cam,
-                cam_log_path=cam_log_path,
-                image_plane_distance=exo_sequence.image_plane_distance,
-                static=True,
+        if exo_sequence.exo_cam_list:
+            logged_exo_pinhole = True
+            for exo_cam in exo_sequence.exo_cam_list:
+                cam_log_path = parent_log_path / "exo" / exo_cam.name
+                log_pinhole(
+                    camera=exo_cam,
+                    cam_log_path=cam_log_path,
+                    image_plane_distance=exo_sequence.image_plane_distance,
+                    static=True,
+                )
+        if exo_video_log_paths:
+            exo_view_roots = (
+                [path.parent for path in exo_video_log_paths]
+                if logged_exo_pinhole
+                else exo_video_log_paths
             )
 
-        for video_file, exo_video_log_path in zip(exo_video_files, exo_video_log_paths, strict=True):
-            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
-            # Log video asset which is referred to by frame references.
-            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, exo_video_log_path, timeline=timeline)
-            exo_timestamp_list.append(exo_timestamps_ns)
-
     ego_timestamp_list: list[Int[ndarray, "n_frames"]] = []
-    ego_video_log_paths: list[Path] | None = None
+    ego_video_log_paths: list[Path] = []
+    ego_view_roots: list[Path] | None = None
     if ego_sequence is not None:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
         ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
-        ego_cam_log_paths: list[Path] = [parent_log_path / "ego" / ego_cam_name for ego_cam_name in ego_cam_dict]
-        ego_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
 
-        for video_file, ego_video_log_path in zip(ego_video_files, ego_video_log_paths, strict=True):
-            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
-            # Log video asset which is referred to by frame references.
-            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, ego_video_log_path, timeline=timeline)
-            ego_timestamp_list.append(ego_timestamps_ns)
+        if ego_video_files:
+            for video_file in ego_video_files:
+                assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+                cam_name = video_file.stem
+                cam_log_path = parent_log_path / "ego" / cam_name
+                video_log_path = cam_log_path / "pinhole" / "video"
+                ego_video_log_paths.append(video_log_path)
+                ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
+                    video_file,
+                    video_log_path,
+                    timeline=timeline,
+                )
+                ego_timestamp_list.append(ego_timestamps_ns)
 
-        # log the ego cameras and their trajectories
-        shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
-        for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
-            if not ego_cam_param_list:
-                continue
-            n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
-            if n_frames_cam <= 0:
-                continue
-            trimmed_cam_params: list[PinholeParameters] = ego_cam_param_list[:n_frames_cam]
-            # We assume that all cameras share intrinsics across frames
-            first_cam: PinholeParameters = trimmed_cam_params[0]
-            cam_log_path: Path = parent_log_path / "ego" / cam_name
-            pinhole_log_path: Path = cam_log_path / "pinhole"
-            rr.log(
-                f"{pinhole_log_path}",
-                rr.Pinhole(
-                    image_from_camera=first_cam.intrinsics.k_matrix,
-                    height=first_cam.intrinsics.height,
-                    width=first_cam.intrinsics.width,
-                    camera_xyz=getattr(
-                        rr.ViewCoordinates,
-                        first_cam.intrinsics.camera_conventions,
+        ego_has_metadata: bool = bool(ego_cam_dict)
+        if ego_has_metadata and ego_timestamp_list:
+            shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
+            for cam_name, ego_cam_param_list in ego_cam_dict.items():
+                if not ego_cam_param_list:
+                    continue
+                n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
+                if n_frames_cam <= 0:
+                    continue
+                trimmed_cam_params: list[PinholeParameters] = ego_cam_param_list[:n_frames_cam]
+                first_cam: PinholeParameters = trimmed_cam_params[0]
+                cam_log_path = parent_log_path / "ego" / cam_name
+                pinhole_log_path: Path = cam_log_path / "pinhole"
+                rr.log(
+                    f"{pinhole_log_path}",
+                    rr.Pinhole(
+                        image_from_camera=first_cam.intrinsics.k_matrix,
+                        height=first_cam.intrinsics.height,
+                        width=first_cam.intrinsics.width,
+                        camera_xyz=getattr(
+                            rr.ViewCoordinates,
+                            first_cam.intrinsics.camera_conventions,
+                        ),
+                        image_plane_distance=ego_sequence.image_plane_distance,
                     ),
-                    image_plane_distance=exoego_sequence.ego_sequence.image_plane_distance,
-                ),
-                static=True,
+                    static=True,
+                )
+                batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
+                    [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
+                )
+                batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
+                    [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
+                )
+                rr.send_columns(
+                    f"{cam_log_path}",
+                    indexes=[
+                        rr.TimeColumn(
+                            timeline,
+                            duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)],
+                        )
+                    ],
+                    columns=[
+                        *rr.Transform3D.columns(
+                            translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
+                            mat3x3=rearrange(batch_world_R_cam, "f r c -> (f) r c"),
+                        ),
+                    ],
+                )
+        if ego_video_log_paths:
+            ego_view_roots = (
+                [path.parent for path in ego_video_log_paths]
+                if ego_has_metadata
+                else ego_video_log_paths
             )
-            batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
-                [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
-            )
-            batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
-                [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
-            )
-            # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
-            rr.send_columns(
-                f"{cam_log_path}",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])],
-                columns=[
-                    *rr.Transform3D.columns(
-                        translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
-                        mat3x3=rearrange(batch_world_R_cam, "f r c -> (f) r c"),
-                    ),
-                ],
-            )
+
+    if not exo_timestamp_list and not ego_timestamp_list:
+        raise ValueError("No video timestamps were logged; ensure at least one stream is available.")
 
     shortest_timestamp: Int[ndarray, "n_frames"] = min(
         exo_timestamp_list + ego_timestamp_list,
@@ -766,7 +795,7 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
     )
 
     return SceneSetupResult(
-        log_paths=LogPaths(exo_video_log_paths=exo_video_log_paths, ego_video_log_paths=ego_video_log_paths),
+        log_paths=LogPaths(exo_view_roots=exo_view_roots, ego_view_roots=ego_view_roots),
         shortest_timestamp=shortest_timestamp,
     )
 
@@ -794,8 +823,8 @@ def visualize_exo_ego(config: VisualizeConfig):
     shortest_timestamp: Int[ndarray, "n_frames"] = scene_setup_result.shortest_timestamp
 
     blueprint: rrb.Blueprint = create_blueprint(
-        exo_video_log_paths=log_paths.exo_video_log_paths,
-        ego_video_log_paths=log_paths.ego_video_log_paths,
+        exo_view_roots=log_paths.exo_view_roots,
+        ego_view_roots=log_paths.ego_view_roots,
     )
     rr.send_blueprint(blueprint)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import tempfile
+import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
@@ -96,8 +97,15 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
 
         exo_cams: list[PinholeParameters] = []
         for camera_stream in camera_streams:
-            intrinsics = self._load_intrinsics(recording, camera_stream.pinhole_entity, timeline)
-            extrinsics = self._load_extrinsics(recording, camera_stream.transform_entity, timeline)
+            try:
+                intrinsics = self._load_intrinsics(recording, camera_stream.pinhole_entity, timeline)
+                extrinsics = self._load_extrinsics(recording, camera_stream.transform_entity, timeline)
+            except ValueError as exc:
+                warnings.warn(
+                    f"Skipping camera '{camera_stream.name}' due to missing metadata: {exc}",
+                    stacklevel=2,
+                )
+                continue
             exo_cams.append(PinholeParameters(name=camera_stream.name, intrinsics=intrinsics, extrinsics=extrinsics))
         return exo_cams
 

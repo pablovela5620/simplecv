@@ -42,22 +42,23 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
         #############
         self._ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = self.load_ego_cams()
         self._video_path_list: list[Path] = self.load_video_paths()
-        # Sort the cameras and videos based on the sequence to make sure they align correctly
-        sorted_cams_and_videos: tuple[dict[CamNameType, list[PinholeParameters]], dict[CamNameType, Path]] = (
-            self.align_cams_and_videos(video_path_list=self._video_path_list, ego_cam_dict=self._ego_cam_dict)
-        )
-        # validate that the number of cameras matches the number of videos and names are aligned
-        assert len(sorted_cams_and_videos[0]) == len(sorted_cams_and_videos[1]), (
-            f"Number of cameras ({len(sorted_cams_and_videos[0])}) does not match number of videos "
-            f"({len(sorted_cams_and_videos[1])})."
-        )
-        assert set(sorted_cams_and_videos[0].keys()) == set(sorted_cams_and_videos[1].keys()), (
-            f"Camera names {set(sorted_cams_and_videos[0].keys())} do not match video names "
-            f"{set(sorted_cams_and_videos[1].keys())}."
-        )
-        # extract the ego camera dictionary and video paths
-        self._ego_cam_dict = sorted_cams_and_videos[0]
-        self._video_path_list = list(sorted_cams_and_videos[1].values())
+        if self._ego_cam_dict:
+            # Sort the cameras and videos based on the sequence to make sure they align correctly
+            sorted_cams_and_videos: tuple[dict[CamNameType, list[PinholeParameters]], dict[CamNameType, Path]] = (
+                self.align_cams_and_videos(video_path_list=self._video_path_list, ego_cam_dict=self._ego_cam_dict)
+            )
+            # validate that the number of cameras matches the number of videos and names are aligned
+            assert len(sorted_cams_and_videos[0]) == len(sorted_cams_and_videos[1]), (
+                f"Number of cameras ({len(sorted_cams_and_videos[0])}) does not match number of videos "
+                f"({len(sorted_cams_and_videos[1])})."
+            )
+            assert set(sorted_cams_and_videos[0].keys()) == set(sorted_cams_and_videos[1].keys()), (
+                f"Camera names {set(sorted_cams_and_videos[0].keys())} do not match video names "
+                f"{set(sorted_cams_and_videos[1].keys())}."
+            )
+            # extract the ego camera dictionary and video paths
+            self._ego_cam_dict = sorted_cams_and_videos[0]
+            self._video_path_list = list(sorted_cams_and_videos[1].values())
 
         self.ego_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self._video_path_list]
@@ -69,7 +70,7 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
         # Return the length based on the first camera's pinhole parameters list
         if self._ego_cam_dict:
             return len(next(iter(self._ego_cam_dict.values())))
-        return 0
+        return len(self.ego_video_readers)
 
     def __iter__(self) -> Generator[EgoData, None, None]:
         for idx in range(len(self)):
