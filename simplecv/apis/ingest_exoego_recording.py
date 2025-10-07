@@ -8,6 +8,7 @@ from typing import cast
 
 import rerun as rr
 import rerun.blueprint as rrb
+import tyro
 from natsort import natsorted
 from rerun.blueprint import ContainerLike
 from tqdm.auto import tqdm
@@ -25,7 +26,9 @@ class IngestConfig:
     exoego_dir: Path
     """Path to the directory containing 'exo' and/or 'ego' subdirectories with video files."""
     verbose: bool = False
-    """Enable verbose logging with progress bars during ingestion."""
+    """Enable verbose console logging during ingestion."""
+    reencode_to_av1: bool = False
+    """Force AV1 MP4 re-encoding (with 720p ceiling) before logging videos."""
 
 
 def validate_exoego_dir(exoego_dir: Path) -> tuple[Path | None, Path | None]:
@@ -67,12 +70,20 @@ class PrepareVideoForLoggingResult:
 
 @dataclass(frozen=True, slots=True)
 class VideoIngestEntry:
-    """Tuple-like container mapping a source video to its Rerun entity path."""
+    """Structured container coupling a source video with its camera/video entity paths."""
 
     source_path: Path
     """Filesystem path of the input video on disk."""
-    log_entity_path: Path
-    """Rerun entity path where the processed video will be logged."""
+    camera_log_path: Path
+    """Root Rerun entity path for this camera (e.g. '/world/exo/<camera_id>')."""
+    video_log_path: Path
+    """Rerun entity path for the video stream (e.g. '/world/exo/<camera_id>/pinhole/video')."""
+
+    @property
+    def pinhole_log_path(self) -> Path:
+        """Rerun entity path for the camera's pinhole node."""
+
+        return self.camera_log_path / "pinhole"
 
 
 def probe_video_stream(video_path: Path) -> VideoProbeResult:
@@ -159,41 +170,59 @@ def _coerce_int(value: object) -> int | None:
     return None
 
 
-def prepare_video_for_logging(video_path: Path) -> PrepareVideoForLoggingResult:
+def prepare_video_for_logging(
+    video_path: Path,
+    *,
+    verbose: bool = False,
+    reencode_to_av1: bool = False,
+) -> PrepareVideoForLoggingResult:
     """
-    Ensure ``video_path`` is AV1 encoded, stored as MP4, and respects the 1280x720 ceiling.
+    Optionally ensure ``video_path`` is AV1 encoded, stored as MP4, and respects the 1280x720 ceiling.
 
     Returns:
         A ``PrepareVideoForLoggingResult`` capturing the prepared path, metadata, and
         whether the prepared asset is temporary.
+
+    Args:
+        video_path: Path to the source video on disk.
+        verbose: Whether to emit detailed logging from the underlying encoding utilities.
+        reencode_to_av1: When true, convert non-AV1 content into AV1 MP4 constrained to 720p.
     """
 
-    initial_probe: VideoProbeResult = probe_video_stream(video_path)
+    probe_result: VideoProbeResult = probe_video_stream(video_path)
+    if not reencode_to_av1:
+        return PrepareVideoForLoggingResult(
+            prepared_path=video_path,
+            metadata=probe_result,
+            should_cleanup=False,
+        )
+
     needs_reencode: bool = False
     resize_resolution: Resolution | None = None
 
-    if "mp4" not in _format_tokens(initial_probe.format_name):
+    if "mp4" not in _format_tokens(probe_result.format_name):
         needs_reencode = True
-    if initial_probe.codec_name != "av1":
+    if probe_result.codec_name != "av1":
         needs_reencode = True
-    if initial_probe.width > 1280 or initial_probe.height > 720:
+    if probe_result.width > 1280 or probe_result.height > 720:
         resize_resolution = "720p"
         needs_reencode = True
 
     if not needs_reencode:
-        if initial_probe.width > 1280 or initial_probe.height > 720:
+        if probe_result.width > 1280 or probe_result.height > 720:
             raise ValueError(
-                f"{video_path} exceeds the maximum resolution (found {initial_probe.width}x{initial_probe.height})."
+                f"{video_path} exceeds the maximum resolution (found {probe_result.width}x{probe_result.height})."
             )
         return PrepareVideoForLoggingResult(
             prepared_path=video_path,
-            metadata=initial_probe,
+            metadata=probe_result,
             should_cleanup=False,
         )
 
     prepared_video_path: Path = reencode_video_optimal(
         input_video_path=video_path,
         resize=resize_resolution,
+        verbose=verbose,
     )
     prepared_probe: VideoProbeResult = probe_video_stream(prepared_video_path)
 
@@ -229,7 +258,8 @@ def collect_video_entries(
     video_entries: list[VideoIngestEntry] = [
         VideoIngestEntry(
             source_path=video_path,
-            log_entity_path=log_root / video_path.stem,
+            camera_log_path=log_root / video_path.stem,
+            video_log_path=(log_root / video_path.stem / "pinhole" / "video"),
         )
         for video_path in all_video_paths
     ]
@@ -242,6 +272,7 @@ def ingest_video_directory(
     timeline: str,
     verbose: bool,
     progress_label: str,
+    reencode_to_av1: bool,
 ) -> list[Path]:
     """Ingest the provided videos ensuring uniform encoding and resolution constraints.
 
@@ -253,42 +284,38 @@ def ingest_video_directory(
 
     expected_resolution: tuple[int, int] | None = None
     logged_video_entities: list[Path] = []
-    iterator: Iterable[VideoIngestEntry] = (
-        cast(
-            Iterable[VideoIngestEntry],
-            tqdm(
-                video_entries,
-                desc=progress_label,
-                leave=False,
-            ),
-        )
-        if verbose
-        else cast(Iterable[VideoIngestEntry], video_entries)
+    iterable_entries: Iterable[VideoIngestEntry] = cast(
+        Iterable[VideoIngestEntry],
+        tqdm(video_entries, desc=progress_label, leave=False),
     )
-
-    for entry in iterator:
-        prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(video_path=entry.source_path)
+    for entry in iterable_entries:
+        prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
+            video_path=entry.source_path,
+            verbose=verbose,
+            reencode_to_av1=reencode_to_av1,
+        )
         prepared_path: Path = prepared_video_result.prepared_path
         metadata: VideoProbeResult = prepared_video_result.metadata
         should_cleanup: bool = prepared_video_result.should_cleanup
         actual_resolution: tuple[int, int] = (metadata.width, metadata.height)
 
-        if expected_resolution is None:
-            expected_resolution = actual_resolution
-        elif actual_resolution != expected_resolution:
-            if should_cleanup:
-                prepared_path.unlink(missing_ok=True)
-            raise ValueError(
-                f"Video {entry.source_path} has resolution {actual_resolution} which does not match "
-                f"the expected resolution {expected_resolution}."
-            )
+        if reencode_to_av1:
+            if expected_resolution is None:
+                expected_resolution = actual_resolution
+            elif actual_resolution != expected_resolution:
+                if should_cleanup:
+                    prepared_path.unlink(missing_ok=True)
+                raise ValueError(
+                    f"Video {entry.source_path} has resolution {actual_resolution} which does not match "
+                    f"the expected resolution {expected_resolution}."
+        )
 
         log_video(
             video_path=prepared_path,
-            video_log_path=entry.log_entity_path,
+            video_log_path=entry.video_log_path,
             timeline=timeline,
         )
-        logged_entity: Path = entry.log_entity_path
+        logged_entity: Path = entry.video_log_path
         logged_video_entities.append(logged_entity)
 
         if should_cleanup:
@@ -304,6 +331,8 @@ def create_ingest_view(
 ) -> ContainerLike:
     """
     Assemble a Rerun container/view showing exo videos along the bottom row and ego videos on the right column.
+
+    Paths should point to the `.../pinhole` entities that contain the actual video nodes.
     """
 
     main_view = rrb.Spatial3DView(origin="/")
@@ -311,9 +340,9 @@ def create_ingest_view(
     if ego_video_log_paths:
         ego_views = [
             rrb.Tabs(
-                rrb.Spatial2DView(origin=str(video_log_path)),
+                rrb.Spatial2DView(origin=str(pinhole_log_path)),
             )
-            for video_log_path in ego_video_log_paths
+            for pinhole_log_path in ego_video_log_paths
         ]
         main_view = rrb.Horizontal(
             contents=[
@@ -326,9 +355,9 @@ def create_ingest_view(
     if exo_video_log_paths:
         exo_views = [
             rrb.Tabs(
-                rrb.Spatial2DView(origin=str(video_log_path)),
+                rrb.Spatial2DView(origin=str(pinhole_log_path)),
             )
-            for video_log_path in exo_video_log_paths
+            for pinhole_log_path in exo_video_log_paths
         ]
         main_view = rrb.Vertical(
             contents=[
@@ -345,7 +374,7 @@ def main(config: IngestConfig) -> None:
     validate_exoego_dir(config.exoego_dir)
     print(f"Ingesting data from {config.exoego_dir} to RRD at {config.exoego_dir}")
 
-    parent_log_path: Path = Path("world")
+    parent_log_path: Path = Path("/world")
     timeline: str = "video_time"
     dir_tuple: tuple[Path | None, Path | None] = validate_exoego_dir(config.exoego_dir)
     exo_dir: Path | None = dir_tuple[0]
@@ -369,8 +398,8 @@ def main(config: IngestConfig) -> None:
     )
 
     ingest_view: ContainerLike = create_ingest_view(
-        exo_video_log_paths=[entry.log_entity_path for entry in exo_entries] or None,
-        ego_video_log_paths=[entry.log_entity_path for entry in ego_entries] or None,
+        exo_video_log_paths=[entry.pinhole_log_path for entry in exo_entries] or None,
+        ego_video_log_paths=[entry.pinhole_log_path for entry in ego_entries] or None,
     )
     rr.send_blueprint(rrb.Blueprint(ingest_view, collapse_panels=True))
 
@@ -380,6 +409,7 @@ def main(config: IngestConfig) -> None:
             timeline=timeline,
             verbose=config.verbose,
             progress_label="Ingesting exo videos",
+            reencode_to_av1=config.reencode_to_av1,
         )
 
     if ego_entries:
@@ -388,4 +418,20 @@ def main(config: IngestConfig) -> None:
             timeline=timeline,
             verbose=config.verbose,
             progress_label="Ingesting ego videos",
+            reencode_to_av1=config.reencode_to_av1,
         )
+
+
+def entrypoint() -> None:
+    """Entrypoint leveraging Tyro to expose the ingest workflow via CLI."""
+
+    tyro.extras.set_accent_color("bright_cyan")
+    config: IngestConfig = tyro.cli(
+        IngestConfig,
+        description="Given a directory with ego/exo recordings, save them to RRD and visualize them with Rerun.",
+    )
+    main(config=config)
+
+
+if __name__ == "__main__":
+    entrypoint()

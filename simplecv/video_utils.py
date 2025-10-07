@@ -140,7 +140,6 @@ RESOLUTION_MAP: dict[Resolution, tuple[int, int]] = {
     "360p": (640, 360),
 }
 
-
 @lru_cache(maxsize=1)
 def _available_ffmpeg_video_encoders() -> set[str]:
     """
@@ -339,12 +338,13 @@ def _encoder_args_for(name: str, available: set[str]) -> list[str]:
 
 
 @lru_cache(maxsize=1)
-def _select_optimal_video_encoder_args() -> list[str]:
+def _select_optimal_video_encoder_args() -> tuple[str, list[str]]:
     """
     Choose ffmpeg video encoder arguments suited for the current platform.
 
     Returns:
-        List of ffmpeg CLI arguments (without output path or audio settings).
+        Tuple containing the encoder name and ffmpeg CLI arguments (without
+        output path or audio settings).
     """
     encoders = _available_ffmpeg_video_encoders()
 
@@ -356,7 +356,7 @@ def _select_optimal_video_encoder_args() -> list[str]:
                 f"Requested encoder '{env_encoder}' not available. "
                 f"Available encoders: {', '.join(sorted(encoders)) or 'none'}"
             )
-        return _encoder_args_for(env_encoder, encoders)
+        return env_encoder, _encoder_args_for(env_encoder, encoders)
 
     # Preferred order: NVIDIA NVENC → Intel QSV → VAAPI → libsvtav1 → libaom → Apple VT → x265 → x264
     priority = [
@@ -373,25 +373,34 @@ def _select_optimal_video_encoder_args() -> list[str]:
 
     for encoder in priority:
         if encoder in encoders:
-            return _encoder_args_for(encoder, encoders)
+            return encoder, _encoder_args_for(encoder, encoders)
 
     # No known encoder: return libx264 defaults to guarantee success.
-    return _encoder_args_for("libx264", encoders)
+    fallback = "libx264"
+    return fallback, _encoder_args_for(fallback, encoders)
 
 
 def reencode_video_optimal(
     input_video_path: Path,
     *,
-    # NEW ------------------------------------------------------------
-    resize: Resolution | None = None,  # e.g. "720p" or None
-    # ----------------------------------------------------------------
+    resize: Resolution | None = None,
     delete_on_exit: bool = True,
     save_file: bool = False,
     output_directory: Path | None = None,
+    verbose: bool = False,
 ) -> Path:
     """
-    Re-encode an existing video to AV1 (NVENC) and-optionally-down-sample
-    to 1080p / 720p / 360p, keeping everything else unchanged.
+    Re-encode an existing video to AV1 (GPU when possible) and optionally
+    downsample to 1080p / 720p / 360p, keeping everything else unchanged.
+    Falls back to CPU encoders when NVIDIA NVENC is unavailable.
+
+    Args:
+        input_video_path: Path to the source video that should be re-encoded.
+        resize: Optional predefined resolution (e.g. ``"720p"``) used to downscale the video before logging.
+        delete_on_exit: Whether temporary files should be removed when the process exits.
+        save_file: If ``True``, write the re-encoded video next to the input file.
+        output_directory: Optional output directory when ``save_file`` is ``True``.
+        verbose: Emit FFmpeg timing information when ``True``.
     """
     if not input_video_path.is_file():
         raise FileNotFoundError(f"Input video file not found: {input_video_path}")
@@ -421,7 +430,7 @@ def reencode_video_optimal(
         cmd += ["-vf", f"scale={w}:{h}"]
 
     # ── select encoder arguments based on platform capabilities ────────────
-    video_encoder_args = _select_optimal_video_encoder_args()
+    encoder_name, video_encoder_args = _select_optimal_video_encoder_args()
     cmd += video_encoder_args
     cmd += [
         "-c:a",
@@ -429,11 +438,12 @@ def reencode_video_optimal(
         str(output_path),
     ]
 
-    # ── run ffmpeg & handle errors (unchanged) ─────────────────────────────
+    # ── run ffmpeg & handle errors ─────────────────────────────────────────
     t0 = timer()
     proc = subprocess.run(cmd, capture_output=True)
     dt = timer() - t0
-    print(f"FFmpeg re-encoding completed in {dt:.2f} s")
+    if verbose:
+        print(f"FFmpeg re-encoding using {encoder_name} completed in {dt:.2f} s")
 
     if proc.returncode:
         if not save_file and output_path.exists():
