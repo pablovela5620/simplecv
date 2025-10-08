@@ -27,7 +27,7 @@ class IngestConfig:
     """Path to the directory containing 'exo' and/or 'ego' subdirectories with video files."""
     verbose: bool = False
     """Enable verbose console logging during ingestion."""
-    reencode_to_av1: bool = False
+    reencode_to_av1: bool = True
     """Force AV1 MP4 re-encoding (with 720p ceiling) before logging videos."""
 
 
@@ -308,7 +308,7 @@ def ingest_video_directory(
                 raise ValueError(
                     f"Video {entry.source_path} has resolution {actual_resolution} which does not match "
                     f"the expected resolution {expected_resolution}."
-        )
+                )
 
         log_video(
             video_path=prepared_path,
