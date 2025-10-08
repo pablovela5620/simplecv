@@ -15,6 +15,7 @@ from tqdm.auto import tqdm
 
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from simplecv.video_utils import Resolution, reencode_video_optimal
+import warnings
 
 
 @dataclass
@@ -254,6 +255,11 @@ def collect_video_entries(
 
     all_video_paths: list[Path] = natsorted(video_dir.glob("*.mp4"))
     assert all_video_paths, f"No .mp4 files found in directory: {video_dir}"
+    # TODO; Remove this later, right now we can only support the rgb cameras so we
+    # filter out the rest only in the ego view
+    if "ego" in video_dir.name.lower():
+        all_video_paths = [p for p in all_video_paths if "rgb" in p.name.lower()]
+        warnings.warn(f"Filtered to {len(all_video_paths)} RGB videos in ego view", stacklevel=2)
 
     video_entries: list[VideoIngestEntry] = [
         VideoIngestEntry(

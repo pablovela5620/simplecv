@@ -28,6 +28,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["simplecv*", "tools*", "tests*"]
 
+[tool.setuptools.package-data]
+simplecv = ["py.typed"]
+
 [tool.pixi.project]
 channels = ["https://prefix.dev/conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
@@ -124,7 +127,6 @@ open3d = ">=0.18.0,<0.19"
 scipy = ">=1.15.2,<2"
 natsort = ">=8.4.0,<9"
 av = "*"
-
 hdf5 = ">=1.14.4,<2"
 h5py = ">=3.12.1,<4"
 jupyterlab = ">=4.4.9,<5"

@@ -5,14 +5,14 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 from jaxtyping import Float32
 from numpy import ndarray
-from rerun_bindings import Recording
+from rerun_bindings import ComponentColumnDescriptor, Recording, Schema
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.exo.base_exo import BaseExoSequence
@@ -48,9 +48,7 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         rrd_path: Path = self.config.rrd_path
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
-        self._remux_tmpdir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(
-            prefix="rrd_exo_remux_"
-        )
+        self._remux_tmpdir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(prefix="rrd_exo_remux_")
         atexit.register(self._remux_tmpdir.cleanup)
 
         self._recording: Recording = rr.dataframe.load_recording(str(rrd_path))
@@ -109,11 +107,9 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
             exo_cams.append(PinholeParameters(name=camera_stream.name, intrinsics=intrinsics, extrinsics=extrinsics))
         return exo_cams
 
-    def _discover_camera_streams(self, schema: Any) -> list[_RRDCameraStream]:
-        component_columns = schema.component_columns()
-        descriptors: list[Any] = (
-            list(component_columns.keys()) if isinstance(component_columns, dict) else list(component_columns)
-        )
+    def _discover_camera_streams(self, schema: Schema) -> list[_RRDCameraStream]:
+        component_columns: list[ComponentColumnDescriptor] = schema.component_columns()
+        descriptors = list(component_columns.keys()) if isinstance(component_columns, dict) else list(component_columns)
 
         stream_map: dict[str, _RRDCameraStream] = {}
         for descriptor in descriptors:
