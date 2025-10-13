@@ -56,9 +56,7 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         rrd_path: Path = self.config.rrd_path
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
-        self._remux_tmpdir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(
-            prefix="rrd_exo_remux_"
-        )
+        self._remux_tmpdir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(prefix="rrd_exo_remux_")
         atexit.register(self._remux_tmpdir.cleanup)
 
         self._recording: Recording = rr.dataframe.load_recording(str(rrd_path))
@@ -68,6 +66,8 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         assert self._camera_streams, "No exo camera streams found in recording"
 
         video_paths: list[Path] = []
+        # TODO avoid remuxing when possible. The rrd already contains byte data, so use something like
+        # whats shown in RRDVideoReader.
         for camera_stream in self._camera_streams:
             match camera_stream.data_kind:
                 case "video_stream":
