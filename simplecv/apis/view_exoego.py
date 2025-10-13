@@ -726,7 +726,6 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
     if ego_sequence is not None:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
-        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
         ego_video_names: list[str] = ego_sequence.ego_video_names
         assert len(ego_video_files) == len(ego_video_names), (
             f"Mismatched ego video assets ({len(ego_video_files)}) and names ({len(ego_video_names)})."
@@ -745,7 +744,8 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
 
         # log the ego cameras and their trajectories
         shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
-        for cam_name, ego_cam_param_list in exoego_sequence.ego_sequence.ego_cam_dict.items():
+        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
+        for cam_name, ego_cam_param_list in ego_cam_dict.items():
             if not ego_cam_param_list:
                 continue
             n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
