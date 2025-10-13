@@ -173,6 +173,14 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         return len(self.ego_video_readers)
 
     @property
+    def ego_video_names(self) -> list[str]:  # type: ignore[override]
+        streams: list[_RRDEgoCameraStream] | None = getattr(self, "_camera_streams", None)
+        if streams:
+            stream_names: list[str] = [stream.name for stream in streams]
+            return stream_names
+        return super().ego_video_names
+
+    @property
     def image_plane_distance(self) -> int | float:
         return 0.02
 

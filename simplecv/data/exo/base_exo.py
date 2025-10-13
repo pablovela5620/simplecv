@@ -65,10 +65,7 @@ class BaseExoSequence(ABC, Generic[ConfigT]):
         )
 
     def __len__(self) -> int:
-        # Return the length based on the first camera's pinhole parameters list
-        if self._exo_cam_list:
-            return len(next(iter(self._exo_cam_list.values())))
-        return 0
+        return len(self.exo_video_readers)
 
     def __iter__(self) -> Generator[ExoData, None, None]:
         for idx in range(len(self)):
@@ -92,6 +89,21 @@ class BaseExoSequence(ABC, Generic[ConfigT]):
     def exo_cam_list(self) -> list[PinholeParameters]:
         """Get the dictionary of egocentric cameras."""
         return self._exo_cam_list
+
+    @property
+    def exo_video_paths(self) -> list[Path]:
+        """Video paths in the order consumed by the multi-reader."""
+        return self._video_path_list
+
+    @property
+    def exo_video_names(self) -> list[str]:
+        """Stable stream names aligned with ``exo_video_paths``."""
+        video_names: list[str]
+        if self._exo_cam_list and len(self._exo_cam_list) == len(self._video_path_list):
+            video_names = [exo_cam.name for exo_cam in self._exo_cam_list]
+        else:
+            video_names = [video_path.stem for video_path in self._video_path_list]
+        return video_names
 
     @property
     @abstractmethod

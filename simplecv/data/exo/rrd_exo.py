@@ -44,6 +44,14 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
     def __len__(self) -> int:  # type: ignore[override]
         return len(self.exo_video_readers)
 
+    @property
+    def exo_video_names(self) -> list[str]:  # type: ignore[override]
+        camera_streams: list[_RRDCameraStream] | None = getattr(self, "_camera_streams", None)
+        if camera_streams:
+            stream_names: list[str] = [stream.name for stream in camera_streams]
+            return stream_names
+        return super().exo_video_names
+
     def load_video_paths(self) -> list[Path]:
         rrd_path: Path = self.config.rrd_path
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"

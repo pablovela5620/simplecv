@@ -74,14 +74,6 @@ class BaseExoEgoSequence(ABC, Generic[ConfigT]):
     @abstractmethod
     def iter_episode_sequences(cls: type[Self], cfg: ConfigT) -> Generator[Self, None, None]: ...
 
-    # def project_xyz(self):
-    # xyz_hom: Float32[ndarray, "21 4"] = np.hstack((xyz, np.ones((21, 1)))).astype(np.float32)
-    # P_ego: Float32[ndarray, "3 4"] = current_ego_cam.projection_matrix.astype(np.float32)
-    # P_ego: Float32[ndarray, "1 3 4"] = rearrange(P_ego, "n m -> 1 n m")
-    # uvc_ego: Float32[ndarray, "1 21 3"] = projectN3(xyz_hom, P_ego).astype(np.float32)
-    # uv_ego: Float32[ndarray, "21 2"] = uvc_ego[0, :, :2]
-    # uv_ego[uv_ego == -1] = np.nan
-
     @property
     @abstractmethod
     def world_coordinate_system(self) -> ViewCoordinates:

@@ -42,6 +42,7 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
         #############
         self._ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = self.load_ego_cams()
         self._video_path_list: list[Path] = self.load_video_paths()
+        self._ego_video_name_list: list[str] = []
         if self._ego_cam_dict:
             # Sort the cameras and videos based on the sequence to make sure they align correctly
             sorted_cams_and_videos: tuple[dict[CamNameType, list[PinholeParameters]], dict[CamNameType, Path]] = (
@@ -58,7 +59,12 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
             )
             # extract the ego camera dictionary and video paths
             self._ego_cam_dict = sorted_cams_and_videos[0]
-            self._video_path_list = list(sorted_cams_and_videos[1].values())
+            ordered_video_map: dict[CamNameType, Path] = sorted_cams_and_videos[1]
+            self._ego_video_name_list = list(ordered_video_map.keys())
+            self._video_path_list = list(ordered_video_map.values())
+        if not self._ego_video_name_list:
+            fallback_names: list[str] = [video_path.stem for video_path in self._video_path_list]
+            self._ego_video_name_list = fallback_names
 
         self.ego_video_readers: MultiVideoReader = MultiVideoReader(
             video_paths=[video_path for video_path in self._video_path_list]
@@ -67,9 +73,6 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
         #     self._ego_labels: EgoLabels = self.load_labels()
 
     def __len__(self) -> int:
-        # Return the length based on the first camera's pinhole parameters list
-        if self._ego_cam_dict:
-            return len(next(iter(self._ego_cam_dict.values())))
         return len(self.ego_video_readers)
 
     def __iter__(self) -> Generator[EgoData, None, None]:
@@ -107,6 +110,16 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
     def ego_cam_dict(self) -> dict[str, list[PinholeParameters]]:
         """Get the dictionary of egocentric cameras."""
         return self._ego_cam_dict
+
+    @property
+    def ego_video_paths(self) -> list[Path]:
+        """Video paths in the order consumed by the multi-reader."""
+        return self._video_path_list
+
+    @property
+    def ego_video_names(self) -> list[str]:
+        """Stable stream names aligned with ``ego_video_paths``."""
+        return self._ego_video_name_list
 
     @property
     def ego_labels(self) -> EgoLabels:
