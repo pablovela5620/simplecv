@@ -235,7 +235,7 @@ def compute_vertex_normals_batch(
 
 def log_mano_batch(
     exoego_sequence: BaseExoEgoSequence,
-    parent_log_path: Path,
+    mano_parent_log_path: Path,
     timeline: str,
     shortest_timestamp: Int[ndarray, "n_frames"],
     log_mano: bool,
@@ -265,6 +265,7 @@ def log_mano_batch(
     if mano_stack is not None and log_mano:
         from simplecv.ops.mano.mano_np import MANOLayerNP
 
+        mano_root_path: Path = mano_parent_log_path / "mano"
         mano_layers = [
             MANOLayerNP(side="right", betas=mano_stack.betas),
             MANOLayerNP(side="left", betas=mano_stack.betas),
@@ -299,20 +300,19 @@ def log_mano_batch(
             xyz_coco_mano[:, hand_idx, :] = xyz_mano_np[0:n_frames_mano_total]
             conf_coco_mano[:, hand_idx] = 1.0
 
-            # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
-            faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
-            mesh_color_rgba: tuple[int, int, int, int] = mano_mesh_color_rgba_map[mano_layer.side]
-            mesh_entity_path: Path = parent_log_path / f"mano_{mano_layer.side}_mesh"
+            hand_root: Path = mano_root_path / mano_layer.side
+            mesh_entity_path: Path = hand_root / "mesh"
             rr.log(
                 f"{mesh_entity_path}",
                 rr.Mesh3D.from_fields(
-                    triangle_indices=faces_np,
-                    albedo_factor=mesh_color_rgba,
+                    triangle_indices=mano_layer.f.astype(np.int32),
+                    albedo_factor=mano_mesh_color_rgba_map[mano_layer.side],
                 ),
                 static=True,
             )
 
-            # Stream vertex positions and normals over time under the same entity using send_columns
+            # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
+            faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
             verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
             n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
             vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
@@ -355,7 +355,7 @@ def log_mano_batch(
             keypoint_lengths: Int[ndarray, "n_frames"] = np.full(n_frames_mano_total, n_keypoints, dtype=np.int32)
 
             rr.log(
-                f"{parent_log_path}/mano_keypoints",
+                f"{mano_root_path}/coco133_xyz",
                 Points3DWithConfidence.from_fields(
                     class_ids=0,
                     keypoint_ids=COCO_133_IDS,
@@ -364,7 +364,7 @@ def log_mano_batch(
                 static=True,
             )
             rr.send_columns(
-                f"{parent_log_path}/mano_keypoints",
+                f"{mano_root_path}/coco133_xyz",
                 indexes=[
                     rr.TimeColumn(
                         timeline,
@@ -411,6 +411,8 @@ def log_exoego_batch(
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
     if exoego_labels is None:
         return
+    gt_root_path: Path = parent_log_path / "gt"
+
     ##########################
     # batch send all 3D data #
     ##########################
@@ -446,7 +448,7 @@ def log_exoego_batch(
             keypoint_lengths: Int[ndarray, "n_frames"] = np.full(n_frames_total, n_keypoints, dtype=np.int32)
 
             rr.log(
-                f"{parent_log_path}/keypoints",
+                f"{gt_root_path}/coco133_xyz",
                 Points3DWithConfidence.from_fields(
                     class_ids=0,
                     keypoint_ids=COCO_133_IDS,
@@ -455,7 +457,7 @@ def log_exoego_batch(
                 static=True,
             )
             rr.send_columns(
-                f"{parent_log_path}/keypoints",
+                f"{gt_root_path}/coco133_xyz",
                 indexes=[
                     rr.TimeColumn(
                         timeline,
@@ -476,7 +478,7 @@ def log_exoego_batch(
         ############################
         log_mano_batch(
             exoego_sequence=exoego_sequence,
-            parent_log_path=parent_log_path,
+            mano_parent_log_path=gt_root_path,
             timeline=timeline,
             shortest_timestamp=shortest_timestamp,
             log_mano=log_mano,
@@ -499,13 +501,11 @@ def log_exoego_batch(
             uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = proj_3d_vectorized(
                 xyz_hom=xyz_hom_stack, P=Pall_exo
             )
-            uv_exo_stack: Float[ndarray, "n_frames n_views 133 2"] = filter_out_of_bounds_keypoints(
-                uv_raw_stack, exo_cam_param_list[0]
-            )
             for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
                 exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
                 exo_pinhole_path: Path = exo_cam_path / "pinhole"
-                uv_exo: Float[ndarray, "n_frames 133 2"] = uv_exo_stack[:, exo_cam_idx, :, :]
+                uv_exo: Float[ndarray, "n_frames 133 2"] = uv_raw_stack[:, exo_cam_idx, :, :].copy()
+                uv_exo = filter_out_of_bounds_keypoints(uv_exo, exo_cam)
                 # filter batch with invalid values
                 n_frames_cam: int = len(uv_exo)
                 if n_frames_cam == 0:
@@ -530,7 +530,7 @@ def log_exoego_batch(
                 # Confidence-aware helper keeps the familiar column API while adding
                 # confidences and per-frame averages internally.
                 rr.log(
-                    f"{exo_pinhole_path}/keypoints",
+                    f"{exo_pinhole_path}/coco133_uv",
                     Points2DWithConfidence.from_fields(
                         class_ids=0,
                         keypoint_ids=COCO_133_IDS,
@@ -539,7 +539,7 @@ def log_exoego_batch(
                     static=True,
                 )
                 rr.send_columns(
-                    f"{exo_pinhole_path}/keypoints",
+                    f"{exo_pinhole_path}/coco133_uv",
                     indexes=[
                         rr.TimeColumn(
                             timeline,
@@ -619,7 +619,7 @@ def log_exoego_batch(
 
                 # Same helper makes the ego path symmetrical with the exo cameras.
                 rr.log(
-                    f"{pinhole_log_path}/keypoints",
+                    f"{pinhole_log_path}/coco133_uv",
                     Points2DWithConfidence.from_fields(
                         class_ids=0,
                         keypoint_ids=COCO_133_IDS,
@@ -628,7 +628,7 @@ def log_exoego_batch(
                     static=True,
                 )
                 rr.send_columns(
-                    f"{pinhole_log_path}/keypoints",
+                    f"{pinhole_log_path}/coco133_uv",
                     indexes=[
                         rr.TimeColumn(
                             timeline,
