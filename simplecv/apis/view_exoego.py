@@ -672,7 +672,12 @@ class SceneSetupResult(NamedTuple):
     shortest_timestamp: Int[ndarray, "n_frames"]
 
 
-def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, timeline: str) -> SceneSetupResult:
+def setup_scene(
+    exoego_sequence: BaseExoEgoSequence,
+    parent_log_path: Path,
+    timeline: str,
+    recording: rr.RecordingStream | None = None,
+) -> SceneSetupResult:
     """Log static assets, videos, and transforms; derive the shared timeline.
 
     Args:
@@ -710,6 +715,7 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
                     cam_log_path=cam_log_path,
                     image_plane_distance=exo_sequence.image_plane_distance,
                     static=True,
+                    recording=recording,
                 )
                 logged_exo_cameras.add(stream_name)
 
@@ -717,7 +723,9 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
             exo_video_log_path_list.append(video_log_path)
             assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
             # Log video asset which is referred to by frame references.
-            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, video_log_path, timeline=timeline)
+            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
+                video_file, video_log_path, timeline=timeline, recording=recording
+            )
             exo_timestamp_list.append(exo_timestamps_ns)
         exo_video_log_paths = exo_video_log_path_list
 
@@ -738,7 +746,9 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
             ego_video_log_path_list.append(ego_video_log_path)
             assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
             # Log video asset which is referred to by frame references.
-            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_file, ego_video_log_path, timeline=timeline)
+            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
+                video_file, ego_video_log_path, timeline=timeline, recording=recording
+            )
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
 
@@ -754,7 +764,7 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
             trimmed_cam_params: list[PinholeParameters] = ego_cam_param_list[:n_frames_cam]
             # We assume that all cameras share intrinsics across frames
             first_cam: PinholeParameters = trimmed_cam_params[0]
-            cam_log_path: Path = parent_log_path / "ego" / cam_name
+            cam_log_path: Path = parent_log_path / "ego" / str(cam_name)
             pinhole_log_path: Path = cam_log_path / "pinhole"
             rr.log(
                 f"{pinhole_log_path}",
@@ -769,6 +779,7 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
                     image_plane_distance=exoego_sequence.ego_sequence.image_plane_distance,
                 ),
                 static=True,
+                recording=recording,
             )
             batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
                 [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
@@ -786,6 +797,7 @@ def setup_scene(exoego_sequence: BaseExoEgoSequence, parent_log_path: Path, time
                         mat3x3=rearrange(batch_world_R_cam, "f r c -> (f) r c"),
                     ),
                 ],
+                recording=recording,
             )
 
     shortest_timestamp: Int[ndarray, "n_frames"] = min(
