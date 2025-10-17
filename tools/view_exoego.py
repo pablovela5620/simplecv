@@ -7,6 +7,6 @@ if __name__ == "__main__":
     visualize_exo_ego(
         tyro.cli(
             VisualizeConfig,
-            description="Visualize Ego Only dataset",
+            description="Visualize exo/ego datasets and relog static environment meshes when present.",
         )
     )

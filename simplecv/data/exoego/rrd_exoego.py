@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, Int
+from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from rerun_bindings import Recording
@@ -14,7 +14,7 @@ from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.rrd_ego import RRDEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exo.rrd_exo import RRDExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 
 
@@ -71,9 +71,12 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
         # Reuse the exo-side recording cache so we don't reopen the RRD.
-        recording: Recording = getattr(
-            self.exo_sequence, "_recording", rr.dataframe.load_recording(str(rrd_path))
-        )
+        recording_cached: Recording | None = None
+        if self.exo_sequence is not None:
+            recording_cached = getattr(self.exo_sequence, "_recording", None)
+        if recording_cached is None:
+            recording_cached = rr.dataframe.load_recording(str(rrd_path))
+        recording: Recording = recording_cached
         schema: Any = recording.schema()
         timeline: str = getattr(
             self.exo_sequence,
@@ -81,7 +84,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
             self._select_timeline(schema),
         )
 
-        entity_path: str = "world/gt/coco_133"
+        entity_path: str = "world/gt/coco133_xyz"
         view: Any = recording.view(index=timeline, contents=entity_path)
         # Pull both the positions and confidences so we can keep their timestamp alignment.
         table: Any = view.select(
@@ -159,6 +162,80 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         )
         return ExoEgoLabels(xyzc_stack=xyzc_stack)
 
+    def load_environment_mesh(self) -> EnvironmentMesh | None:
+        """Load the static environment mesh from the recording, if any."""
+        rrd_path: Path = self.config.rrd_path
+        if not rrd_path.exists():
+            return None
+
+        recording_cached: Recording | None = None
+        if self.exo_sequence is not None:
+            recording_cached = getattr(self.exo_sequence, "_recording", None)
+        if recording_cached is None:
+            recording_cached = rr.dataframe.load_recording(str(rrd_path))
+        recording: Recording = recording_cached
+        schema: Any = recording.schema()
+        entity_path: str = "world/gt/env_mesh"
+
+        available_components: set[str] = self._available_mesh_components(schema, entity_path)
+        if "Mesh3D:vertex_positions" not in available_components or "Mesh3D:triangle_indices" not in available_components:
+            return None
+
+        selectors: list[str] = [
+            f"{entity_path}:Mesh3D:vertex_positions",
+            f"{entity_path}:Mesh3D:triangle_indices",
+        ]
+        include_normals: bool = "Mesh3D:vertex_normals" in available_components
+        include_colors: bool = "Mesh3D:vertex_colors" in available_components
+        if include_normals:
+            selectors.append(f"{entity_path}:Mesh3D:vertex_normals")
+        if include_colors:
+            selectors.append(f"{entity_path}:Mesh3D:vertex_colors")
+
+        candidate_timelines: list[str | None] = []
+        if self.exo_sequence is not None:
+            candidate_timelines.append(getattr(self.exo_sequence, "_video_timeline", None))
+        candidate_timelines.extend(["video_time", "log_time", "log_tick"])
+
+        examined: set[str | None] = set()
+        for timeline in candidate_timelines:
+            if timeline is None or timeline in examined:
+                continue
+            examined.add(timeline)
+            try:
+                view = recording.view(index=timeline, contents=entity_path)
+            except ValueError:
+                continue
+
+            samples: list[dict[str, Any]] = self._read_mesh_samples_from_view(
+                view=view,
+                timeline=timeline,
+                selectors=selectors,
+            )
+
+            for sample in samples:
+                positions = self._parse_vertex_positions(sample.get(f"{entity_path}:Mesh3D:vertex_positions"))
+                triangles = self._parse_triangle_indices(sample.get(f"{entity_path}:Mesh3D:triangle_indices"))
+                if positions is None or triangles is None:
+                    continue
+
+                normals = self._parse_vertex_normals(
+                    sample.get(f"{entity_path}:Mesh3D:vertex_normals"),
+                    expected_vertices=len(positions),
+                )
+                colors = self._parse_vertex_colors(
+                    sample.get(f"{entity_path}:Mesh3D:vertex_colors"),
+                    expected_vertices=len(positions),
+                )
+
+                return EnvironmentMesh(
+                    vertex_positions=positions,
+                    triangle_indices=triangles,
+                    vertex_normals=normals,
+                    vertex_colors=colors,
+                )
+        return None
+
     def _select_timeline(self, schema: Any) -> str:
         timeline_names: list[str] = []
         try:
@@ -177,6 +254,138 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         if timeline_names:
             return timeline_names[0]
         raise AssertionError("No timeline columns found in recording schema")
+
+    @staticmethod
+    def _available_mesh_components(schema: Any, entity_path: str) -> set[str]:
+        components: set[str] = set()
+        for descriptor in schema.component_columns():
+            entity = getattr(descriptor, "entity_path", None)
+            component = getattr(descriptor, "component", None)
+            if entity is None or component is None:
+                continue
+            entity_str = str(entity).lstrip("/")
+            if entity_str == entity_path:
+                components.add(str(component))
+        return components
+
+    @staticmethod
+    def _parse_vertex_positions(entry: Any) -> Float32[ndarray, "num_vertices 3"] | None:
+        if entry is None:
+            return None
+        positions = np.asarray(entry, dtype=np.float32)
+        positions = np.squeeze(positions)
+        if positions.ndim != 2 or positions.shape[1] != 3:
+            return None
+        return np.ascontiguousarray(positions.astype(np.float32), dtype=np.float32)
+
+    @staticmethod
+    def _parse_triangle_indices(entry: Any) -> Int[ndarray, "num_faces 3"] | None:
+        if entry is None:
+            return None
+        triangles = np.asarray(entry, dtype=np.int32)
+        triangles = np.squeeze(triangles)
+        if triangles.ndim != 2 or triangles.shape[1] != 3:
+            return None
+        return np.ascontiguousarray(triangles.astype(np.int32), dtype=np.int32)
+
+    @staticmethod
+    def _parse_vertex_normals(
+        entry: Any,
+        *,
+        expected_vertices: int,
+    ) -> Float32[ndarray, "num_vertices 3"] | None:
+        if entry is None:
+            return None
+        normals = np.asarray(entry, dtype=np.float32)
+        normals = np.squeeze(normals)
+        if normals.ndim != 2 or normals.shape[1] != 3:
+            return None
+        normals = normals[:expected_vertices]
+        return np.ascontiguousarray(normals.astype(np.float32), dtype=np.float32)
+
+    @staticmethod
+    def _parse_vertex_colors(
+        entry: Any,
+        *,
+        expected_vertices: int,
+    ) -> UInt8[ndarray, "num_vertices 4"] | None:
+        if entry is None:
+            return None
+        colors_np = np.asarray(entry)
+        if colors_np.size == 0:
+            return None
+
+        colors_np = np.squeeze(colors_np)
+
+        if colors_np.ndim == 1:
+            colors_uint32 = colors_np.astype(np.uint32, copy=False)
+            colors = np.empty((colors_uint32.shape[0], 4), dtype=np.uint8)
+            colors[:, 0] = (colors_uint32 >> 24) & 0xFF
+            colors[:, 1] = (colors_uint32 >> 16) & 0xFF
+            colors[:, 2] = (colors_uint32 >> 8) & 0xFF
+            colors[:, 3] = colors_uint32 & 0xFF
+        elif colors_np.ndim == 2 and colors_np.shape[1] in (3, 4):
+            if np.issubdtype(colors_np.dtype, np.floating):
+                try:
+                    max_value = float(np.nanmax(colors_np))
+                except ValueError:
+                    max_value = 1.0
+                if max_value <= 1.0:
+                    colors_np = np.nan_to_num(colors_np, nan=0.0)
+                    colors_np = np.clip(colors_np, 0.0, 1.0) * 255.0
+            colors_np = colors_np.astype(np.uint8, copy=False)
+            if colors_np.shape[1] == 3:
+                alpha = np.full((colors_np.shape[0], 1), 255, dtype=np.uint8)
+                colors = np.concatenate([colors_np, alpha], axis=1)
+            else:
+                colors = colors_np
+        else:
+            return None
+
+        if colors.shape[0] > expected_vertices:
+            colors = colors[:expected_vertices]
+        return np.ascontiguousarray(colors.astype(np.uint8), dtype=np.uint8)
+
+    @staticmethod
+    def _read_mesh_samples_from_view(
+        *,
+        view: Any,
+        timeline: str,
+        selectors: list[str],
+    ) -> list[dict[str, Any]]:
+        samples: list[dict[str, Any]] = []
+
+        try:
+            static_reader = view.select_static(*selectors)
+        except ValueError:
+            static_reader = None
+
+        if static_reader is not None:
+            table_static: Any = static_reader.read_all()
+            if table_static is not None and table_static.num_rows > 0:
+                column_data = {
+                    selector: table_static.column(idx).combine_chunks().to_pylist()
+                    for idx, selector in enumerate(selectors)
+                }
+                for row_idx in range(table_static.num_rows):
+                    samples.append({selector: column_data[selector][row_idx] for selector in selectors})
+                return samples
+
+        try:
+            table_dynamic: Any = view.select(timeline, *selectors).read_all()
+        except ValueError:
+            table_dynamic = None
+
+        if table_dynamic is None or table_dynamic.num_rows == 0:
+            return samples
+
+        column_data = {
+            selector: column.combine_chunks().to_pylist()
+            for selector, column in zip(selectors, table_dynamic.columns[1:], strict=True)
+        }
+        for row_idx in range(table_dynamic.num_rows):
+            samples.append({selector: column_data[selector][row_idx] for selector in selectors})
+        return samples
 
     @classmethod
     def iter_episode_sequences(cls, cfg: RRDExoEgoConfig) -> Generator["RRDSequence", None, None]:
