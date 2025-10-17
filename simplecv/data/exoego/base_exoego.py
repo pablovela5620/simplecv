@@ -3,7 +3,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Generic, Self, TypeVar
 
-from jaxtyping import Float
+from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
@@ -28,6 +28,14 @@ class ExoEgoLabels:
     mano_stack: ManoStack | None = None
 
 
+@dataclass
+class EnvironmentMesh:
+    vertex_positions: Float32[ndarray, "num_vertices 3"]
+    triangle_indices: Int[ndarray, "num_faces 3"]
+    vertex_normals: Float32[ndarray, "num_vertices 3"] | None = None
+    vertex_colors: UInt8[ndarray, "num_vertices 4"] | None = None
+
+
 class BaseExoEgoSequence(ABC, Generic[ConfigT]):
     config: ConfigT
 
@@ -40,6 +48,7 @@ class BaseExoEgoSequence(ABC, Generic[ConfigT]):
         self.exo_sequence: BaseExoSequence[ConfigT] | None = self._build_exo()
         if self.config.load_labels:
             self._exoego_labels: ExoEgoLabels | None = self.load_labels()
+        self._environment_mesh: EnvironmentMesh | None = self.load_environment_mesh()
 
     def __len__(self) -> int:
         # Return the length based on the first camera's pinhole parameters list
@@ -70,6 +79,10 @@ class BaseExoEgoSequence(ABC, Generic[ConfigT]):
     def load_labels(self) -> ExoEgoLabels | None:
         """Load labels for the sequence, if applicable."""
 
+    def load_environment_mesh(self) -> EnvironmentMesh | None:
+        """Optional hook for loading a static environment mesh."""
+        return None
+
     @classmethod
     @abstractmethod
     def iter_episode_sequences(cls: type[Self], cfg: ConfigT) -> Generator[Self, None, None]: ...
@@ -83,3 +96,8 @@ class BaseExoEgoSequence(ABC, Generic[ConfigT]):
     def exoego_labels(self) -> ExoEgoLabels | None:
         """Return the labels for the sequence, if available."""
         return getattr(self, "_exoego_labels", None)
+
+    @property
+    def environment_mesh(self) -> EnvironmentMesh | None:
+        """Return the static environment mesh, if available."""
+        return getattr(self, "_environment_mesh", None)
