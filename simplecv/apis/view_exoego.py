@@ -186,6 +186,33 @@ def filter_out_of_bounds_keypoints(
     return filtered_uv
 
 
+def visibility_mask_from_depth(
+    depth: Float[ndarray, "n_frames n_joints"],
+) -> tuple[np.ndarray, float]:
+    """Convert signed depths into a visibility mask.
+
+    Dataset conventions differ (some cameras look along ``-Z``), so we infer the appropriate
+    sign per tensor by looking at the average finite depth value.
+
+    Args:
+        depth: Projected depth per frame/keypoint.
+
+    Returns:
+        A tuple ``(mask, sign)`` where ``mask`` is ``True`` when points lie in front of the
+        camera, and ``sign`` captures the orientation that was inferred from the data.
+    """
+
+    depth_valid: np.ndarray = depth[np.isfinite(depth)]
+    if depth_valid.size == 0:
+        depth_sign: float = 1.0
+    else:
+        depth_sign = float(np.sign(depth_valid.mean()))
+        if depth_sign == 0.0:
+            depth_sign = 1.0
+    visibility: np.ndarray = depth * depth_sign > 0.0
+    return visibility, depth_sign
+
+
 def compute_vertex_normals_batch(
     verts: Float32[ndarray, "n_frames n_verts 3"],
     faces: Int[ndarray, "n_faces 3"],
@@ -425,62 +452,61 @@ def log_exoego_batch(
     ##########################
     # batch send all 3D data #
     ##########################
-    if exoego_labels is not None:
-        ### Send XYZ coordinates
-        xyzc_stack_all: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
-        n_frames_labels: int = len(xyzc_stack_all)
-        n_frames_timestamps: int = len(shortest_timestamp)
-        n_frames_total: int = min(n_frames_labels, n_frames_timestamps)
-        xyzc_stack: Float[ndarray, "n_frames 133 4"] = xyzc_stack_all[0:n_frames_total]
-        xyz_stack: Float[ndarray, "n_frames 133 3"] = xyzc_stack[:, :, :3]
-        xyz_hom_stack: Float[ndarray, "n_frames 133 4"] = np.concatenate(
-            [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
+    ### Send XYZ coordinates
+    xyzc_stack_all: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
+    n_frames_labels: int = len(xyzc_stack_all)
+    n_frames_timestamps: int = len(shortest_timestamp)
+    n_frames_total: int = min(n_frames_labels, n_frames_timestamps)
+    xyzc_stack: Float[ndarray, "n_frames 133 4"] = xyzc_stack_all[0:n_frames_total]
+    xyz_stack: Float[ndarray, "n_frames 133 3"] = xyzc_stack[:, :, :3]
+    xyz_hom_stack: Float[ndarray, "n_frames 133 4"] = np.concatenate(
+        [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
+    )
+    conf_stack: Float[ndarray, "n_frames 133"] = xyzc_stack[:, :, 3]
+    colors: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
+        confidence_scores=conf_stack[..., np.newaxis]
+    )
+    if n_frames_total > 0:
+        positions_flat: Float[ndarray, "n_total 3"] = rearrange(
+            xyz_stack,
+            "n_frames kpts dim -> (n_frames kpts) dim",
+        ).astype(np.float32)
+        colors_flat: UInt8[ndarray, "n_total 3"] = rearrange(
+            colors,
+            "n_frames kpts dim -> (n_frames kpts) dim",
         )
-        conf_stack: Float[ndarray, "n_frames 133"] = xyzc_stack[:, :, 3]
-        colors: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
-            confidence_scores=conf_stack[..., np.newaxis]
-        )
-        if n_frames_total > 0:
-            positions_flat: Float[ndarray, "n_total 3"] = rearrange(
-                xyz_stack,
-                "n_frames kpts dim -> (n_frames kpts) dim",
-            ).astype(np.float32)
-            colors_flat: UInt8[ndarray, "n_total 3"] = rearrange(
-                colors,
-                "n_frames kpts dim -> (n_frames kpts) dim",
-            )
-            confidences_flat: Float32[ndarray, "n_total"] = rearrange(
-                conf_stack,
-                "n_frames kpts -> (n_frames kpts)",
-            ).astype(np.float32)
-            n_keypoints: int = len(COCO_133_IDS)
-            keypoint_lengths: Int[ndarray, "n_frames"] = np.full(n_frames_total, n_keypoints, dtype=np.int32)
+        confidences_flat: Float32[ndarray, "n_total"] = rearrange(
+            conf_stack,
+            "n_frames kpts -> (n_frames kpts)",
+        ).astype(np.float32)
+        n_keypoints: int = len(COCO_133_IDS)
+        keypoint_lengths: Int[ndarray, "n_frames"] = np.full(n_frames_total, n_keypoints, dtype=np.int32)
 
-            rr.log(
-                f"{gt_root_path}/coco133_xyz",
-                Points3DWithConfidence.from_fields(
-                    class_ids=0,
-                    keypoint_ids=COCO_133_IDS,
-                    show_labels=False,
-                ),
-                static=True,
-            )
-            rr.send_columns(
-                f"{gt_root_path}/coco133_xyz",
-                indexes=[
-                    rr.TimeColumn(
-                        timeline,
-                        duration=1e-9 * shortest_timestamp[0:n_frames_total],
-                    )
-                ],
-                columns=[
-                    *Points3DWithConfidence.columns(
-                        positions=positions_flat,
-                        colors=colors_flat,
-                        confidences=confidences_flat,
-                    ).partition(keypoint_lengths),
-                ],
-            )
+        rr.log(
+            f"{gt_root_path}/coco133_xyz",
+            Points3DWithConfidence.from_fields(
+                class_ids=0,
+                keypoint_ids=COCO_133_IDS,
+                show_labels=False,
+            ),
+            static=True,
+        )
+        rr.send_columns(
+            f"{gt_root_path}/coco133_xyz",
+            indexes=[
+                rr.TimeColumn(
+                    timeline,
+                    duration=1e-9 * shortest_timestamp[0:n_frames_total],
+                )
+            ],
+            columns=[
+                *Points3DWithConfidence.columns(
+                    positions=positions_flat,
+                    colors=colors_flat,
+                    confidences=confidences_flat,
+                ).partition(keypoint_lengths),
+            ],
+        )
 
         ############################
         # batch send all MANO data #
@@ -521,16 +547,7 @@ def log_exoego_batch(
                 depth_exo: Float[ndarray, "n_frames 133"] = np.einsum(
                     "fnd,d->fn", xyz_hom_stack, proj_rows_exo[exo_cam_idx]
                 )
-                depth_exo_valid: np.ndarray = depth_exo[np.isfinite(depth_exo)]
-                if depth_exo_valid.size == 0:
-                    depth_sign_exo: float = 1.0
-                else:
-                    # Assembly101 uses a left-handed camera convention, so infer the
-                    # correct sign from the data rather than assuming positive-Z.
-                    depth_sign_exo = float(np.sign(depth_exo_valid.mean()))
-                    if depth_sign_exo == 0.0:
-                        depth_sign_exo = 1.0
-                visibility_mask_exo: np.ndarray = depth_exo * depth_sign_exo > 0.0
+                visibility_mask_exo, _ = visibility_mask_from_depth(depth_exo)
                 uv_exo[~visibility_mask_exo] = np.nan
                 uv_exo = filter_out_of_bounds_keypoints(uv_exo, exo_cam, margin_percentage=0.0)
                 # filter batch with invalid values
@@ -637,15 +654,7 @@ def log_exoego_batch(
             depth_ego: Float[ndarray, "n_frames 133"] = np.einsum(
                 "fnd,fd->fn", xyz_hom_trim, proj_rows_ego
             )
-            depth_ego_valid: np.ndarray = depth_ego[np.isfinite(depth_ego)]
-            if depth_ego_valid.size == 0:
-                depth_sign_ego: float = 1.0
-            else:
-                # Derive the visibility sign from the projected depth samples.
-                depth_sign_ego = float(np.sign(depth_ego_valid.mean()))
-                if depth_sign_ego == 0.0:
-                    depth_sign_ego = 1.0
-            visibility_mask_ego: np.ndarray = depth_ego * depth_sign_ego > 0.0
+            visibility_mask_ego, _ = visibility_mask_from_depth(depth_ego)
             uv_ego_stack[~visibility_mask_ego] = np.nan
             uv_ego_stack = filter_out_of_bounds_keypoints(
                 uv_ego_stack, ego_cam_param_list[0], margin_percentage=0.0
@@ -908,3 +917,38 @@ def visualize_exo_ego(config: VisualizeConfig):
         )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
+def visibility_mask_from_projection(
+    xyz_hom: Float[ndarray, "n_frames n_joints 4"],
+    projection_rows: Float[ndarray, "n_views 4"],
+) -> tuple[Float[ndarray, "n_frames n_joints"], Float[ndarray, "n_views"]]:
+    """Derive per-frame visibility masks by inspecting projected depths.
+
+    Args:
+        xyz_hom: Homogeneous 3D keypoints (w=1) expressed in the world frame.
+        projection_rows: Third rows extracted from ``P`` matrices (``[0, 0, 1, 0]``-like).
+
+    Returns:
+        A tuple ``(visibility, depth_signs)`` where ``visibility`` is ``True`` when the
+        projected depth is positive in that camera's convention, and ``depth_signs`` records the
+        per-view sign that was inferred from the data.
+    """
+
+    depth: Float[ndarray, "n_frames n_views n_joints"] = np.einsum(
+        "fjd,vd->fvj", xyz_hom, projection_rows
+    )
+    visibility: np.ndarray = np.zeros_like(depth, dtype=bool)
+    depth_signs: Float[ndarray, "n_views"] = np.ones(projection_rows.shape[0], dtype=float)
+
+    for view_idx in range(projection_rows.shape[0]):
+        depth_view: Float[ndarray, "n_frames n_joints"] = depth[:, view_idx, :]
+        depth_valid: np.ndarray = depth_view[np.isfinite(depth_view)]
+        if depth_valid.size == 0:
+            depth_sign: float = 1.0
+        else:
+            depth_sign = float(np.sign(depth_valid.mean()))
+            if depth_sign == 0.0:
+                depth_sign = 1.0
+        depth_signs[view_idx] = depth_sign
+        visibility[:, view_idx, :] = depth_view * depth_sign > 0.0
+
+    return visibility, depth_signs
