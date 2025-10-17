@@ -81,7 +81,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
             self._select_timeline(schema),
         )
 
-        entity_path: str = "world/gt/coco_133"
+        entity_path: str = "world/gt/coco133_xyz"
         view: Any = recording.view(index=timeline, contents=entity_path)
         # Pull both the positions and confidences so we can keep their timestamp alignment.
         table: Any = view.select(

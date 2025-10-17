@@ -4,7 +4,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 
 import numpy as np
 import rerun as rr
@@ -165,20 +165,25 @@ def filter_out_of_bounds_keypoints(
         Float[np.ndarray, "... 2"]: Input coordinates with out-of-bounds values
             replaced by ``NaN`` so Rerun elides those samples during rendering.
     """
-    width: int | float = camera_params.intrinsics.width
-    height: int | float = camera_params.intrinsics.height
+    # Some loaders leave width/height unset; fall back to doubling the principal point.
+    intrinsic_width: int | None = camera_params.intrinsics.width
+    intrinsic_height: int | None = camera_params.intrinsics.height
+    width: float = float(intrinsic_width if intrinsic_width is not None else 2 * camera_params.intrinsics.cx)
+    height: float = float(intrinsic_height if intrinsic_height is not None else 2 * camera_params.intrinsics.cy)
     margin_x: float = margin_percentage * width
     margin_y: float = margin_percentage * height
 
-    uv_stack[..., 0] = np.where(
-        (uv_stack[..., 0] < -margin_x) | (uv_stack[..., 0] > width + margin_x), np.nan, uv_stack[..., 0]
+    filtered_uv: Float[ndarray, "... 2"] = uv_stack.copy()
+
+    filtered_uv[..., 0] = np.where(
+        (filtered_uv[..., 0] < -margin_x) | (filtered_uv[..., 0] > width + margin_x), np.nan, filtered_uv[..., 0]
     )
-    uv_stack[..., 1] = np.where(
-        (uv_stack[..., 1] < -margin_y) | (uv_stack[..., 1] > height + margin_y),
+    filtered_uv[..., 1] = np.where(
+        (filtered_uv[..., 1] < -margin_y) | (filtered_uv[..., 1] > height + margin_y),
         np.nan,
-        uv_stack[..., 1],
+        filtered_uv[..., 1],
     )
-    return uv_stack
+    return filtered_uv
 
 
 def compute_vertex_normals_batch(
@@ -256,12 +261,16 @@ def log_mano_batch(
         None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
             effects.
     """
+    exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
+    if exoego_labels is None:
+        return
+
     mano_mesh_color_rgba_map: dict[Literal["left", "right"], tuple[int, int, int, int]] = {
         "right": (255, 0, 0, 255),
         "left": (0, 0, 255, 255),
     }
 
-    mano_stack: ManoStack | None = exoego_sequence.exoego_labels.mano_stack
+    mano_stack: ManoStack | None = exoego_labels.mano_stack
     if mano_stack is not None and log_mano:
         from simplecv.ops.mano.mano_np import MANOLayerNP
 
@@ -501,11 +510,29 @@ def log_exoego_batch(
             uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = proj_3d_vectorized(
                 xyz_hom=xyz_hom_stack, P=Pall_exo
             )
+            proj_rows_exo: Float[ndarray, "n_views 4"] = Pall_exo[:, 2, :]
             for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
                 exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
                 exo_pinhole_path: Path = exo_cam_path / "pinhole"
                 uv_exo: Float[ndarray, "n_frames 133 2"] = uv_raw_stack[:, exo_cam_idx, :, :].copy()
-                uv_exo = filter_out_of_bounds_keypoints(uv_exo, exo_cam)
+                # The third row of the projection matrix encodes the depth equation. Multiply it with the
+                # homogeneous xyz (einsum collapses the last axis) to recover the signed distance in camera space.
+                # Depth is necessary so we can drop keypoints that land behind the sensor.
+                depth_exo: Float[ndarray, "n_frames 133"] = np.einsum(
+                    "fnd,d->fn", xyz_hom_stack, proj_rows_exo[exo_cam_idx]
+                )
+                depth_exo_valid: np.ndarray = depth_exo[np.isfinite(depth_exo)]
+                if depth_exo_valid.size == 0:
+                    depth_sign_exo: float = 1.0
+                else:
+                    # Assembly101 uses a left-handed camera convention, so infer the
+                    # correct sign from the data rather than assuming positive-Z.
+                    depth_sign_exo = float(np.sign(depth_exo_valid.mean()))
+                    if depth_sign_exo == 0.0:
+                        depth_sign_exo = 1.0
+                visibility_mask_exo: np.ndarray = depth_exo * depth_sign_exo > 0.0
+                uv_exo[~visibility_mask_exo] = np.nan
+                uv_exo = filter_out_of_bounds_keypoints(uv_exo, exo_cam, margin_percentage=0.0)
                 # filter batch with invalid values
                 n_frames_cam: int = len(uv_exo)
                 if n_frames_cam == 0:
@@ -514,12 +541,15 @@ def log_exoego_batch(
                     uv_exo,
                     "n_frames kpts dim -> (n_frames kpts) dim",
                 ).astype(np.float32)
-                colors_cam: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam]
+                colors_cam: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam].copy()
+                conf_cam: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam].copy()
+                invalid_mask_exo: np.ndarray = ~visibility_mask_exo[0:n_frames_cam]
+                conf_cam[invalid_mask_exo] = 0.0
+                colors_cam[invalid_mask_exo] = 0
                 colors_flat_2d: UInt8[ndarray, "n_total 3"] = rearrange(
                     colors_cam,
                     "n_frames kpts dim -> (n_frames kpts) dim",
                 )
-                conf_cam: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam]
                 confidences_flat_2d: Float32[ndarray, "n_total"] = rearrange(
                     conf_cam,
                     "n_frames kpts -> (n_frames kpts)",
@@ -574,15 +604,21 @@ def log_exoego_batch(
             Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
                 [pinhole.projection_matrix for pinhole in ego_cam_param_list]
             )
-            uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((len(xyz_hom_stack), 133, 2))
+            # Align coordinate, confidence, and camera-parameter buffers when their lengths differ.
+            n_frames_total: int = min(len(xyz_hom_stack), len(ego_cam_param_list))
+            xyz_hom_trim: Float[ndarray, "n_frames 133 4"] = xyz_hom_stack[:n_frames_total]
+            conf_trim: Float[ndarray, "n_frames 133"] = conf_stack[:n_frames_total]
+            color_trim: UInt8[ndarray, "n_frames 133 3"] = colors[:n_frames_total]
+
+            uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((n_frames_total, 133, 2))
 
             # Process in batches to balance memory usage and performance
             batch_size = min(100, len(xyz_hom_stack))  # Adjust based on available memory
-            for start_idx in range(0, len(xyz_hom_stack), batch_size):
-                end_idx: int = min(start_idx + batch_size, len(xyz_hom_stack))
+            for start_idx in range(0, n_frames_total, batch_size):
+                end_idx: int = min(start_idx + batch_size, n_frames_total)
 
                 # Get batch data
-                xyz_hom_batch = xyz_hom_stack[start_idx:end_idx]  # (batch_frames, 133, 4)
+                xyz_hom_batch = xyz_hom_trim[start_idx:end_idx]  # (batch_frames, 133, 4)
                 P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
 
                 # Use the vectorized projection function on the batch
@@ -597,19 +633,38 @@ def log_exoego_batch(
                 # Store results
                 uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
 
-            uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, ego_cam_param_list[0])
+            proj_rows_ego: Float[ndarray, "n_frames 4"] = Pall[:n_frames_total, 2, :]
+            depth_ego: Float[ndarray, "n_frames 133"] = np.einsum(
+                "fnd,fd->fn", xyz_hom_trim, proj_rows_ego
+            )
+            depth_ego_valid: np.ndarray = depth_ego[np.isfinite(depth_ego)]
+            if depth_ego_valid.size == 0:
+                depth_sign_ego: float = 1.0
+            else:
+                # Derive the visibility sign from the projected depth samples.
+                depth_sign_ego = float(np.sign(depth_ego_valid.mean()))
+                if depth_sign_ego == 0.0:
+                    depth_sign_ego = 1.0
+            visibility_mask_ego: np.ndarray = depth_ego * depth_sign_ego > 0.0
+            uv_ego_stack[~visibility_mask_ego] = np.nan
+            uv_ego_stack = filter_out_of_bounds_keypoints(
+                uv_ego_stack, ego_cam_param_list[0], margin_percentage=0.0
+            )
             n_frames_cam: int = len(uv_ego_stack)
             if n_frames_cam > 0:
                 positions_flat_ego: Float[ndarray, "n_total 2"] = rearrange(
                     uv_ego_stack,
                     "n_frames kpts dim -> (n_frames kpts) dim",
                 ).astype(np.float32)
-                colors_ego: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam]
+                colors_ego: UInt8[ndarray, "n_frames kpts 3"] = color_trim[0:n_frames_cam].copy()
+                conf_ego: Float[ndarray, "n_frames kpts"] = conf_trim[0:n_frames_cam].copy()
+                invalid_mask_ego: np.ndarray = ~visibility_mask_ego[0:n_frames_cam]
+                conf_ego[invalid_mask_ego] = 0.0
+                colors_ego[invalid_mask_ego] = 0
                 colors_flat_ego: UInt8[ndarray, "n_total 3"] = rearrange(
                     colors_ego,
                     "n_frames kpts dim -> (n_frames kpts) dim",
                 )
-                conf_ego: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam]
                 confidences_flat_ego: Float32[ndarray, "n_total"] = rearrange(
                     conf_ego,
                     "n_frames kpts -> (n_frames kpts)",
@@ -754,7 +809,9 @@ def setup_scene(
 
         # log the ego cameras and their trajectories
         shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
-        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
+        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = cast(
+            dict[CamNameType, list[PinholeParameters]], ego_sequence.ego_cam_dict
+        )
         for cam_name, ego_cam_param_list in ego_cam_dict.items():
             if not ego_cam_param_list:
                 continue
@@ -776,7 +833,7 @@ def setup_scene(
                         rr.ViewCoordinates,
                         first_cam.intrinsics.camera_conventions,
                     ),
-                    image_plane_distance=exoego_sequence.ego_sequence.image_plane_distance,
+                    image_plane_distance=ego_sequence.image_plane_distance,
                 ),
                 static=True,
                 recording=recording,

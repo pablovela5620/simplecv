@@ -87,12 +87,16 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         assert streams, "No ego camera streams found in recording"
 
         ego_cam_dict: dict[str, list[PinholeParameters]] = {}
+        calibrated_streams: list[_RRDEgoCameraStream] = []
         for stream in streams:
             try:
                 intrinsics: Intrinsics = self._load_intrinsics(recording, stream.pinhole_entity, self._video_timeline)
             except ValueError as exc:
                 warnings.warn(
-                    f"Skipping ego camera '{stream.name}' due to missing metadata: {exc}",
+                    (
+                        f"\033[33mSkipping ego camera '{stream.name}' due to missing metadata: {exc}. "
+                        "Video frames are still remuxed but remain unlogged until intrinsics are available.\033[0m"
+                    ),
                     stacklevel=2,
                 )
                 continue
@@ -109,6 +113,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 ego_cam_dict[stream.name] = [
                     PinholeParameters(name=stream.name, intrinsics=intrinsics, extrinsics=extrinsics_default)
                 ]
+                calibrated_streams.append(stream)
                 continue
 
             cam_params: list[PinholeParameters] = []
@@ -117,7 +122,12 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 rotation_mat: Float32[ndarray, "3 3"] = rotations[idx]
                 extrinsics = Extrinsics(cam_R_world=rotation_mat, cam_t_world=translation_vec)
                 cam_params.append(PinholeParameters(name=stream.name, intrinsics=intrinsics, extrinsics=extrinsics))
-            ego_cam_dict[stream.name] = cam_params
+            if cam_params:
+                ego_cam_dict[stream.name] = cam_params
+                calibrated_streams.append(stream)
+
+        if calibrated_streams:
+            self._camera_streams = calibrated_streams
         return cast(dict[CamNameType, list[PinholeParameters]], ego_cam_dict)
 
     def align_cams_and_videos(
