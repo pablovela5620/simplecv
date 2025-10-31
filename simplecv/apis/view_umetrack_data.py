@@ -3,16 +3,17 @@ import warnings
 from argparse import ArgumentParser
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import cv2
 import numpy as np
 import rerun as rr
-from jaxtyping import Float, UInt8
+import rerun.blueprint as rrb
+from jaxtyping import Float32, UInt8
 from rerun import AnnotationInfo, ClassDescription
 from tqdm import tqdm
 
-from simplecv.umetrack_temp.camera_models import FisheyeCameraParameter
+from simplecv.umetrack_temp.camera_models import FisheyeCameraParameter, PinholeCameraParameter
 from simplecv.umetrack_temp.cameras import Camera
 from simplecv.umetrack_temp.generic_hand_model import (
     HAND_CONNECTIONS,
@@ -33,6 +34,12 @@ from simplecv.video_io import VideoReader
 
 HAND_TYPE = ("left", "right")
 KEYPOINT_IDS = np.array([landmark.value for landmark in LANDMARK], dtype=np.uint16)
+CAMERA_PANEL_ORDER: list[tuple[str, int]] = [
+    ("BL", 0),
+    ("BR", 1),
+    ("TL", 2),
+    ("TR", 3),
+]
 
 
 class DataStream:
@@ -50,17 +57,17 @@ class DataStream:
         # camera intrinsics
         self.fisheye_cameras = create_cameras(annotation["cameras"])
         # camera extrinsics (slam pose of each camera)
-        self.world_T_cam_all: Float[np.ndarray, "num_frames num_cameras 4 4"] = np.array(
-            annotation["camera_to_world_transforms"]
+        self.world_T_cam_all: Float32[np.ndarray, "num_frames num_cameras 4 4"] = np.asarray(
+            annotation["camera_to_world_transforms"], dtype=np.float32
         )
         self.hand_model = load_hand_model_from_dict(annotation["hand_model"])
         self.hand_pose_labels = HandPoseLabels(
-            camera_angles=annotation["camera_angles"],
+            camera_angles=[float(angle) for angle in annotation["camera_angles"]],
             camera_to_world_transforms=self.world_T_cam_all,
             hand_model=self.hand_model,
-            joint_angles=np.array(annotation["joint_angles"]),
-            wrist_transforms=np.array(annotation["wrist_transforms"]),
-            hand_confidences=np.array(annotation["hand_confidences"]),
+            joint_angles=np.asarray(annotation["joint_angles"], dtype=np.float32),
+            wrist_transforms=np.asarray(annotation["wrist_transforms"], dtype=np.float32),
+            hand_confidences=np.asarray(annotation["hand_confidences"], dtype=np.float32),
         )
         self._warned_singular_pose = False
 
@@ -114,9 +121,13 @@ class DataStream:
             for hand_idx in range(0, 2):
                 if self.hand_pose_labels.hand_confidences[frame_idx, hand_idx] > 0:
                     gt_tracking[hand_idx] = SingleHandPose(
-                        joint_angles=self.hand_pose_labels.joint_angles[frame_idx, hand_idx],
-                        wrist_xform=self.hand_pose_labels.wrist_transforms[frame_idx, hand_idx],
-                        hand_confidence=self.hand_pose_labels.hand_confidences[frame_idx, hand_idx],
+                        joint_angles=self.hand_pose_labels.joint_angles[frame_idx, hand_idx].astype(
+                            np.float32, copy=False
+                        ),
+                        wrist_xform=self.hand_pose_labels.wrist_transforms[frame_idx, hand_idx].astype(
+                            np.float32, copy=False
+                        ),
+                        hand_confidence=float(self.hand_pose_labels.hand_confidences[frame_idx, hand_idx]),
                     )
 
             # set camera extrinsics as they change per frame (slam tracking)
@@ -157,8 +168,10 @@ def create_cameras(intri_annotations: list[dict[str, Any]]) -> list[Camera]:
 
 def log_camera(
     camera_log_path: str,
+    *,
     image: UInt8[np.ndarray, "image_h image_w 3"],
-    cam_params: FisheyeCameraParameter,
+    cam_params: FisheyeCameraParameter | PinholeCameraParameter,
+    image_plane_distance: float,
     image_path_name: str = "image",
 ) -> None:
     """
@@ -170,6 +183,7 @@ def log_camera(
         rr.Pinhole(
             image_from_camera=cam_params.intrinsic33(),
             resolution=(cam_params.width, cam_params.height),
+            image_plane_distance=image_plane_distance,
         ),
     )
     rr.log(
@@ -181,7 +195,7 @@ def log_camera(
         ),
     )
     resized_image = resize_image_if_needed(image, cam_params.width, cam_params.height)
-    rr.log(image_log_path, rr.Image(resized_image))
+    rr.log(image_log_path, rr.Image(resized_image).compress(jpeg_quality=90))
 
 
 def resize_image_if_needed(
@@ -214,6 +228,69 @@ def setup_logging(log_path: str = "world") -> str:
     return log_path
 
 
+def create_umetrack_view(
+    log_path: str = "world", camera_filter: list[Literal["TL", "TR", "BL", "BR"]] | None = None
+) -> None:
+    """Send a Rerun blueprint tailored for the UmeTrack visualization layout."""
+
+    if camera_filter is None:
+        camera_filter = ["TL", "BR"]
+    spatial_view = rrb.Spatial3DView(origin=log_path, name="3D View")
+
+    camera_rows: list[rrb.ContainerLike] = []
+    for display_name, camera_idx in CAMERA_PANEL_ORDER:
+        if display_name not in camera_filter:
+            continue
+        crop_views = rrb.Vertical(
+            contents=[
+                rrb.Spatial2DView(
+                    origin=f"{log_path}/recropped_camera_left_{camera_idx}/crop_left_{camera_idx}",
+                    contents=[
+                        "+ $origin/**",
+                    ],
+                    name=f"{display_name} Left Crop",
+                ),
+                rrb.Spatial2DView(
+                    origin=f"{log_path}/recropped_camera_right_{camera_idx}/crop_right_{camera_idx}",
+                    contents=[
+                        "+ $origin/**",
+                    ],
+                    name=f"{display_name} Right Crop",
+                ),
+            ],
+            row_shares=[1, 1],
+            name=f"{display_name} Crops",
+        )
+
+        camera_view = rrb.Spatial2DView(
+            origin=f"{log_path}/camera_{camera_idx}/image_{camera_idx}",
+            contents=[
+                "+ $origin/**",
+            ],
+            name=f"{display_name} Camera",
+        )
+
+        camera_rows.append(
+            rrb.Horizontal(
+                contents=[crop_views, camera_view],
+                column_shares=[1, 2],
+                name=f"{display_name} Panel",
+            )
+        )
+
+    right_column = rrb.Vertical(contents=camera_rows, row_shares=[1] * len(camera_rows), name="Camera Panels")
+
+    blueprint = rrb.Blueprint(
+        rrb.Horizontal(
+            contents=[spatial_view, right_column],
+            column_shares=[3, 2],
+            name="UmeTrack Layout",
+        )
+    )
+
+    rr.send_blueprint(blueprint)
+
+
 def main(data_path: Path, sequence_id: int = 1) -> None:
     if not data_path.exists():
         raise FileNotFoundError(data_path)
@@ -224,6 +301,7 @@ def main(data_path: Path, sequence_id: int = 1) -> None:
     camera_angles = datastream.hand_pose_labels.camera_angles
 
     log_path = setup_logging()
+    create_umetrack_view(log_path)
 
     for frame_idx, (multi_view_images, _multi_world_T_cam, hand_pose_dict) in tqdm(
         enumerate(datastream), total=len(datastream), desc="Processing frames"
@@ -274,10 +352,16 @@ def main(data_path: Path, sequence_id: int = 1) -> None:
                     )
                     crop = warp_image_between_cameras(current_cam, perspective_cam, current_image)
 
-                    cropped_cam_log_path = f"{log_path}/recropped_camera_{hand_type}_{cam_idx}"
-                    crop_log_path_name = f"crop_{hand_type}_{cam_idx}"
+                    cropped_cam_log_path: str = f"{log_path}/recropped_camera_{hand_type}_{cam_idx}"
+                    crop_log_path_name: str = f"crop_{hand_type}_{cam_idx}"
 
-                    log_camera(cropped_cam_log_path, crop, perspective_cam_params, image_path_name=crop_log_path_name)
+                    log_camera(
+                        cropped_cam_log_path,
+                        image=crop,
+                        cam_params=perspective_cam_params,
+                        image_plane_distance=25.0,
+                        image_path_name=crop_log_path_name,
+                    )
                     uv_cropped = project_points(landmark, perspective_cam)
                     rr.log(
                         f"{cropped_cam_log_path}/{crop_log_path_name}/{hand_type}_landmark",
@@ -291,7 +375,13 @@ def main(data_path: Path, sequence_id: int = 1) -> None:
             cam_log_path = f"{log_path}/camera_{camera_idx}"
             img_log_path_name = f"image_{camera_idx}"
             current_image = multi_view_images[camera_idx]
-            log_camera(cam_log_path, current_image, camera.camera_parameters, img_log_path_name)
+            log_camera(
+                cam_log_path,
+                image=current_image,
+                cam_params=camera.camera_parameters,
+                image_plane_distance=25.0,
+                image_path_name=img_log_path_name,
+            )
             for hand_idx, hand_type in enumerate(HAND_TYPE):
                 if landmarks_dict[hand_type] is not None:
                     uv = project_points(landmarks_dict[hand_type], camera)

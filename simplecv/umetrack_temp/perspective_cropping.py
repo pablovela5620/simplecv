@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import torch
-from jaxtyping import Float, UInt8
+from jaxtyping import Float32, UInt8
 from scipy.spatial.transform import Rotation
 
 from simplecv.umetrack_temp.camera_models import PinholeCameraParameter
@@ -35,7 +35,7 @@ def normalized(vector: np.ndarray, axis: int = -1, epsilon: float = 5.43e-20) ->
     return normalized_vector
 
 
-def skew_matrix(vector: Float[np.ndarray, "3"]) -> Float[np.ndarray, "3 3"]:
+def skew_matrix(vector: Float32[np.ndarray, "3"]) -> Float32[np.ndarray, "3 3"]:
     """
     Computes the skew-symmetric matrix of a 3D vector.
 
@@ -57,7 +57,7 @@ def skew_matrix(vector: Float[np.ndarray, "3"]) -> Float[np.ndarray, "3 3"]:
     return skew_symmetric_matrix
 
 
-def from_two_vectors(vector_a: Float[np.ndarray, "3"], vector_b: Float[np.ndarray, "3"]) -> Float[np.ndarray, "3 3"]:
+def from_two_vectors(vector_a: Float32[np.ndarray, "3"], vector_b: Float32[np.ndarray, "3"]) -> Float32[np.ndarray, "3 3"]:
     """
     Computes a 3x3 rotation matrix that rotates vector `vector_a` towards vector `vector_b`.
 
@@ -83,23 +83,29 @@ def from_two_vectors(vector_a: Float[np.ndarray, "3"], vector_b: Float[np.ndarra
     skew_symmetric_matrix = skew_matrix(perpendicular_vector)
 
     # Compute the rotation matrix as a sum of three terms
-    identity_matrix = np.eye(3, 3)
+    dtype = normalized_vector_a.dtype
+    identity_matrix = np.eye(3, dtype=dtype)
     rotation_term_1 = skew_symmetric_matrix
     rotation_term_2 = (
         np.matmul(skew_symmetric_matrix, skew_symmetric_matrix)
         * (1 - dot_product)
-        / (max(perpendicular_vector_norm * perpendicular_vector_norm, 1e-15))
+        / (
+            max(
+                perpendicular_vector_norm * perpendicular_vector_norm,
+                np.array(1e-15, dtype=dtype),
+            )
+        )
     )
-    rotation_matrix = identity_matrix + rotation_term_1 + rotation_term_2
+    rotation_matrix = (identity_matrix + rotation_term_1 + rotation_term_2).astype(dtype, copy=False)
 
     return rotation_matrix
 
 
 def make_look_at_matrix(
-    origin_cam_T_world: Float[np.ndarray, "4 4"],
-    center: Float[np.ndarray, "3"],
+    origin_cam_T_world: Float32[np.ndarray, "4 4"],
+    center: Float32[np.ndarray, "3"],
     camera_angle: float = 0,
-) -> Float[np.ndarray, "4 4"]:
+) -> Float32[np.ndarray, "4 4"]:
     """
     Computes a 4x4 transformation matrix that transforms points from world coordinates to camera coordinates.
 
@@ -111,33 +117,37 @@ def make_look_at_matrix(
     Returns:
         A 4x4 numpy array representing the transformation matrix that transforms points from world coordinates to camera coordinates.
     """
+    origin_cam_T_world = origin_cam_T_world.astype(np.float32, copy=False)
+    center = center.astype(np.float32, copy=False)
+
     # Compute the center of the camera in camera coordinates
-    center_hom = np.append(center, 1)
+    center_hom = np.concatenate((center, np.array([1.0], dtype=np.float32)))
     center_cam_hom = origin_cam_T_world @ center_hom
     center_cam = center_cam_hom[0:3] / center_cam_hom[3]
 
     # Compute the direction of the camera in camera coordinates
     z_dir_cam = center_cam / np.linalg.norm(center_cam)
+    z_dir_cam = z_dir_cam.astype(np.float32, copy=False)
 
     # Compute the rotation matrix that rotates the world z-axis to the camera direction
-    delta_r_local = from_two_vectors(np.array([0, 0, 1], dtype=center.dtype), z_dir_cam)
-    orig_world_T_cam = np.linalg.inv(origin_cam_T_world)
+    delta_r_local = from_two_vectors(np.array([0, 0, 1], dtype=np.float32), z_dir_cam)
+    orig_world_T_cam = np.linalg.inv(origin_cam_T_world).astype(np.float32)
     new_world_T_cam = orig_world_T_cam.copy()
     new_world_T_cam[0:3, 0:3] = orig_world_T_cam[0:3, 0:3] @ delta_r_local
 
     # Rotate the camera around the z-axis to align with the camera angle
-    z_local_rot = Rotation.from_euler("z", camera_angle, degrees=True).as_matrix()
+    z_local_rot = Rotation.from_euler("z", camera_angle, degrees=True).as_matrix().astype(np.float32)
     new_world_T_cam[0:3, 0:3] = new_world_T_cam[0:3, 0:3] @ z_local_rot
 
     # Compute the transformation matrix that transforms points from world coordinates to camera coordinates
-    new_cam_T_world = np.linalg.inv(new_world_T_cam)
+    new_cam_T_world = np.linalg.inv(new_world_T_cam).astype(np.float32)
 
     return new_cam_T_world
 
 
 def gen_intrinsics_from_bounding_pts(
-    pts_cam: Float[np.ndarray, "num_pts 3"], width: int, height: int, min_focal: float = 5
-) -> tuple[Float[np.ndarray, "2"], Float[np.ndarray, "2"]]:
+    pts_cam: Float32[np.ndarray, "num_pts 3"], width: int, height: int, min_focal: float = 5
+) -> tuple[Float32[np.ndarray, "2"], Float32[np.ndarray, "2"]]:
     """
     Computes the camera intrinsics matrix from the input points in camera space and the target image size.
 
@@ -164,7 +174,7 @@ def gen_intrinsics_from_bounding_pts(
 
 def gen_crop_parameters_from_points(
     camera_orig: Camera,
-    pts_world: Float[np.ndarray, "... 3"],
+    pts_world: Float32[np.ndarray, "... 3"],
     new_image_size: tuple[int, int],
     mirror_img_x: bool,
     camera_angle: float = 0,
@@ -185,7 +195,8 @@ def gen_crop_parameters_from_points(
         A PinholeCameraParameter object representing the new perspective camera.
     """
     # Implementation code here
-    cam_T_world = camera_orig.cam_T_world
+    cam_T_world = camera_orig.cam_T_world.astype(np.float32, copy=False)
+    pts_world = pts_world.astype(np.float32, copy=False)
 
     crop_center = (pts_world.min(axis=0) + pts_world.max(axis=0)) / 2.0
     new_cam_T_world = make_look_at_matrix(cam_T_world, crop_center, camera_angle)
@@ -195,7 +206,10 @@ def gen_crop_parameters_from_points(
         new_cam_T_world = mirrorx @ new_cam_T_world
 
     # convert pts_world to homogenous coordinates
-    pts_world_hom = np.concatenate([pts_world, np.ones((pts_world.shape[0], 1))], axis=1)
+    pts_world_hom = np.concatenate(
+        [pts_world, np.ones((pts_world.shape[0], 1), dtype=np.float32)],
+        axis=1,
+    )
     # compute camera coordinates of input points
     pts_cam_hom = pts_world_hom @ new_cam_T_world.T
     pts_cam = pts_cam_hom[:, :3] / pts_cam_hom[:, 3:]
@@ -207,14 +221,21 @@ def gen_crop_parameters_from_points(
     )
     focal = focal_multiplier * focal
 
-    K = np.array([[focal[0], 0, principal_point[0]], [0, focal[1], principal_point[1]], [0, 0, 1]])
-    cam_r_world = new_cam_T_world[:3, :3]
-    cam_t_world = new_cam_T_world[:3, 3]
+    K: Float32[np.ndarray, "3 3"] = np.array(
+        [
+            [focal[0], 0.0, principal_point[0]],
+            [0.0, focal[1], principal_point[1]],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    cam_r_world: Float32[np.ndarray, "3 3"] = new_cam_T_world[:3, :3].astype(np.float32, copy=False)
+    cam_t_world: Float32[np.ndarray, "3"] = new_cam_T_world[:3, 3].astype(np.float32, copy=False)
 
     return PinholeCameraParameter(
-        K=K.tolist(),
-        R=cam_r_world.tolist(),
-        T=cam_t_world.tolist(),
+        K=K,
+        R=cam_r_world,
+        T=cam_t_world,
         height=new_image_size[1],
         width=new_image_size[0],
         world2cam=True,
@@ -327,10 +348,10 @@ def get_crop_points_from_hand_pose(
 def warp_image_between_cameras(
     src_camera: Camera,
     dst_camera: Camera,
-    src_image: UInt8[np.ndarray, "H W"],
+    src_image: UInt8[np.ndarray, "H W channels"],
     interpolation: int = cv2.INTER_LINEAR,
     depth_check: bool = True,
-) -> UInt8[np.ndarray, "H W"]:
+) -> UInt8[np.ndarray, "H W channels"]:
     """
     Warps an image from the source camera to the destination camera.
 
@@ -348,8 +369,12 @@ def warp_image_between_cameras(
     W, H = dst_camera.camera_parameters.width, dst_camera.camera_parameters.height
 
     # Generate a grid of destination image points
-    px, py = np.meshgrid(np.arange(W), np.arange(H))
-    dst_img_pts = np.column_stack((px.flatten(), py.flatten()))
+    px, py = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+    num_pixels = H * W
+    dst_img_pts: Float32[np.ndarray, "num_pixels 2"] = np.column_stack((px.flatten(), py.flatten())).astype(
+        np.float32, copy=False
+    )
+    assert dst_img_pts.shape[0] == num_pixels
 
     # Compute the corresponding world points and camera points
     dst_cam_pts = dst_camera.image_to_camera(dst_img_pts)
@@ -364,8 +389,8 @@ def warp_image_between_cameras(
 
     # Convert the image points to map coordinates
     src_img_pts = src_img_pts.astype(np.float32)
-    map_x = src_img_pts[:, 0].reshape((H, W))
-    map_y = src_img_pts[:, 1].reshape((H, W))
+    map_x: Float32[np.ndarray, "H W"] = src_img_pts[:, 0].reshape((H, W))
+    map_y: Float32[np.ndarray, "H W"] = src_img_pts[:, 1].reshape((H, W))
 
     # Warp the source image to the destination image
     warped_image = cv2.remap(src_image, map_x, map_y, interpolation)

@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
-from jaxtyping import Float
+from jaxtyping import Float32, Int64
 
 NUM_HANDS = 2
 NUM_LANDMARKS_PER_HAND = 21
@@ -16,6 +16,8 @@ RIGHT_HAND_INDEX = 1
 NUM_DIGITS: int = 5
 NUM_JOINT_FRAMES: int = 1 + 1 + 3 * 5  # root + wrist + finger frames * 5
 DOF_PER_FINGER: int = 4
+MAX_LANDMARK_WEIGHTS: int = 3
+JOINT_LIMIT_BOUNDS: int = 2
 
 
 class LANDMARK(IntEnum):
@@ -68,20 +70,20 @@ HAND_CONNECTIONS = frozenset(
 
 
 class HandModel(NamedTuple):
-    joint_rotation_axes: torch.Tensor
-    joint_rest_positions: torch.Tensor
-    joint_frame_index: torch.Tensor
-    joint_parent: torch.Tensor
-    joint_first_child: torch.Tensor
-    joint_next_sibling: torch.Tensor
-    landmark_rest_positions: torch.Tensor
-    landmark_rest_bone_weights: torch.Tensor
-    landmark_rest_bone_indices: torch.Tensor
-    hand_scale: Optional[torch.Tensor]
-    mesh_vertices: Optional[torch.Tensor] = None
-    mesh_triangles: Optional[torch.Tensor] = None
-    dense_bone_weights: Optional[torch.Tensor] = None
-    joint_limits: Optional[torch.Tensor] = None
+    joint_rotation_axes: Float32[torch.Tensor, "num_joints 3"]
+    joint_rest_positions: Float32[torch.Tensor, "num_joints 3"]
+    joint_frame_index: Int64[torch.Tensor, "num_joints"]
+    joint_parent: Int64[torch.Tensor, "num_joints"]
+    joint_first_child: Int64[torch.Tensor, "num_joints"]
+    joint_next_sibling: Int64[torch.Tensor, "num_joints"]
+    landmark_rest_positions: Float32[torch.Tensor, "num_landmarks 3"]
+    landmark_rest_bone_weights: Float32[torch.Tensor, "num_landmarks max_landmark_weights"]
+    landmark_rest_bone_indices: Int64[torch.Tensor, "num_landmarks max_landmark_weights"]
+    hand_scale: Float32[torch.Tensor, ""]
+    mesh_vertices: Float32[torch.Tensor, "num_mesh_vertices 3"] | None = None
+    mesh_triangles: Int64[torch.Tensor, "num_mesh_faces 3"] | None = None
+    dense_bone_weights: Float32[torch.Tensor, "num_mesh_vertices num_joint_frames"] | None = None
+    joint_limits: Float32[torch.Tensor, "num_joints joint_limit_bounds"] | None = None
 
 
 class SingleHandPose(NamedTuple):
@@ -91,18 +93,47 @@ class SingleHandPose(NamedTuple):
     2) root-to-world rigid wrist transformation
     """
 
-    joint_angles: np.ndarray = np.zeros(NUM_JOINTS_PER_HAND, dtype=np.float32)
-    wrist_xform: np.ndarray = np.eye(4, dtype=np.float32)
+    joint_angles: Float32[np.ndarray, "num_joints"] = np.zeros(NUM_JOINTS_PER_HAND, dtype=np.float32)
+    wrist_xform: Float32[np.ndarray, "4 4"] = np.eye(4, dtype=np.float32)
     hand_confidence: float = 1.0
 
 
-def load_hand_model_from_dict(hand_model_dict: Dict[str, Any]) -> HandModel:
-    hand_tensor_dict = {}
-    for k, v in hand_model_dict.items():
-        if isinstance(v, list):
-            hand_tensor_dict[k] = torch.Tensor(v)
-        else:
-            hand_tensor_dict[k] = v
+def load_hand_model_from_dict(hand_model_dict: dict[str, Any]) -> HandModel:
+    float_tensor_keys = {
+        "joint_rotation_axes",
+        "joint_rest_positions",
+        "landmark_rest_positions",
+        "landmark_rest_bone_weights",
+        "mesh_vertices",
+        "dense_bone_weights",
+        "joint_limits",
+    }
+    int_tensor_keys = {
+        "joint_frame_index",
+        "joint_parent",
+        "joint_first_child",
+        "joint_next_sibling",
+        "landmark_rest_bone_indices",
+        "mesh_triangles",
+    }
+    hand_tensor_dict: dict[str, Any] = {}
+    for key, value in hand_model_dict.items():
+        if value is None:
+            hand_tensor_dict[key] = None
+            continue
+        if key in int_tensor_keys:
+            hand_tensor_dict[key] = torch.tensor(value, dtype=torch.int64)
+            continue
+        if key == "hand_scale":
+            hand_tensor_dict[key] = torch.tensor(value, dtype=torch.float32)
+            continue
+        if key in float_tensor_keys or isinstance(value, list):
+            hand_tensor_dict[key] = torch.tensor(value, dtype=torch.float32)
+            continue
+        if isinstance(value, float | int):
+            hand_tensor_dict[key] = torch.tensor(value, dtype=torch.float32)
+            continue
+        hand_tensor_dict[key] = value
 
     hand_model = HandModel(**hand_tensor_dict)
     return hand_model
@@ -114,17 +145,17 @@ class HandPoseLabels:
     Dataclass for hand pose labels for a single sequence.
     """
 
-    camera_angles: List[float]
+    camera_angles: list[float]
     """List of camera angles in degrees."""
-    camera_to_world_transforms: Float[np.ndarray, "num_frames num_cameras 4 4"]
+    camera_to_world_transforms: Float32[np.ndarray, "num_frames num_cameras 4 4"]
     """Camera to world transform matrix."""
     hand_model: HandModel
     """Hand model."""
-    joint_angles: Float[np.ndarray, "num_frames num_hands num_landmarks"]
+    joint_angles: Float32[np.ndarray, "num_frames num_hands num_joints"]
     """Joint angles in degrees."""
-    wrist_transforms: Float[np.ndarray, "num_frames num_hands 4 4"]
+    wrist_transforms: Float32[np.ndarray, "num_frames num_hands 4 4"]
     """Wrist transform matrix."""
-    hand_confidences: Float[np.ndarray, "num_frames num_hands"]
+    hand_confidences: Float32[np.ndarray, "num_frames num_hands"]
     """Hand confidence."""
 
     def __len__(self):
@@ -160,7 +191,7 @@ def so3_exp_map(log_rot: torch.Tensor, eps: float = 0.0001) -> torch.Tensor:
 
 def _so3_exp_map(
     log_rot: torch.Tensor, eps: float = 0.0001
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     A helper function that computes the so3 exponential map and,
     apart from the rotation matrix, also returns intermediate variables
@@ -229,18 +260,19 @@ def hat(v: torch.Tensor) -> torch.Tensor:
 
 
 def _finger_fk(
-    joint_local_xfs: Float[torch.Tensor, "batch ... 4 4"], parent_transform: Float[torch.Tensor, "batch 4 4"]
-) -> List[Float[torch.Tensor, "batch 4 4"]]:
+    joint_local_xfs: Float32[torch.Tensor, "... dof_per_finger 4 4"],
+    parent_transform: Float32[torch.Tensor, "... 4 4"],
+) -> list[Float32[torch.Tensor, "... 4 4"]]:
     """
     Computes the forward kinematics for a finger with 4 degrees of freedom (DoF),
     i.e., 4 joints, and returns 3 transformation frames.
 
     Args:
-        joint_local_xfs (Float[torch.Tensor, "batch ... 4 4"]): Local joint transformations.
-        parent_transform (Float[torch.Tensor, "batch 4 4"]): Parent transformation matrix.
+        joint_local_xfs (Float32[torch.Tensor, "... dof_per_finger 4 4"]): Local joint transformations.
+        parent_transform (Float32[torch.Tensor, "... 4 4"]): Parent transformation matrix.
 
     Returns:
-        List[Float[torch.Tensor, "batch 4 4"]]: List of computed transformation matrices.
+        list[Float32[torch.Tensor, "... 4 4"]]: List of computed transformation matrices.
     """
     transform_mats = [parent_transform]
     for i in range(4):
@@ -249,21 +281,21 @@ def _finger_fk(
 
 
 def _joint_local_transform(
-    rotation_axis: Float[torch.Tensor, "batch 20 3"],
-    rest_pose: Float[torch.Tensor, "batch 20 3"],
-    joint_angles: Float[torch.Tensor, "batch 20"],
-) -> Float[torch.Tensor, "batch 20 4 4"]:
+    rotation_axis: Float32[torch.Tensor, "... 20 3"],
+    rest_pose: Float32[torch.Tensor, "... 20 3"],
+    joint_angles: Float32[torch.Tensor, "... 20"],
+) -> Float32[torch.Tensor, "... 20 4 4"]:
     """
     Computes the local transformation matrix for joints given their rotation axes,
     rest poses, and joint angles.
 
     Args:
-        rotation_axis (Float[torch.Tensor, "batch 20 3"]): Rotation axes of the joints.
-        rest_pose (Float[torch.Tensor, "batch 20 3"]): Rest poses of the joints.
-        joint_angles (Float[torch.Tensor, "batch 20"]): Joint angles.
+        rotation_axis (Float32[torch.Tensor, "... 20 3"]): Rotation axes of the joints.
+        rest_pose (Float32[torch.Tensor, "... 20 3"]): Rest poses of the joints.
+        joint_angles (Float32[torch.Tensor, "... 20"]): Joint angles.
 
     Returns:
-        Float[torch.Tensor, "batch 20 4 4"]: Computed local transformation matrix.
+        Float32[torch.Tensor, "... 20 4 4"]: Computed local transformation matrix.
     """
     rotation_axis_flat = rotation_axis.reshape(-1, 3)
     rest_pose_flat = rest_pose.reshape(-1, 3)
@@ -282,17 +314,18 @@ def _joint_local_transform(
 
 
 def _lbs(
-    trans_mats: Float[torch.Tensor, "batch 17 4 4"], skinned_points: Float[torch.Tensor, "batch num_landmarks 17 4"]
-) -> Float[torch.Tensor, "batch num_landmarks 4"]:
+    trans_mats: Float32[torch.Tensor, "... num_joint_frames 4 4"],
+    skinned_points: Float32[torch.Tensor, "... num_landmarks num_joint_frames 4"],
+) -> Float32[torch.Tensor, "... num_landmarks 4"]:
     """
     Performs linear blend skinning (LBS) on the given points using the given transformation matrices.
 
     Args:
-        trans_mats (Float[torch.Tensor, "batch 17 4 4"]): Transformation matrices.
-        skinned_points (Float[torch.Tensor, "batch num_landmarks 17 4"]): Skinned points to be transformed.
+        trans_mats (Float32[torch.Tensor, "... num_joint_frames 4 4"]): Transformation matrices.
+        skinned_points (Float32[torch.Tensor, "... num_landmarks num_joint_frames 4"]): Skinned points to be transformed.
 
     Returns:
-        Float[torch.Tensor, "batch num_landmarks 4"]: Transformed points.
+        Float32[torch.Tensor, "... num_landmarks 4"]: Transformed points.
     """
     trans_mats = trans_mats.unsqueeze(dim=1)
     skinned_points = skinned_points.unsqueeze(dim=-1)
@@ -302,21 +335,21 @@ def _lbs(
 
 
 def _get_skinning_weights(
-    bone_indices: Float[torch.Tensor, "batch num_landmarks 3"],
-    bone_weights: Float[torch.Tensor, "batch num_landmarks 3"],
+    bone_indices: Int64[torch.Tensor, "... num_landmarks max_landmark_weights"],
+    bone_weights: Float32[torch.Tensor, "... num_landmarks max_landmark_weights"],
     n_frames: int,
-) -> Float[torch.Tensor, "batch num_landmarks 17"]:
+) -> Float32[torch.Tensor, "... num_landmarks num_joint_frames"]:
     """
     Computes skinning weights for the vertices given the bone indices, bone weights,
     and number of transformation frames.
 
     Args:
-        bone_indices (Float[torch.Tensor, "batch num_landmarks 3"]): Indices of bones influencing each vertex.
-        bone_weights (Float[torch.Tensor, "batch num_landmarks 3"]): Weights of bones for each vertex.
+        bone_indices (Int64[torch.Tensor, "... num_landmarks max_landmark_weights"]): Indices of bones influencing each vertex.
+        bone_weights (Float32[torch.Tensor, "... num_landmarks max_landmark_weights"]): Weights of bones for each vertex.
         n_frames (int): Number of transformation frames.
 
     Returns:
-        Float[torch.Tensor, "batch num_landmarks 17"]: Computed skinning weights for each vertex.
+        Float32[torch.Tensor, "... num_landmarks num_joint_frames"]: Computed skinning weights for each vertex.
     """
     bs = bone_indices.shape[0]
     n_lms = bone_indices.shape[1]
@@ -334,23 +367,23 @@ def _get_skinning_weights(
 
 
 def _hand_skinning_transform(
-    rotation_axis: Float[torch.Tensor, "batch num_joints 3"],
-    rest_poses: Float[torch.Tensor, "batch num_joints 3"],
-    joint_angles: Float[torch.Tensor, "batch num_joints"],
-    wrist_transforms: Float[torch.Tensor, "batch 4 4"],
-) -> Float[torch.Tensor, "batch 17 4 4"]:
+    rotation_axis: Float32[torch.Tensor, "... num_joints 3"],
+    rest_poses: Float32[torch.Tensor, "... num_joints 3"],
+    joint_angles: Float32[torch.Tensor, "... num_joints"],
+    wrist_transforms: Float32[torch.Tensor, "... 4 4"],
+) -> Float32[torch.Tensor, "... num_joint_frames 4 4"]:
     """
     Computes skinning transformation matrices for a hand model given rotation axes,
     rest poses, joint angles, and wrist transformations.
 
     Args:
-        rotation_axis (Float[torch.Tensor, "batch num_joints 3"]): Rotation axes of the joints.
-        rest_poses (Float[torch.Tensor, "batch num_joints 3"]): Rest poses of the joints.
-        joint_angles (Float[torch.Tensor, "batch num_joints"]): Joint angles.
-        wrist_transforms (Float[torch.Tensor, "batch 4 4"]): Wrist transformations.
+        rotation_axis (Float32[torch.Tensor, "... num_joints 3"]): Rotation axes of the joints.
+        rest_poses (Float32[torch.Tensor, "... num_joints 3"]): Rest poses of the joints.
+        joint_angles (Float32[torch.Tensor, "... num_joints"]): Joint angles.
+        wrist_transforms (Float32[torch.Tensor, "... 4 4"]): Wrist transformations.
 
     Returns:
-        Float[torch.Tensor, "batch 17 4 4"]: Computed skinning transformation matrices.
+        Float32[torch.Tensor, "... num_joint_frames 4 4"]: Computed skinning transformation matrices.
     """
     transform_mats = [wrist_transforms] * 2  # [root_transform, wrist_transform]
     d = DOF_PER_FINGER
@@ -364,18 +397,18 @@ def _hand_skinning_transform(
 
 
 def _get_skinned_vertices(
-    vertices: Union[Float[torch.Tensor, "batch num_landmarks 3"], Float[torch.Tensor, "batch num_landmarks 4"]],
-    weights: Float[torch.Tensor, "batch num_landmarks 17"],
-) -> Float[torch.Tensor, "batch num_landmarks 17 4"]:
+    vertices: Float32[torch.Tensor, "... num_landmarks 3"] | Float32[torch.Tensor, "... num_landmarks 4"],
+    weights: Float32[torch.Tensor, "... num_landmarks num_joint_frames"],
+) -> Float32[torch.Tensor, "... num_landmarks num_joint_frames 4"]:
     """
     Computes skinned vertices given the original vertices and their corresponding skinning weights.
 
     Args:
-        vertices (Union[Float[torch.Tensor, "batch num_landmarks 3"], Float[torch.Tensor, "batch num_landmarks 4"]]): Original vertices.
-        weights (Float[torch.Tensor, "batch num_landmarks 17"]): Skinning weights for each vertex.
+        vertices (Float32[torch.Tensor, "... num_landmarks 3"] | Float32[torch.Tensor, "... num_landmarks 4"]): Original vertices.
+        weights (Float32[torch.Tensor, "... num_landmarks num_joint_frames"]): Skinning weights for each vertex.
 
     Returns:
-        Float[torch.Tensor, "batch num_landmarks 17 4"]: Skinned vertices.
+        Float32[torch.Tensor, "... num_landmarks num_joint_frames 4"]: Skinned vertices.
     """
     if vertices.shape[2] == 3:
         n_vertices = vertices.shape[1]
@@ -394,26 +427,26 @@ def _get_skinned_vertices(
 
 
 def _skin_points(
-    joint_rest_positions: Float[torch.Tensor, "num_joints 3"],
-    joint_rotation_axes: Float[torch.Tensor, "num_joints 3"],
-    skin_mat: Float[torch.Tensor, "batch num_landmarks 17"],
-    joint_angles: Float[torch.Tensor, "num_joints"],
-    points: Float[torch.Tensor, "num_landmarks 3"],
-    wrist_transforms: Float[torch.Tensor, "4 4"],
-) -> Float[torch.Tensor, "num_landmarks 3"]:
+    joint_rest_positions: Float32[torch.Tensor, "... num_joints 3"],
+    joint_rotation_axes: Float32[torch.Tensor, "... num_joints 3"],
+    skin_mat: Float32[torch.Tensor, "... num_landmarks num_joint_frames"],
+    joint_angles: Float32[torch.Tensor, "... num_joints"],
+    points: Float32[torch.Tensor, "... num_landmarks 3"],
+    wrist_transforms: Float32[torch.Tensor, "... 4 4"],
+) -> Float32[torch.Tensor, "... num_landmarks 3"]:
     """
     Computes skin points for the given joint and wrist transforms.
 
     Args:
-        joint_rest_positions (Float[torch.Tensor, "num_joints 3"]): The rest positions of the joints.
-        joint_rotation_axes (Float[torch.Tensor, "num_joints 3"]): The rotation axes of the joints.
-        skin_mat (Float[torch.Tensor, "batch num_landmarks 17"]): Skin matrix.
-        joint_angles (Float[torch.Tensor, "num_joints"]): The angles of the joints.
-        points (Float[torch.Tensor, "num_landmarks 3"]): Points to be skinned.
-        wrist_transforms (Float[torch.Tensor, "4 4"]): Wrist transformations.
+        joint_rest_positions (Float32[torch.Tensor, "... num_joints 3"]): The rest positions of the joints.
+        joint_rotation_axes (Float32[torch.Tensor, "... num_joints 3"]): The rotation axes of the joints.
+        skin_mat (Float32[torch.Tensor, "... num_landmarks num_joint_frames"]): Skin matrix.
+        joint_angles (Float32[torch.Tensor, "... num_joints"]): The angles of the joints.
+        points (Float32[torch.Tensor, "... num_landmarks 3"]): Points to be skinned.
+        wrist_transforms (Float32[torch.Tensor, "... 4 4"]): Wrist transformations.
 
     Returns:
-        Float[torch.Tensor, "num_landmarks 3"]: The skinned vectors for the skin points.
+        Float32[torch.Tensor, "... num_landmarks 3"]: The skinned vectors for the skin points.
     """
     leading_dims = joint_angles.shape[:-1]
     assert joint_rest_positions.shape[:-2] == leading_dims, (
@@ -441,18 +474,20 @@ def _skin_points(
 
 
 def skin_landmarks(
-    hand_model: HandModel, joint_angles: Float[torch.Tensor, "num_joints"], wrist_transforms: Float[torch.Tensor, "4 4"]
-) -> Float[torch.Tensor, "num_landmarks 3"]:
+    hand_model: HandModel,
+    joint_angles: Float32[torch.Tensor, "... num_joints"],
+    wrist_transforms: Float32[torch.Tensor, "... 4 4"],
+) -> Float32[torch.Tensor, "... num_landmarks 3"]:
     """
     Computes the skin landmarks for a given hand model, joint angles, and wrist transforms.
 
     Args:
         hand_model (HandModel): A model representing a hand.
-        joint_angles (Float[torch.Tensor, "num_joints"]): The angles of the joints.
-        wrist_transforms (Float[torch.Tensor, "4 4"]): Wrist transformations.
+        joint_angles (Float32[torch.Tensor, "... num_joints"]): The angles of the joints.
+        wrist_transforms (Float32[torch.Tensor, "... 4 4"]): Wrist transformations.
 
     Returns:
-        Float[torch.Tensor, "num_landmarks 3"]: The skinned landmarks.
+        Float32[torch.Tensor, "... num_landmarks 3"]: The skinned landmarks.
     """
     leading_dims = joint_angles.shape[:-1]
     numel = torch.flatten(joint_angles, end_dim=-2).shape[0] if len(leading_dims) else 1
@@ -473,8 +508,10 @@ def skin_landmarks(
 
 
 def skin_landmarks_np(
-    hand_model: HandModel, joint_angles: Float[np.ndarray, "num_joints"], wrist_transforms: Float[np.ndarray, "4 4"]
-) -> Float[np.ndarray, "num_landmarks 3"]:
+    hand_model: HandModel,
+    joint_angles: Float32[np.ndarray, "... num_joints"],
+    wrist_transforms: Float32[np.ndarray, "... 4 4"],
+) -> Float32[np.ndarray, "... num_landmarks 3"]:
     """
     Computes the skin landmarks for a given hand model, joint angles, and wrist transforms.
 
@@ -482,11 +519,11 @@ def skin_landmarks_np(
 
     Args:
         hand_model (HandModel): A model representing a hand.
-        joint_angles (Float[np.ndarray, "num_joints"]): The angles of the joints.
-        wrist_transforms (Float[np.ndarray, "4 4"]): Wrist transformations.
+        joint_angles (Float32[np.ndarray, "... num_joints"]): The angles of the joints.
+        wrist_transforms (Float32[np.ndarray, "... 4 4"]): Wrist transformations.
 
     Returns:
-        Float[np.ndarray, "num_landmarks 3"]: The skinned landmarks.
+        Float32[np.ndarray, "... num_landmarks 3"]: The skinned landmarks.
     """
     landmarks = skin_landmarks(
         hand_model,
@@ -498,7 +535,7 @@ def skin_landmarks_np(
 
 def landmarks_from_hand_pose(
     hand_model: HandModel, hand_pose: SingleHandPose, hand_idx: int
-) -> Float[np.ndarray, "num_landmarks 3"]:
+) -> Float32[np.ndarray, "num_landmarks 3"]:
     """
     Compute 3D landmarks in the world space given the hand model and hand pose.
 
@@ -508,7 +545,7 @@ def landmarks_from_hand_pose(
         hand_idx (int): Index of the hand. Equals 0 if left hand, 1 if right hand.
 
     Returns:
-        Float[np.ndarray, "num_landmarks 3"]: The 3D landmarks in the world space.
+        Float32[np.ndarray, "num_landmarks 3"]: The 3D landmarks in the world space.
     """
     xf = hand_pose.wrist_xform.copy()
     # This function expects the user hand model to be a left hand.
