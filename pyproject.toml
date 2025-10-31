@@ -28,7 +28,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["simplecv*", "tools*", "tests*"]
 
-[tool.pixi.project]
+[tool.pixi.workspace]
 channels = ["https://prefix.dev/conda-forge"]
 platforms = ["osx-arm64", "linux-64"]
 
