@@ -44,7 +44,7 @@ class LANDMARK(IntEnum):
     PALM_CENTER = 20
 
 
-HAND_CONNECTIONS = frozenset(
+UME_HAND_CONNECTIONS = frozenset(
     [
         (5, 6),
         (6, 7),

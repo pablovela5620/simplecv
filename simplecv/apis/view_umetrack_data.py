@@ -1,23 +1,24 @@
 import json
 import warnings
-from argparse import ArgumentParser
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, UInt8
+from numpy import ndarray
 from rerun import AnnotationInfo, ClassDescription
-from tqdm import tqdm
 
+from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.umetrack_temp.camera_models import FisheyeCameraParameter, PinholeCameraParameter
 from simplecv.umetrack_temp.cameras import Camera
 from simplecv.umetrack_temp.generic_hand_model import (
-    HAND_CONNECTIONS,
     LANDMARK,
+    UME_HAND_CONNECTIONS,
     HandPoseLabels,
     SingleHandPose,
     landmarks_from_hand_pose,
@@ -57,7 +58,7 @@ class DataStream:
         # camera intrinsics
         self.fisheye_cameras = create_cameras(annotation["cameras"])
         # camera extrinsics (slam pose of each camera)
-        self.world_T_cam_all: Float32[np.ndarray, "num_frames num_cameras 4 4"] = np.asarray(
+        self.world_T_cam_all: Float32[ndarray, "num_frames num_cameras 4 4"] = np.asarray(
             annotation["camera_to_world_transforms"], dtype=np.float32
         )
         self.hand_model = load_hand_model_from_dict(annotation["hand_model"])
@@ -74,7 +75,7 @@ class DataStream:
     def __len__(self):
         return len(self.hand_pose_labels)
 
-    def __iter__(self) -> Iterator[tuple[np.ndarray, np.ndarray, dict[int, SingleHandPose]]]:
+    def __iter__(self) -> Iterator[tuple[ndarray, ndarray, dict[int, SingleHandPose]]]:
         """
         Returns:
             multi_view_images: (num_cameras, frame_h, single_cam_w, 3)
@@ -84,13 +85,14 @@ class DataStream:
         for frame_idx in range(self.__len__()):
             gt_tracking = {}
             # (h, num_cameras * w, 3)
-            raw_mono_images: UInt8[np.ndarray, "frame_h frame_w 3"] = self.video_stream[frame_idx]
+            raw_mono_frame = self.video_stream[frame_idx]
+            raw_mono_images: UInt8[ndarray, "frame_h frame_w 3"] = np.asarray(raw_mono_frame, dtype=np.uint8)
             frame_height, frame_width, _ = raw_mono_images.shape
             num_cameras = 4
             if frame_width % num_cameras != 0:
                 raise ValueError(f"Video width {frame_width} is not divisible by expected camera count {num_cameras}.")
             single_cam_width = frame_width // num_cameras
-            multi_view_images: UInt8[np.ndarray, "num_cameras frame_h single_cam_w 3"] = raw_mono_images.reshape(
+            multi_view_images: UInt8[ndarray, "num_cameras frame_h single_cam_w 3"] = raw_mono_images.reshape(
                 frame_height,
                 num_cameras,
                 single_cam_width,
@@ -169,7 +171,7 @@ def create_cameras(intri_annotations: list[dict[str, Any]]) -> list[Camera]:
 def log_camera(
     camera_log_path: str,
     *,
-    image: UInt8[np.ndarray, "image_h image_w 3"],
+    image: UInt8[ndarray, "image_h image_w 3"],
     cam_params: FisheyeCameraParameter | PinholeCameraParameter,
     image_plane_distance: float,
     image_path_name: str = "image",
@@ -199,8 +201,8 @@ def log_camera(
 
 
 def resize_image_if_needed(
-    image: UInt8[np.ndarray, "image_h image_w 3"], target_width: int, target_height: int
-) -> UInt8[np.ndarray, "target_h target_w 3"]:
+    image: UInt8[ndarray, "image_h image_w 3"], target_width: int, target_height: int
+) -> UInt8[ndarray, "target_h target_w 3"]:
     """
     Resizes the provided image to the target resolution if required.
     """
@@ -213,7 +215,6 @@ def setup_logging(log_path: str = "world") -> str:
     """
     setup logging for rerun along with annotations context for each hand
     """
-    # rr.log_view_coordinates(log_path, up="+Y", right_handed=True, timeless=True)
     rr.log(log_path, rr.ViewCoordinates.RUB, static=True)
     class_descriptions = []
     for hand_idx, hand_type in enumerate(HAND_TYPE):
@@ -221,7 +222,7 @@ def setup_logging(log_path: str = "world") -> str:
             ClassDescription(
                 info=AnnotationInfo(label=f"{hand_type} hand", id=hand_idx),
                 keypoint_annotations=[AnnotationInfo(id=lm.value) for lm in LANDMARK],
-                keypoint_connections=HAND_CONNECTIONS,
+                keypoint_connections=list(UME_HAND_CONNECTIONS),
             ),
         )
     rr.log(f"{log_path}", rr.AnnotationContext(class_descriptions), static=True)
@@ -291,24 +292,38 @@ def create_umetrack_view(
     rr.send_blueprint(blueprint)
 
 
-def main(data_path: Path, sequence_id: int = 1) -> None:
-    if not data_path.exists():
-        raise FileNotFoundError(data_path)
+@dataclass
+class UmeTrackVisualizeConfig:
+    """Structured configuration for running the exo/ego visualization CLI."""
 
-    video_path: Path = sorted(data_path.glob("*.mp4"))[sequence_id]
-    annotation_path: Path = sorted(data_path.glob("*.json"))[sequence_id]
+    rr_config: RerunTyroConfig
+    """Command-line options for spawning and configuring the Rerun viewer."""
+    data_path: Path
+    """Path to data, should be a directory that looks like 'UmeTrack_data/raw_data/x/x/x/user_xx/'."""
+    sequence_id: int = 1
+    """Sequence ID to visualize (0-indexed)."""
+
+
+def main(config: UmeTrackVisualizeConfig) -> None:
+    if not config.data_path.exists():
+        raise FileNotFoundError(config.data_path)
+
+    video_path: Path = sorted(config.data_path.glob("*.mp4"))[config.sequence_id]
+    annotation_path: Path = sorted(config.data_path.glob("*.json"))[config.sequence_id]
     datastream = DataStream(video_path, annotation_path)
-    camera_angles = datastream.hand_pose_labels.camera_angles
+    camera_angles: list[float] = datastream.hand_pose_labels.camera_angles
 
-    log_path = setup_logging()
+    log_path: str = setup_logging()
     create_umetrack_view(log_path)
 
-    for frame_idx, (multi_view_images, _multi_world_T_cam, hand_pose_dict) in tqdm(
-        enumerate(datastream), total=len(datastream), desc="Processing frames"
-    ):
+    for frame_idx, frame_data in enumerate(datastream):
+        multi_view_images, _multi_world_T_cam, hand_pose_dict = frame_data
         rr.set_time("frame", sequence=frame_idx)
         hand_model = datastream.hand_model
-        landmarks_dict = {"left": None, "right": None}
+        landmarks_dict: dict[str, Float32[ndarray, "num_landmarks 3"] | None] = {
+            "left": None,
+            "right": None,
+        }
 
         # log hand pose data
         for hand_idx, hand_type in enumerate(HAND_TYPE):
@@ -359,7 +374,7 @@ def main(data_path: Path, sequence_id: int = 1) -> None:
                         cropped_cam_log_path,
                         image=crop,
                         cam_params=perspective_cam_params,
-                        image_plane_distance=25.0,
+                        image_plane_distance=50.0,
                         image_path_name=crop_log_path_name,
                     )
                     uv_cropped = project_points(landmark, perspective_cam)
@@ -384,26 +399,10 @@ def main(data_path: Path, sequence_id: int = 1) -> None:
             )
             for hand_idx, hand_type in enumerate(HAND_TYPE):
                 if landmarks_dict[hand_type] is not None:
-                    uv = project_points(landmarks_dict[hand_type], camera)
+                    hand_landmarks = cast(Float32[ndarray, "num_landmarks 3"], landmarks_dict[hand_type])
+                    uv = project_points(hand_landmarks, camera)
                     class_ids = np.full(len(uv), hand_idx, dtype=np.uint16)
                     rr.log(
                         f"{cam_log_path}/{img_log_path_name}/{hand_type}_landmark",
                         rr.Points2D(uv, keypoint_ids=KEYPOINT_IDS, class_ids=class_ids, show_labels=False),
                     )
-
-
-if __name__ == "__main__":
-    parser = ArgumentParser("Visualize data")
-    parser.add_argument(
-        "--data-path",
-        type=Path,
-        # default="/hdd/data/UmeTrack_data/raw_data/real/hand_hand/testing/user_12/",
-        default="/mnt/12tbdrive/data/UmeTrack_data/raw_data/real/separate_hand/testing/user_19/",
-        help="Path to data, should be a directory that looks like\
-              'UmeTrack_data/raw_data/x/x/x/user_xx/",
-    )
-    rr.script_add_args(parser)
-    args = parser.parse_args()
-    rr.script_setup(args, "quest2_hand_tracking")
-    main(args.data_path)
-    rr.script_teardown(args)
