@@ -3,13 +3,13 @@ import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float, Float32, UInt8
 from numpy import ndarray
 from rerun import AnnotationInfo, ClassDescription
 
@@ -196,8 +196,8 @@ def log_camera(
             relation=rr.TransformRelation.ChildFromParent,
         ),
     )
-    resized_image = resize_image_if_needed(image, cam_params.width, cam_params.height)
-    rr.log(image_log_path, rr.Image(resized_image).compress(jpeg_quality=90))
+    # resized_image = resize_image_if_needed(image, cam_params.width, cam_params.height)
+    rr.log(image_log_path, rr.Image(image).compress(jpeg_quality=90))
 
 
 def resize_image_if_needed(
@@ -320,7 +320,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
         multi_view_images, _multi_world_T_cam, hand_pose_dict = frame_data
         rr.set_time("frame", sequence=frame_idx)
         hand_model = datastream.hand_model
-        landmarks_dict: dict[str, Float32[ndarray, "num_landmarks 3"] | None] = {
+        landmarks_dict: dict[str, Float32[ndarray, "n_kpts=21 3"] | None] = {
             "left": None,
             "right": None,
         }
@@ -328,8 +328,8 @@ def main(config: UmeTrackVisualizeConfig) -> None:
         # log hand pose data
         for hand_idx, hand_type in enumerate(HAND_TYPE):
             if hand_idx in hand_pose_dict:
-                hand_pose = hand_pose_dict[hand_idx]
-                landmark = landmarks_from_hand_pose(hand_model, hand_pose, hand_idx)
+                hand_pose: SingleHandPose = hand_pose_dict[hand_idx]
+                landmark: Float32[ndarray, "n_kpts=21 3"] = landmarks_from_hand_pose(hand_model, hand_pose, hand_idx)
                 class_ids = np.full(len(landmark), hand_idx, dtype=np.uint16)
                 rr.log(
                     f"{log_path}/{hand_type}/landmark",
@@ -339,7 +339,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                 ## Generating Crop based on 3d keypoints
                 # first are gt, second are neutral, third are open
                 crop_points = get_crop_points_from_hand_pose(hand_model, hand_pose, hand_idx, num_crop_points=63)
-                cam_indices = rank_hand_visibility_in_cameras(
+                cam_indices: list[int] = rank_hand_visibility_in_cameras(
                     cameras=datastream.fisheye_cameras,
                     hand_model=hand_model,
                     hand_pose=hand_pose,
@@ -348,8 +348,8 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                 )
                 # creating new perspective cameras
                 for cam_idx in cam_indices:
-                    current_cam = datastream.fisheye_cameras[cam_idx]
-                    perspective_cam_params = gen_crop_parameters_from_points(
+                    current_cam: Camera = datastream.fisheye_cameras[cam_idx]
+                    perspective_cam_params: PinholeCameraParameter = gen_crop_parameters_from_points(
                         current_cam,
                         crop_points,
                         new_image_size=(96, 96),
@@ -365,7 +365,9 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                         current_cam.camera_parameters.width,
                         current_cam.camera_parameters.height,
                     )
-                    crop = warp_image_between_cameras(current_cam, perspective_cam, current_image)
+                    crop: UInt8[ndarray, "crop_h crop_w 3"] = warp_image_between_cameras(
+                        current_cam, perspective_cam, current_image
+                    )
 
                     cropped_cam_log_path: str = f"{log_path}/recropped_camera_{hand_type}_{cam_idx}"
                     crop_log_path_name: str = f"crop_{hand_type}_{cam_idx}"
@@ -387,9 +389,9 @@ def main(config: UmeTrackVisualizeConfig) -> None:
 
         # log original camera camera data and projected landmarks
         for camera_idx, camera in enumerate(datastream.fisheye_cameras):
-            cam_log_path = f"{log_path}/camera_{camera_idx}"
-            img_log_path_name = f"image_{camera_idx}"
-            current_image = multi_view_images[camera_idx]
+            cam_log_path: str = f"{log_path}/camera_{camera_idx}"
+            img_log_path_name: str = f"image_{camera_idx}"
+            current_image: UInt8[ndarray, "h w 3"] = multi_view_images[camera_idx]
             log_camera(
                 cam_log_path,
                 image=current_image,
@@ -398,11 +400,16 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                 image_path_name=img_log_path_name,
             )
             for hand_idx, hand_type in enumerate(HAND_TYPE):
-                if landmarks_dict[hand_type] is not None:
-                    hand_landmarks = cast(Float32[ndarray, "num_landmarks 3"], landmarks_dict[hand_type])
-                    uv = project_points(hand_landmarks, camera)
-                    class_ids = np.full(len(uv), hand_idx, dtype=np.uint16)
+                landmarks: Float32[ndarray, "n_kpts=21 3"] | None = landmarks_dict[hand_type]
+                if landmarks is not None:
+                    hand_landmarks: Float32[ndarray, "n_kpts=21 3"] = landmarks
+                    uv: Float[np.ndarray, "num_points 2"] = project_points(hand_landmarks, camera)
                     rr.log(
                         f"{cam_log_path}/{img_log_path_name}/{hand_type}_landmark",
-                        rr.Points2D(uv, keypoint_ids=KEYPOINT_IDS, class_ids=class_ids, show_labels=False),
+                        rr.Points2D(
+                            uv,
+                            keypoint_ids=KEYPOINT_IDS,
+                            class_ids=hand_idx,
+                            show_labels=False,
+                        ),
                     )

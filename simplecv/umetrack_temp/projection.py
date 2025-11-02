@@ -18,8 +18,8 @@ def project_points(
     Returns:
         Float[np.ndarray, "num_points 2"]: A numpy array containing the 2D coordinates of the projected points.
     """
-    points3d_cam = camera.world_to_camera(points3d_world)
-    points2d = camera.camera_to_image(points3d_cam)
+    points3d_cam: Float[np.ndarray, "num_points 3"] = camera.world_to_camera(points3d_world)
+    points2d: Float[np.ndarray, "num_points 2"] = camera.camera_to_image(points3d_cam)
     h, w = camera.camera_parameters.height, camera.camera_parameters.width
 
     # make sure points are within image bounds

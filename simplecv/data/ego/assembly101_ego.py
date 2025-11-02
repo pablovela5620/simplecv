@@ -13,7 +13,7 @@ from serde import field as serde_field
 from serde.json import from_json
 from tqdm import tqdm
 
-from simplecv.camera_parameters import Distortion, Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
 
 if TYPE_CHECKING:
@@ -167,7 +167,7 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
 
         fisheye62: OVFishEye62 = record.Camera
 
-        distortion: Distortion = Distortion(
+        distortion: BrownConradyDistortion = BrownConradyDistortion(
             k1=fisheye62.k1,
             k2=fisheye62.k2,
             k3=fisheye62.k3,

@@ -1,7 +1,6 @@
-from typing import Union
-
 import numpy as np
 from jaxtyping import Float
+from numpy import ndarray
 
 from simplecv.umetrack_temp.camera_models import FisheyeCameraParameter, PinholeCameraParameter
 from simplecv.umetrack_temp.utils import get_transformation_matrix
@@ -16,10 +15,10 @@ class Camera:
             camera_parameters (Union[PinholeCameraParameter, FisheyeCameraParameter]): The camera parameters.
         """
         self.camera_parameters: PinholeCameraParameter | FisheyeCameraParameter = camera_parameters
-        self.cam_T_world: Float[np.ndarray, "4 4"] = get_transformation_matrix(camera_parameters)
-        self.world_T_cam: Float[np.ndarray, "4 4"] = np.linalg.inv(self.cam_T_world)
+        self.cam_T_world: Float[ndarray, "4 4"] = get_transformation_matrix(camera_parameters)
+        self.world_T_cam: Float[ndarray, "4 4"] = np.linalg.inv(self.cam_T_world)
 
-    def set_extrinsic(self, cam_T_world: Float[np.ndarray, "4 4"]) -> None:
+    def set_extrinsic(self, cam_T_world: Float[ndarray, "4 4"]) -> None:
         """
         Sets the extrinsic parameters of the camera.
 
@@ -29,26 +28,35 @@ class Camera:
         self.cam_T_world = cam_T_world
         self.world_T_cam = np.linalg.inv(cam_T_world)
 
-    def camera_to_image(self, points_3d: Float[np.ndarray, "num_points 3"]) -> Float[np.ndarray, "num_points 2"]:
+    def camera_to_image(self, points_3d: Float[ndarray, "n_points 3"]) -> Float[ndarray, "n_points 2"]:
         if isinstance(self.camera_parameters, PinholeCameraParameter):
             points_2d = perspective_projection(points_3d, self.camera_parameters.intrinsic33())
         elif isinstance(self.camera_parameters, FisheyeCameraParameter):
-            points_2d = arctan_projection(points_3d, self.camera_parameters.intrinsic33())
+            undistorted_uv: Float[ndarray, "n_points 2"] = arctan_projection(
+                points_3d, self.camera_parameters.intrinsic33()
+            )
             # Apply the camera distortion parameters to the 2D image coordinates
             # normalize points before applying distortion
             cx, cy = self.camera_parameters.intrinsic33()[0, 2], self.camera_parameters.intrinsic33()[1, 2]
             fx, fy = self.camera_parameters.intrinsic33()[0, 0], self.camera_parameters.intrinsic33()[1, 1]
-            points_2d[:, 0] -= cx
-            points_2d[:, 1] -= cy
-            points_2d[:, 0] /= fx
-            points_2d[:, 1] /= fy
-            points_2d = apply_radial_tangential_distortion(self.camera_parameters.get_dist_coeff(), points_2d)
+            norm_undist_uv: Float[ndarray, "n_points 2"] = undistorted_uv.copy()
 
+            norm_undist_uv[:, 0] -= cx
+            norm_undist_uv[:, 1] -= cy
+            norm_undist_uv[:, 0] /= fx
+            norm_undist_uv[:, 1] /= fy
+
+            norm_uv: Float[ndarray, "n_points 2"] = apply_radial_tangential_distortion(
+                self.camera_parameters.get_dist_coeff(), norm_undist_uv
+            )
             # denormalize points after applying distortion
+            points_2d = norm_uv.copy()
             points_2d[:, 0] *= fx
             points_2d[:, 1] *= fy
             points_2d[:, 0] += cx
             points_2d[:, 1] += cy
+        else:
+            raise NotImplementedError("Only PinholeCameraParameter and FisheyeCameraParameter are supported")
 
         return points_2d
 

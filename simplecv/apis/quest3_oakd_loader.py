@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator, Sequence
 from csv import DictReader
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from rerun import AnnotationInfo, ClassDescription
 from serde import coerce, from_dict, serde
 from serde import field as serde_field
 
+from simplecv.camera_parameters import Intrinsics
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.umetrack_temp.generic_hand_model import LANDMARK, UME_HAND_CONNECTIONS
 
@@ -136,9 +138,27 @@ QUEST_HAND_CSV_COLUMNS: tuple[str, ...] = ("timestamp",) + tuple(
     f"{prefix}_{axis}" for prefix in _QUEST_HAND_LANDMARK_PREFIXES for axis in _CSV_AXES
 )
 
+QUEST_HEAD_CSV_COLUMNS: tuple[str, ...] = (
+    "timestamp",
+    "left_pos_x",
+    "left_pos_y",
+    "left_pos_z",
+    "left_quat_x",
+    "left_quat_y",
+    "left_quat_z",
+    "left_quat_w",
+    "right_pos_x",
+    "right_pos_y",
+    "right_pos_z",
+    "right_quat_x",
+    "right_quat_y",
+    "right_quat_z",
+    "right_quat_w",
+)
+
 
 @serde(type_check=coerce)
-class QuestNewSample:
+class QuestHandDictRow:
     """Raw CSV row for Quest 3 + Oak-D hand poses."""
 
     ts_seconds: float = serde_field(rename="timestamp")
@@ -390,7 +410,7 @@ def load_hand_sequence(csv_path: Path) -> QuestHandPoseSequence:
             if not row_dict or all(value == "" for value in row_dict.values()):
                 continue
 
-            sample: QuestNewSample = from_dict(QuestNewSample, row_dict)
+            sample: QuestHandDictRow = from_dict(QuestHandDictRow, row_dict)
             # convert to numpy array
             xyz_hand_list: list[tuple[float, float, float]] = [
                 (getattr(sample, f"{prefix}_x"), getattr(sample, f"{prefix}_y"), getattr(sample, f"{prefix}_z"))
@@ -457,6 +477,127 @@ def log_hand_sequence(
         )
 
 
+@serde(type_check=coerce)
+class QuestHeadPoseDictRow:
+    """Raw CSV row containing Quest head pose information for both controllers."""
+
+    ts_seconds: float = serde_field(rename="timestamp")
+    """Original timestamp of the sample, measured in seconds."""
+
+    left_pos_x: float
+    """Left tracker X coordinate in meters."""
+    left_pos_y: float
+    """Left tracker Y coordinate in meters."""
+    left_pos_z: float
+    """Left tracker Z coordinate in meters."""
+    left_quat_x: float
+    """Left tracker quaternion X component."""
+    left_quat_y: float
+    """Left tracker quaternion Y component."""
+    left_quat_z: float
+    """Left tracker quaternion Z component."""
+    left_quat_w: float
+    """Left tracker quaternion W component."""
+
+    right_pos_x: float
+    """Right tracker X coordinate in meters."""
+    right_pos_y: float
+    """Right tracker Y coordinate in meters."""
+    right_pos_z: float
+    """Right tracker Z coordinate in meters."""
+    right_quat_x: float
+    """Right tracker quaternion X component."""
+    right_quat_y: float
+    """Right tracker quaternion Y component."""
+    right_quat_z: float
+    """Right tracker quaternion Z component."""
+    right_quat_w: float
+    """Right tracker quaternion W component."""
+
+
+@dataclass
+class QuestHeadPoseSample:
+    """Quest head pose sample containing left-eye pose represented as position and quaternion."""
+
+    timestamp_ns: int
+    """Relative timestamp, in nanoseconds from the recording start."""
+    position_m: Float32[ndarray, "3"]
+    """Left-eye position expressed in meters within the Quest coordinate frame."""
+    rotation_xyzw: Float32[ndarray, "4"]
+    """Left-eye orientation as a quaternion (x, y, z, w)."""
+
+
+def load_head_sequence(head_csv_path: Path) -> list[QuestHeadPoseSample]:
+    """Parse Quest head pose CSV rows into structured records."""
+    with head_csv_path.open(encoding="utf-8", newline="") as file:
+        reader: DictReader[str] = DictReader(file)
+        fieldnames: Sequence[str] | None = reader.fieldnames
+        if fieldnames is None:
+            raise ValueError(f"CSV file {head_csv_path} is missing a header row.")
+        normalized_header = tuple(field.strip() for field in fieldnames)
+        if normalized_header != QUEST_HEAD_CSV_COLUMNS:
+            msg: str = f"Unexpected CSV header in {head_csv_path}. Expected {QUEST_HEAD_CSV_COLUMNS} but found {normalized_header}."
+            raise ValueError(msg)
+
+        samples: list[QuestHeadPoseSample] = []
+        for row_dict in reader:
+            if not row_dict or all(value == "" for value in row_dict.values()):
+                continue
+            quest_row: QuestHeadPoseDictRow = from_dict(QuestHeadPoseDictRow, row_dict)
+            position_m: Float32[ndarray, "3"] = np.array(
+                [quest_row.left_pos_x, quest_row.left_pos_y, quest_row.left_pos_z],
+                dtype=np.float32,
+            )
+            rotation_xyzw: Float32[ndarray, "4"] = np.array(
+                [quest_row.left_quat_x, quest_row.left_quat_y, quest_row.left_quat_z, quest_row.left_quat_w],
+                dtype=np.float32,
+            )
+            sample = QuestHeadPoseSample(
+                timestamp_ns=int(np.floor(quest_row.ts_seconds * 1_000_000_000.0)),
+                position_m=position_m,
+                rotation_xyzw=rotation_xyzw,
+            )
+            samples.append(sample)
+
+    if not samples:
+        raise ValueError(f"CSV file {head_csv_path} does not contain any pose rows.")
+
+    return samples
+
+
+def load_camera_intrinsics(intrinsics_path: Path) -> Intrinsics:
+    """Load Quest camera intrinsics metadata from a JSON file."""
+    if not intrinsics_path.exists():
+        raise FileNotFoundError(intrinsics_path)
+
+    with intrinsics_path.open(encoding="utf-8") as file:
+        raw_intrinsics: dict[str, object] = json.load(file)
+
+    lens_intrinsics_section: dict[str, object] = raw_intrinsics.get("lens_intrinsics", {})
+    capture_resolution_section: dict[str, object] = raw_intrinsics.get("capture_resolution", {})
+
+    focal_length_x: float = float(lens_intrinsics_section.get("focal_length_x", 0.0))
+    focal_length_y: float = float(lens_intrinsics_section.get("focal_length_y", 0.0))
+    principal_point_x: float = float(lens_intrinsics_section.get("principal_point_x", 0.0))
+    principal_point_y: float = float(lens_intrinsics_section.get("principal_point_y", 0.0))
+
+    width_value: float | int | None = capture_resolution_section.get("width")
+    height_value: float | int | None = capture_resolution_section.get("height")
+    image_width: int | None = int(width_value) if width_value is not None else None
+    image_height: int | None = int(height_value) if height_value is not None else None
+
+    quest_intrinsics = Intrinsics(
+        camera_conventions="RDF",
+        fl_x=focal_length_x,
+        fl_y=focal_length_y,
+        cx=principal_point_x,
+        cy=principal_point_y,
+        width=image_width,
+        height=image_height,
+    )
+    return quest_intrinsics
+
+
 def main(config: Quest3OakDVisualizeConfig) -> None:
     data_root: Path = config.data_dir
     if not data_root.exists():
@@ -464,10 +605,19 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
 
     left_csv: Path = data_root / "quest" / "left_hand_poses.csv"
     right_csv: Path = data_root / "quest" / "right_hand_poses.csv"
+    head_csv: Path = data_root / "quest" / "head_pose.csv"
+    intrinsics_left_json: Path = data_root / "quest" / "intrinsics_left.json"
     if not left_csv.exists():
         raise FileNotFoundError(left_csv)
     if not right_csv.exists():
         raise FileNotFoundError(right_csv)
+    if not head_csv.exists():
+        raise FileNotFoundError(head_csv)
+    if not intrinsics_left_json.exists():
+        raise FileNotFoundError(intrinsics_left_json)
+
+    head_samples: list[QuestHeadPoseSample] = load_head_sequence(head_csv)
+    _left_intrinsics: Intrinsics = load_camera_intrinsics(intrinsics_left_json)
 
     sequences: list[tuple[QuestHandSide, QuestHandPoseSequence]] = [
         (QuestHandSide.LEFT, load_hand_sequence(left_csv)),
