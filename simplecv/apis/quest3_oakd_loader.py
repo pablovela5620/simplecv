@@ -7,14 +7,14 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Bool, Float32, Int64, UInt16
+from jaxtyping import Bool, Float32, Float64, Int64, UInt16
 from numpy import ndarray
 from rerun import AnnotationInfo, ClassDescription
 from serde import coerce, from_dict, serde
 from serde import field as serde_field
 
-from simplecv.camera_parameters import Intrinsics
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.umetrack_temp.generic_hand_model import LANDMARK, UME_HAND_CONNECTIONS
 
 
@@ -515,20 +515,53 @@ class QuestHeadPoseDictRow:
     """Right tracker quaternion W component."""
 
 
-@dataclass
-class QuestHeadPoseSample:
-    """Quest head pose sample containing left-eye pose represented as position and quaternion."""
+def _quaternion_xyzw_to_rotation_matrix(quaternion_xyzw: Float32[ndarray, "4"]) -> Float32[ndarray, "3 3"]:
+    """Convert an (x, y, z, w) quaternion into a world-from-camera rotation matrix."""
+    quat_f64: Float64[ndarray, "4"] = quaternion_xyzw.astype(np.float64)
+    norm: float = float(np.linalg.norm(quat_f64))
+    if norm == 0.0:
+        raise ValueError("Encountered zero-norm quaternion while building Quest head pose extrinsics.")
+    quat_unit: Float64[ndarray, "4"] = quat_f64 / norm
+    x: float = float(quat_unit[0])
+    y: float = float(quat_unit[1])
+    z: float = float(quat_unit[2])
+    w: float = float(quat_unit[3])
+
+    xx: float = x * x
+    yy: float = y * y
+    zz: float = z * z
+    xy: float = x * y
+    xz: float = x * z
+    yz: float = y * z
+    wx: float = w * x
+    wy: float = w * y
+    wz: float = w * z
+
+    rotation_matrix: Float32[ndarray, "3 3"] = np.array(
+        [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ],
+        dtype=np.float32,
+    )
+    return rotation_matrix
+
+
+@dataclass(slots=True)
+class QuestHeadExtrinsicsSample:
+    """Quest head pose extrinsics accompanied by capture timestamp."""
 
     timestamp_ns: int
-    """Relative timestamp, in nanoseconds from the recording start."""
-    position_m: Float32[ndarray, "3"]
-    """Left-eye position expressed in meters within the Quest coordinate frame."""
-    rotation_xyzw: Float32[ndarray, "4"]
-    """Left-eye orientation as a quaternion (x, y, z, w)."""
+    """Relative timestamp, measured in nanoseconds from recording start."""
+    left_extrinsics: Extrinsics
+    """Camera-to-world pose describing the left-eye tracking camera."""
+    right_extrinsics: Extrinsics
+    """Camera-to-world pose describing the right-eye tracking camera."""
 
 
-def load_head_sequence(head_csv_path: Path) -> list[QuestHeadPoseSample]:
-    """Parse Quest head pose CSV rows into structured records."""
+def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
+    """Parse Quest head pose CSV rows into timestamped camera extrinsics."""
     with head_csv_path.open(encoding="utf-8", newline="") as file:
         reader: DictReader[str] = DictReader(file)
         fieldnames: Sequence[str] | None = reader.fieldnames
@@ -539,7 +572,7 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadPoseSample]:
             msg: str = f"Unexpected CSV header in {head_csv_path}. Expected {QUEST_HEAD_CSV_COLUMNS} but found {normalized_header}."
             raise ValueError(msg)
 
-        samples: list[QuestHeadPoseSample] = []
+        samples: list[QuestHeadExtrinsicsSample] = []
         for row_dict in reader:
             if not row_dict or all(value == "" for value in row_dict.values()):
                 continue
@@ -552,10 +585,27 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadPoseSample]:
                 [quest_row.left_quat_x, quest_row.left_quat_y, quest_row.left_quat_z, quest_row.left_quat_w],
                 dtype=np.float32,
             )
-            sample = QuestHeadPoseSample(
-                timestamp_ns=int(np.floor(quest_row.ts_seconds * 1_000_000_000.0)),
-                position_m=position_m,
-                rotation_xyzw=rotation_xyzw,
+            world_R_cam: Float32[ndarray, "3 3"] = _quaternion_xyzw_to_rotation_matrix(rotation_xyzw)
+            world_t_cam: Float32[ndarray, "3"] = position_m
+            left_extrinsics: Extrinsics = Extrinsics(world_R_cam=world_R_cam, world_t_cam=world_t_cam)
+
+            right_position_m: Float32[ndarray, "3"] = np.array(
+                [quest_row.right_pos_x, quest_row.right_pos_y, quest_row.right_pos_z],
+                dtype=np.float32,
+            )
+            right_rotation_xyzw: Float32[ndarray, "4"] = np.array(
+                [quest_row.right_quat_x, quest_row.right_quat_y, quest_row.right_quat_z, quest_row.right_quat_w],
+                dtype=np.float32,
+            )
+            right_world_R_cam: Float32[ndarray, "3 3"] = _quaternion_xyzw_to_rotation_matrix(right_rotation_xyzw)
+            right_world_t_cam: Float32[ndarray, "3"] = right_position_m
+            right_extrinsics: Extrinsics = Extrinsics(world_R_cam=right_world_R_cam, world_t_cam=right_world_t_cam)
+
+            timestamp_ns: int = int(np.floor(quest_row.ts_seconds * 1_000_000_000.0))
+            sample: QuestHeadExtrinsicsSample = QuestHeadExtrinsicsSample(
+                timestamp_ns=timestamp_ns,
+                left_extrinsics=left_extrinsics,
+                right_extrinsics=right_extrinsics,
             )
             samples.append(sample)
 
@@ -563,6 +613,44 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadPoseSample]:
         raise ValueError(f"CSV file {head_csv_path} does not contain any pose rows.")
 
     return samples
+
+
+@serde
+class QuestLensIntrinsics:
+    """Pinhole camera intrinsics exported by the Quest device."""
+
+    focal_length_x: float
+    """Focal length along the X axis expressed in pixels."""
+    focal_length_y: float
+    """Focal length along the Y axis expressed in pixels."""
+    principal_point_x: float
+    """Principal point horizontal offset in pixels."""
+    principal_point_y: float
+    """Principal point vertical offset in pixels."""
+    skew: int
+    """Skew coefficient coupling the X and Y axes."""
+    available: bool
+    """Flag indicating whether calibrated intrinsics are available."""
+
+
+@serde(type_check=coerce)
+class QuestCaptureResolution:
+    """Image resolution used for Quest capture."""
+
+    width: int
+    """Capture width in pixels."""
+    height: int
+    """Capture height in pixels."""
+
+
+@serde(type_check=coerce)
+class QuestCameraIntrinsicsDocument:
+    """Quest camera intrinsics JSON document. Keep only important bits"""
+
+    lens_intrinsics: QuestLensIntrinsics
+    """Calibrated lens intrinsics expressed in pixel units."""
+    capture_resolution: QuestCaptureResolution
+    """Image resolution active during capture."""
 
 
 def load_camera_intrinsics(intrinsics_path: Path) -> Intrinsics:
@@ -573,29 +661,60 @@ def load_camera_intrinsics(intrinsics_path: Path) -> Intrinsics:
     with intrinsics_path.open(encoding="utf-8") as file:
         raw_intrinsics: dict[str, object] = json.load(file)
 
-    lens_intrinsics_section: dict[str, object] = raw_intrinsics.get("lens_intrinsics", {})
-    capture_resolution_section: dict[str, object] = raw_intrinsics.get("capture_resolution", {})
-
-    focal_length_x: float = float(lens_intrinsics_section.get("focal_length_x", 0.0))
-    focal_length_y: float = float(lens_intrinsics_section.get("focal_length_y", 0.0))
-    principal_point_x: float = float(lens_intrinsics_section.get("principal_point_x", 0.0))
-    principal_point_y: float = float(lens_intrinsics_section.get("principal_point_y", 0.0))
-
-    width_value: float | int | None = capture_resolution_section.get("width")
-    height_value: float | int | None = capture_resolution_section.get("height")
-    image_width: int | None = int(width_value) if width_value is not None else None
-    image_height: int | None = int(height_value) if height_value is not None else None
-
-    quest_intrinsics = Intrinsics(
-        camera_conventions="RDF",
-        fl_x=focal_length_x,
-        fl_y=focal_length_y,
-        cx=principal_point_x,
-        cy=principal_point_y,
-        width=image_width,
-        height=image_height,
+    intrinsics_doc: QuestCameraIntrinsicsDocument = from_dict(QuestCameraIntrinsicsDocument, raw_intrinsics)
+    intrinsics: Intrinsics = Intrinsics(
+        camera_conventions="RUB",
+        fl_x=intrinsics_doc.lens_intrinsics.focal_length_x,
+        fl_y=intrinsics_doc.lens_intrinsics.focal_length_y,
+        cx=intrinsics_doc.lens_intrinsics.principal_point_x,
+        cy=intrinsics_doc.lens_intrinsics.principal_point_y,
+        width=intrinsics_doc.capture_resolution.width,
+        height=intrinsics_doc.capture_resolution.height,
     )
-    return quest_intrinsics
+    return intrinsics
+
+
+def _log_head_cameras(
+    samples: Sequence[QuestHeadExtrinsicsSample],
+    *,
+    left_intrinsics: Intrinsics,
+    right_intrinsics: Intrinsics,
+    log_path: str,
+    timeline: str = "quest_time",
+) -> None:
+    """Log Quest head cameras over time using the provided intrinsics and extrinsics."""
+
+    left_cam_path: Path = Path(f"{log_path}/left")
+    right_cam_path: Path = Path(f"{log_path}/right")
+
+    for sample in samples:
+        rr.set_time(timeline, duration=np.timedelta64(sample.timestamp_ns, "ns"))
+
+        # Left eye camera
+        left_camera_params: PinholeParameters = PinholeParameters(
+            name="quest_left_eye",
+            extrinsics=sample.left_extrinsics,
+            intrinsics=left_intrinsics,
+        )
+        log_pinhole(
+            camera=left_camera_params,
+            cam_log_path=left_cam_path,
+            static=False,
+            image_plane_distance=0.05,
+        )
+
+        # Right eye camera
+        right_camera_params: PinholeParameters = PinholeParameters(
+            name="quest_right_eye",
+            extrinsics=sample.right_extrinsics,
+            intrinsics=right_intrinsics,
+        )
+        log_pinhole(
+            camera=right_camera_params,
+            cam_log_path=right_cam_path,
+            static=False,
+            image_plane_distance=0.05,
+        )
 
 
 def main(config: Quest3OakDVisualizeConfig) -> None:
@@ -607,6 +726,9 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
     right_csv: Path = data_root / "quest" / "right_hand_poses.csv"
     head_csv: Path = data_root / "quest" / "head_pose.csv"
     intrinsics_left_json: Path = data_root / "quest" / "intrinsics_left.json"
+    intrinsics_right_json: Path = data_root / "quest" / "intrinsics_right.json"
+    left_video_path: Path = data_root / "quest" / "left.mp4"
+    right_video_path: Path = data_root / "quest" / "right.mp4"
     if not left_csv.exists():
         raise FileNotFoundError(left_csv)
     if not right_csv.exists():
@@ -615,9 +737,34 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
         raise FileNotFoundError(head_csv)
     if not intrinsics_left_json.exists():
         raise FileNotFoundError(intrinsics_left_json)
+    if not intrinsics_right_json.exists():
+        raise FileNotFoundError(intrinsics_right_json)
+    if not left_video_path.exists():
+        raise FileNotFoundError(left_video_path)
+    if not right_video_path.exists():
+        raise FileNotFoundError(right_video_path)
 
-    head_samples: list[QuestHeadPoseSample] = load_head_sequence(head_csv)
-    _left_intrinsics: Intrinsics = load_camera_intrinsics(intrinsics_left_json)
+    head_extrinsics: list[QuestHeadExtrinsicsSample] = load_head_sequence(head_csv)
+    left_intrinsics: Intrinsics = load_camera_intrinsics(intrinsics_left_json)
+    right_intrinsics: Intrinsics = load_camera_intrinsics(intrinsics_right_json)
+
+    _log_head_cameras(
+        head_extrinsics,
+        left_intrinsics=left_intrinsics,
+        right_intrinsics=right_intrinsics,
+        log_path="/world/ego/quest3",
+    )
+
+    _left_video_timestamps_ns = log_video(
+        video_path=left_video_path,
+        video_log_path=Path("/world/ego/quest3/left/pinhole/video"),
+        timeline="quest_time",
+    )
+    _right_video_timestamps_ns = log_video(
+        video_path=right_video_path,
+        video_log_path=Path("/world/ego/quest3/right/pinhole/video"),
+        timeline="quest_time",
+    )
 
     sequences: list[tuple[QuestHandSide, QuestHandPoseSequence]] = [
         (QuestHandSide.LEFT, load_hand_sequence(left_csv)),
