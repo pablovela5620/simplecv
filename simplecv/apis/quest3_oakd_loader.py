@@ -14,6 +14,8 @@ from serde import coerce, from_dict, serde
 from serde import field as serde_field
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.ops import conventions
+from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.umetrack_temp.generic_hand_model import LANDMARK, UME_HAND_CONNECTIONS
 
@@ -457,13 +459,33 @@ def _log_annotation_context(log_path: str, *, sides: Sequence[QuestHandSide]) ->
     rr.log(log_path, rr.AnnotationContext(class_descriptions), static=True)
 
 
+@dataclass(slots=True)
+class QuestHeadExtrinsicsSample:
+    """Quest head pose extrinsics accompanied by capture timestamp."""
+
+    timestamp_ns: int
+    """Relative timestamp, measured in nanoseconds from recording start."""
+    left_extrinsics: Extrinsics
+    """Camera-to-world pose describing the left-eye tracking camera."""
+    right_extrinsics: Extrinsics
+    """Camera-to-world pose describing the right-eye tracking camera."""
+
+
 def log_hand_sequence(
-    sequence: QuestHandPoseSequence, *, side: QuestHandSide, log_path: str, timeline: str = "quest_time"
+    sequence: QuestHandPoseSequence,
+    head_extrinsics: list[QuestHeadExtrinsicsSample],
+    left_intrinsics: Intrinsics,
+    right_intrinsics: Intrinsics,
+    *,
+    side: QuestHandSide,
+    log_path: str,
+    timeline: str = "quest_time",
 ) -> None:
     """Log a Quest hand sequence into the active Rerun recording."""
-    entity_path = f"{log_path}/{side.entity_suffix}"
+    entity_path: str = f"{log_path}/{side.entity_suffix}"
     class_ids: UInt16[ndarray, "n_ume_kpts=21"] = QUEST_HAND_CLASS_IDS_BY_SIDE[side]
-    for sample in sequence:
+    head_extrinsic: QuestHeadExtrinsicsSample
+    for sample, head_extrinsic in zip(sequence, head_extrinsics, strict=True):
         rr.set_time(timeline, duration=np.timedelta64(sample.timestamp_ns, "ns"))
         mapped_keypoints: Float32[ndarray, "n_ume_kpts=21 3"] = sample.keypoints_m[LANDMARK_TO_QUEST_INDEX]
         rr.log(
@@ -475,6 +497,56 @@ def log_hand_sequence(
                 show_labels=False,
             ),
         )
+
+        left_pinhole: PinholeParameters = PinholeParameters(
+            name="quest_left_eye",
+            extrinsics=head_extrinsic.left_extrinsics,
+            intrinsics=left_intrinsics,
+        )
+        right_pinhole: PinholeParameters = PinholeParameters(
+            name="quest_right_eye",
+            extrinsics=head_extrinsic.right_extrinsics,
+            intrinsics=right_intrinsics,
+        )
+        # project into each eye camera
+        for camera_name, pinhole_param in [("left", left_pinhole), ("right", right_pinhole)]:
+            xyz_hom_stack: Float32[ndarray, "n_frames=1 n_ume_kpts=21 4"] = np.concatenate(
+                [mapped_keypoints, np.ones_like(mapped_keypoints[..., :1])], axis=-1
+            )[np.newaxis, ...]
+            Pall_exo: Float64[ndarray, "n_frames=1 3 4"] = pinhole_param.projection_matrix[np.newaxis, ...]
+            uv_raw_stack: Float64[ndarray, "n_frames=1 n_views n_ume_kpts=21 2"] = proj_3d_vectorized(
+                xyz_hom=xyz_hom_stack, P=Pall_exo
+            )
+            uv_frame: Float32[ndarray, "n_ume_kpts=21 2"] = uv_raw_stack[0, 0].astype(np.float32)
+
+            xyz_world_hom: Float32[ndarray, "n_ume_kpts=21 4"] = xyz_hom_stack[0]
+            world_T_cam: Float32[ndarray, "4 4"] = pinhole_param.extrinsics.world_T_cam.astype(np.float32)
+            xyz_cam: Float32[ndarray, "n_ume_kpts=21 4"] = (world_T_cam @ xyz_world_hom.T).T
+            depth_cam: Float32[ndarray, "n_ume_kpts=21"] = xyz_cam[:, 2]
+            depth_mask: Bool[ndarray, "n_ume_kpts=21"] = depth_cam > 0.0
+
+            intrinsics = pinhole_param.intrinsics
+            width: float = float(intrinsics.width if intrinsics.width is not None else 2.0 * intrinsics.cx)
+            height: float = float(intrinsics.height if intrinsics.height is not None else 2.0 * intrinsics.cy)
+            bounds_mask: Bool[ndarray, "n_ume_kpts=21"] = (
+                (uv_frame[:, 0] >= 0.0)
+                & (uv_frame[:, 0] <= width)
+                & (uv_frame[:, 1] >= 0.0)
+                & (uv_frame[:, 1] <= height)
+            )
+
+            valid_mask: Bool[ndarray, "n_ume_kpts=21"] = depth_mask & bounds_mask
+            uv_frame = np.where(valid_mask[:, None], uv_frame, np.nan)
+
+            rr.log(
+                f"/world/ego/quest3/{camera_name}/pinhole/video/uv_{side.label}",
+                rr.Points2D(
+                    uv_frame,
+                    keypoint_ids=UME_HAND_KEYPOINT_IDS,
+                    class_ids=class_ids,
+                    show_labels=False,
+                ),
+            )
 
 
 @serde(type_check=coerce)
@@ -548,18 +620,6 @@ def _quaternion_xyzw_to_rotation_matrix(quaternion_xyzw: Float32[ndarray, "4"]) 
     return rotation_matrix
 
 
-@dataclass(slots=True)
-class QuestHeadExtrinsicsSample:
-    """Quest head pose extrinsics accompanied by capture timestamp."""
-
-    timestamp_ns: int
-    """Relative timestamp, measured in nanoseconds from recording start."""
-    left_extrinsics: Extrinsics
-    """Camera-to-world pose describing the left-eye tracking camera."""
-    right_extrinsics: Extrinsics
-    """Camera-to-world pose describing the right-eye tracking camera."""
-
-
 def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
     """Parse Quest head pose CSV rows into timestamped camera extrinsics."""
     with head_csv_path.open(encoding="utf-8", newline="") as file:
@@ -588,6 +648,18 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
             world_R_cam: Float32[ndarray, "3 3"] = _quaternion_xyzw_to_rotation_matrix(rotation_xyzw)
             world_t_cam: Float32[ndarray, "3"] = position_m
             left_extrinsics: Extrinsics = Extrinsics(world_R_cam=world_R_cam, world_t_cam=world_t_cam)
+            # Convert from OpenGL (RUB) to OpenCV (RDF) convention
+            world_T_cam_gl: Float32[np.ndarray, "4 4"] = left_extrinsics.world_T_cam.astype(np.float32)
+            world_T_cam_cv: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
+                world_T_cam_gl,
+                src_convention=conventions.CC.GL,
+                dst_convention=conventions.CC.CV,
+            )
+            left_translation_cv: Float32[ndarray, "3"] = world_T_cam_cv[:3, 3].astype(np.float32)
+            left_extrinsics: Extrinsics = Extrinsics(
+                world_R_cam=world_T_cam_cv[:3, :3],
+                world_t_cam=left_translation_cv,
+            )
 
             right_position_m: Float32[ndarray, "3"] = np.array(
                 [quest_row.right_pos_x, quest_row.right_pos_y, quest_row.right_pos_z],
@@ -600,6 +672,21 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
             right_world_R_cam: Float32[ndarray, "3 3"] = _quaternion_xyzw_to_rotation_matrix(right_rotation_xyzw)
             right_world_t_cam: Float32[ndarray, "3"] = right_position_m
             right_extrinsics: Extrinsics = Extrinsics(world_R_cam=right_world_R_cam, world_t_cam=right_world_t_cam)
+
+            # Convert from OpenGL (RUB) to OpenCV (RDF) convention
+            right_world_T_cam_gl: Float32[np.ndarray, "4 4"] = right_extrinsics.world_T_cam.astype(np.float32)
+            world_T_cam_cv: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
+                right_world_T_cam_gl,
+                src_convention=conventions.CC.GL,
+                dst_convention=conventions.CC.CV,
+            )
+            right_translation_cv: Float32[ndarray, "3"] = (
+                world_T_cam_cv[:3, 3].astype(np.float32) + QUEST_HEAD_EXTRINSIC_OFFSET_M
+            )
+            right_extrinsics: Extrinsics = Extrinsics(
+                world_R_cam=world_T_cam_cv[:3, :3],
+                world_t_cam=right_translation_cv,
+            )
 
             timestamp_ns: int = int(np.floor(quest_row.ts_seconds * 1_000_000_000.0))
             sample: QuestHeadExtrinsicsSample = QuestHeadExtrinsicsSample(
@@ -663,7 +750,7 @@ def load_camera_intrinsics(intrinsics_path: Path) -> Intrinsics:
 
     intrinsics_doc: QuestCameraIntrinsicsDocument = from_dict(QuestCameraIntrinsicsDocument, raw_intrinsics)
     intrinsics: Intrinsics = Intrinsics(
-        camera_conventions="RUB",
+        camera_conventions="RDF",
         fl_x=intrinsics_doc.lens_intrinsics.focal_length_x,
         fl_y=intrinsics_doc.lens_intrinsics.focal_length_y,
         cx=intrinsics_doc.lens_intrinsics.principal_point_x,
@@ -755,6 +842,11 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
         log_path="/world/ego/quest3",
     )
 
+    _log_annotation_context(
+        "/world/ego/quest3",
+        sides=[QuestHandSide.LEFT, QuestHandSide.RIGHT],
+    )
+
     _left_video_timestamps_ns = log_video(
         video_path=left_video_path,
         video_log_path=Path("/world/ego/quest3/left/pinhole/video"),
@@ -772,6 +864,13 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
     ]
 
     log_path = "quest3_oakd"
-    _log_annotation_context(log_path, sides=[side for side, _ in sequences])
+    _log_annotation_context("/", sides=[side for side, _ in sequences])
     for side, sequence in sequences:
-        log_hand_sequence(sequence, side=side, log_path=log_path)
+        log_hand_sequence(
+            sequence,
+            head_extrinsics,
+            left_intrinsics=left_intrinsics,
+            right_intrinsics=right_intrinsics,
+            side=side,
+            log_path=log_path,
+        )
