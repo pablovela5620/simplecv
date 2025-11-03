@@ -80,8 +80,6 @@ _QUEST_HAND_LANDMARK_PREFIXES: tuple[str, ...] = (
     "little_tip",
 )
 
-_CSV_AXES: tuple[str, ...] = ("x", "y", "z")
-
 
 class QuestHandSide(IntEnum):
     """Hands available in the Quest CSV exports."""
@@ -135,28 +133,6 @@ UME_HAND_KEYPOINT_IDS: UInt16[ndarray, "n_ume_kpts"] = np.array(
 QUEST_HAND_CLASS_IDS_BY_SIDE: dict[QuestHandSide, UInt16[ndarray, "n_ume_kpts"]] = {
     side: np.full(UME_HAND_LANDMARK_COUNT, int(side), dtype=np.uint16) for side in QuestHandSide
 }
-
-QUEST_HAND_CSV_COLUMNS: tuple[str, ...] = ("timestamp",) + tuple(
-    f"{prefix}_{axis}" for prefix in _QUEST_HAND_LANDMARK_PREFIXES for axis in _CSV_AXES
-)
-
-QUEST_HEAD_CSV_COLUMNS: tuple[str, ...] = (
-    "timestamp",
-    "left_pos_x",
-    "left_pos_y",
-    "left_pos_z",
-    "left_quat_x",
-    "left_quat_y",
-    "left_quat_z",
-    "left_quat_w",
-    "right_pos_x",
-    "right_pos_y",
-    "right_pos_z",
-    "right_quat_x",
-    "right_quat_y",
-    "right_quat_z",
-    "right_quat_w",
-)
 
 
 @serde(type_check=coerce)
@@ -397,16 +373,6 @@ def load_hand_sequence(csv_path: Path) -> QuestHandPoseSequence:
 
     with csv_path.open(encoding="utf-8", newline="") as file:
         reader: DictReader[str] = DictReader(file)
-        fieldnames: Sequence[str] | None = reader.fieldnames
-        if fieldnames is None:
-            raise ValueError(f"CSV file {csv_path} is missing a header row.")
-        normalized_header = tuple(field.strip() for field in fieldnames)
-        if normalized_header != QUEST_HAND_CSV_COLUMNS:
-            msg: str = (
-                f"Unexpected CSV header in {csv_path}. Expected {QUEST_HAND_CSV_COLUMNS} but found {normalized_header}."
-            )
-            raise ValueError(msg)
-
         samples: list[QuestHandPoseSample] = []
         for row_dict in reader:
             if not row_dict or all(value == "" for value in row_dict.values()):
@@ -624,14 +590,6 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
     """Parse Quest head pose CSV rows into timestamped camera extrinsics."""
     with head_csv_path.open(encoding="utf-8", newline="") as file:
         reader: DictReader[str] = DictReader(file)
-        fieldnames: Sequence[str] | None = reader.fieldnames
-        if fieldnames is None:
-            raise ValueError(f"CSV file {head_csv_path} is missing a header row.")
-        normalized_header = tuple(field.strip() for field in fieldnames)
-        if normalized_header != QUEST_HEAD_CSV_COLUMNS:
-            msg: str = f"Unexpected CSV header in {head_csv_path}. Expected {QUEST_HEAD_CSV_COLUMNS} but found {normalized_header}."
-            raise ValueError(msg)
-
         samples: list[QuestHeadExtrinsicsSample] = []
         for row_dict in reader:
             if not row_dict or all(value == "" for value in row_dict.values()):
@@ -680,9 +638,7 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
                 src_convention=conventions.CC.GL,
                 dst_convention=conventions.CC.CV,
             )
-            right_translation_cv: Float32[ndarray, "3"] = (
-                world_T_cam_cv[:3, 3].astype(np.float32) + QUEST_HEAD_EXTRINSIC_OFFSET_M
-            )
+            right_translation_cv: Float32[ndarray, "3"] = world_T_cam_cv[:3, 3].astype(np.float32)
             right_extrinsics: Extrinsics = Extrinsics(
                 world_R_cam=world_T_cam_cv[:3, :3],
                 world_t_cam=right_translation_cv,
