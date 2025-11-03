@@ -1,17 +1,21 @@
-import json
 import warnings
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float, Float32, UInt8
+import torch
+from einops import rearrange
+from jaxtyping import Float, Float32, Int64, UInt8
 from numpy import ndarray
 from rerun import AnnotationInfo, ClassDescription
+from serde import field as serde_field
+from serde import serde
+from serde.json import from_json
 
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.umetrack_temp.camera_models import FisheyeCameraParameter, PinholeCameraParameter
@@ -19,10 +23,10 @@ from simplecv.umetrack_temp.cameras import Camera
 from simplecv.umetrack_temp.generic_hand_model import (
     LANDMARK,
     UME_HAND_CONNECTIONS,
+    HandModelTensor,
     HandPoseLabels,
     SingleHandPose,
     landmarks_from_hand_pose,
-    load_hand_model_from_dict,
 )
 from simplecv.umetrack_temp.perspective_cropping import (
     gen_crop_parameters_from_points,
@@ -43,6 +47,131 @@ CAMERA_PANEL_ORDER: list[tuple[str, int]] = [
 ]
 
 
+@serde
+class UmeTrackCameras:
+    """Intrinsic parameters for a single UmeTrack fisheye camera.
+
+    Notes:
+        Synthetic sequences encode the fifth and sixth radial coefficients under
+        the legacy keys `p3` and `p4`; see https://github.com/facebookresearch/UmeTrack_data/issues/4.
+    """
+
+    image_size_x: int = serde_field(rename="ImageSizeX")
+    """Horizontal image resolution in pixels."""
+
+    image_size_y: int = serde_field(rename="ImageSizeY")
+    """Vertical image resolution in pixels."""
+
+    fx: float
+    """Focal length along the X axis in pixels."""
+
+    fy: float
+    """Focal length along the Y axis in pixels."""
+
+    cx: float
+    """Principal point X coordinate in pixels."""
+
+    cy: float
+    """Principal point Y coordinate in pixels."""
+
+    distortion_model: Literal["FishEye62"] = serde_field(rename="DistortionModel")
+    """Distortion model identifier exported by UmeTrack."""
+
+    k1: float
+    """First radial distortion coefficient."""
+
+    k2: float
+    """Second radial distortion coefficient."""
+
+    k3: float
+    """Third radial distortion coefficient."""
+
+    k4: float
+    """Fourth radial distortion coefficient."""
+
+    p1: float
+    """First tangential distortion coefficient."""
+
+    p2: float
+    """Second tangential distortion coefficient."""
+
+    k5: float = serde_field(default=0.0)
+    """Fifth radial distortion coefficient (defaults to 0.0 if not specified)."""
+
+    k6: float = serde_field(default=0.0)
+    """Sixth radial distortion coefficient (defaults to 0.0 if not specified)."""
+
+
+@serde
+class HandModelNumpy:
+    """Hand model parameters stored as NumPy arrays.
+
+    Notes:
+        Serde loads each field as a NumPy ndarray with the dtype/shape indicated
+        by the jaxtyping annotations below.
+    """
+
+    joint_rotation_axes: Float32[ndarray, "n_joints=22 3"]
+    """Unit rotation axes for each joint frame."""
+    joint_rest_positions: Float32[ndarray, "n_joints=22 3"]
+    """Joint rest positions expressed in the hand root frame."""
+    joint_frame_index: Int64[ndarray, "n_joints=22"]
+    """Mapping from joint to the frame index used during skinning."""
+    joint_parent: Int64[ndarray, "n_joints=22"]
+    """Parent joint indices (negative values indicate the root)."""
+    joint_first_child: Int64[ndarray, "n_joints=22"]
+    """Index to the first child joint for hierarchical traversal."""
+    joint_next_sibling: Int64[ndarray, "n_joints=22"]
+    """Index to the next sibling joint for hierarchical traversal."""
+    landmark_rest_positions: Float32[ndarray, "num_landmarks 3"]
+    """Rest pose landmark coordinates in the hand model frame."""
+    landmark_rest_bone_weights: Float32[ndarray, "num_landmarks max_landmark_weights"]
+    """Bone blend weights per landmark."""
+    landmark_rest_bone_indices: Int64[ndarray, "num_landmarks max_landmark_weights"]
+    """Bone indices paired with `landmark_rest_bone_weights`."""
+    hand_scale: Float32[ndarray, ""]
+    """Global uniform hand scale factor."""
+    mesh_vertices: Float32[ndarray, "num_mesh_vertices 3"]
+    """Skinned mesh vertices at rest pose."""
+    mesh_triangles: Int64[ndarray, "num_mesh_faces 3"]
+    """Triangle indices defining the mesh topology."""
+    dense_bone_weights: Float32[ndarray, "num_mesh_vertices num_joint_frames"]
+    """Blend weights used for dense mesh skinning."""
+    joint_limits: Float32[ndarray, "n_joints=22 joint_limit_bounds"]
+    """Lower/upper joint angle limits in radians."""
+
+
+def hand_model_numpy_to_tensor(hand_model: HandModelNumpy) -> HandModelTensor:
+    """Convert a NumPy-backed hand model into its torch tensor counterpart.
+
+    Args:
+        hand_model: Serde-deserialized hand model containing NumPy arrays.
+
+    Returns:
+        A `HandModelTensor` with each field materialized as a torch tensor.
+
+    Notes:
+        The conversion preserves the dtype coming from NumPy; this assumes the
+        serde loader already supplied the correct float32 / int64 arrays.
+    """
+    tensor_fields: dict[str, torch.Tensor] = {
+        name: torch.from_numpy(value) for name, value in asdict(hand_model).items()
+    }
+    return HandModelTensor(**tensor_fields)
+
+
+@serde
+class UmeTrackAnnotation:
+    cameras: list[UmeTrackCameras]
+    """Intrinsic definitions for each UmeTrack fisheye camera."""
+    camera_angles: list[float]
+    hand_model: HandModelNumpy
+    joint_angles: Float32[ndarray, "n_frames n_hands=2 n_joints=22"]
+    hand_confidences: Float32[np.ndarray, "n_frames n_hands=2"]
+    wrist_transforms: Float32[np.ndarray, "n_frames n_hands=2 4 4"]
+    camera_to_world_transforms: Float32[ndarray, "n_frames n_cams 4 4"]
+
+
 class DataStream:
     def __init__(self, video_path: Path, annotation_path: Path) -> None:
         """
@@ -53,22 +182,20 @@ class DataStream:
         - hand pose labels
         """
         self.video_stream = VideoReader(video_path)
-        with open(annotation_path) as f:
-            annotation = json.load(f)
+        annotation: UmeTrackAnnotation = from_json(UmeTrackAnnotation, annotation_path.read_text())
         # camera intrinsics
-        self.fisheye_cameras = create_cameras(annotation["cameras"])
+        self.fisheye_cameras = create_cameras(annotation.cameras)
         # camera extrinsics (slam pose of each camera)
-        self.world_T_cam_all: Float32[ndarray, "num_frames num_cameras 4 4"] = np.asarray(
-            annotation["camera_to_world_transforms"], dtype=np.float32
-        )
-        self.hand_model = load_hand_model_from_dict(annotation["hand_model"])
+        self.world_T_cam_all: Float32[ndarray, "n_frames n_cams 4 4"] = annotation.camera_to_world_transforms
+        self.hand_model: HandModelTensor = hand_model_numpy_to_tensor(annotation.hand_model)
+
         self.hand_pose_labels = HandPoseLabels(
-            camera_angles=[float(angle) for angle in annotation["camera_angles"]],
+            camera_angles=[float(angle) for angle in annotation.camera_angles],
             camera_to_world_transforms=self.world_T_cam_all,
             hand_model=self.hand_model,
-            joint_angles=np.asarray(annotation["joint_angles"], dtype=np.float32),
-            wrist_transforms=np.asarray(annotation["wrist_transforms"], dtype=np.float32),
-            hand_confidences=np.asarray(annotation["hand_confidences"], dtype=np.float32),
+            joint_angles=annotation.joint_angles,
+            wrist_transforms=annotation.wrist_transforms,
+            hand_confidences=annotation.hand_confidences,
         )
         self._warned_singular_pose = False
 
@@ -78,27 +205,27 @@ class DataStream:
     def __iter__(self) -> Iterator[tuple[ndarray, ndarray, dict[int, SingleHandPose]]]:
         """
         Returns:
-            multi_view_images: (num_cameras, frame_h, single_cam_w, 3)
-            cam_to_world: (num_cameras, 4, 4)
+            multi_view_images: (n_cams, frame_h, single_cam_w, 3)
+            cam_to_world: (n_cams, 4, 4)
             gt_tracking: dict[int, SingleHandPose]
         """
         for frame_idx in range(self.__len__()):
             gt_tracking = {}
-            # (h, num_cameras * w, 3)
+            # (h, n_cams * w, 3)
             raw_mono_frame = self.video_stream[frame_idx]
             raw_mono_images: UInt8[ndarray, "frame_h frame_w 3"] = np.asarray(raw_mono_frame, dtype=np.uint8)
             frame_height, frame_width, _ = raw_mono_images.shape
-            num_cameras = 4
-            if frame_width % num_cameras != 0:
-                raise ValueError(f"Video width {frame_width} is not divisible by expected camera count {num_cameras}.")
-            single_cam_width = frame_width // num_cameras
-            multi_view_images: UInt8[ndarray, "num_cameras frame_h single_cam_w 3"] = raw_mono_images.reshape(
-                frame_height,
-                num_cameras,
-                single_cam_width,
-                3,
-            ).transpose(1, 0, 2, 3)
-            multi_world_T_cam = self.world_T_cam_all[frame_idx]
+            n_cams = 4
+            if frame_width % n_cams != 0:
+                raise ValueError(f"Video width {frame_width} is not divisible by expected camera count {n_cams}.")
+            single_cam_width = frame_width // n_cams
+            multi_view_images: UInt8[ndarray, "n_cams frame_h single_cam_w 3"] = rearrange(
+                raw_mono_images,
+                "frame_h (n_cams single_cam_w) channels -> n_cams frame_h single_cam_w channels",
+                n_cams=n_cams,
+                single_cam_w=single_cam_width,
+            )
+            multi_world_T_cam: Float32[ndarray, "n_cams 4 4"] = self.world_T_cam_all[frame_idx]
 
             # Skip frames where any camera pose is singular or invalid.
             if not np.all(np.isfinite(multi_world_T_cam)):
@@ -143,26 +270,37 @@ class DataStream:
             yield multi_view_images, multi_world_T_cam, gt_tracking
 
 
-def create_cameras(intri_annotations: list[dict[str, Any]]) -> list[Camera]:
+def create_cameras(umtrack_camera_list: list[UmeTrackCameras]) -> list[Camera]:
     """
     Given annotations, convert to FisheryCameraParameter. This does not include extrinsic as they change per frame.
     """
-    cameras = []
-    for camera_name, intri_dict in enumerate(intri_annotations):
-        width = intri_dict["ImageSizeX"]
-        height = intri_dict["ImageSizeY"]
-        fx = intri_dict["fx"]
-        fy = intri_dict["fy"]
-        cx = intri_dict["cx"]
-        cy = intri_dict["cy"]
-        dist_coeff_k = [intri_dict[key] for key in intri_dict if key.startswith("k")]
-        dist_coeff_p = [intri_dict[key] for key in intri_dict if key.startswith("p")]
-
+    cameras: list[Camera] = []
+    for camera_name, umetrack_camera in enumerate(umtrack_camera_list):
         cam_params = FisheyeCameraParameter(name=f"camera_{camera_name}")
-        cam_params.set_intrinsic(width=width, height=height, fx=fx, fy=fy, cx=cx, cy=cy)
+        cam_params.set_intrinsic(
+            width=umetrack_camera.image_size_x,
+            height=umetrack_camera.image_size_y,
+            fx=umetrack_camera.fx,
+            fy=umetrack_camera.fy,
+            cx=umetrack_camera.cx,
+            cy=umetrack_camera.cy,
+        )
         # dist coeff k can have between 4-6 params
-        # dist coeef p can have between 2-4 params, but we can only set 2
-        cam_params.set_dist_coeff(dist_coeff_k=dist_coeff_k, dist_coeff_p=dist_coeff_p[:2])
+        # dist coeef p can have between 2-4 params, but we can only set 2 as p3/p4 dont make sense for tangential distortion
+        cam_params.set_dist_coeff(
+            dist_coeff_k=[
+                umetrack_camera.k1,
+                umetrack_camera.k2,
+                umetrack_camera.k3,
+                umetrack_camera.k4,
+                umetrack_camera.k5,
+                umetrack_camera.k6,
+            ],
+            dist_coeff_p=[
+                umetrack_camera.p1,
+                umetrack_camera.p2,
+            ],
+        )
         cameras.append(Camera(cam_params))
 
     return cameras
@@ -211,11 +349,11 @@ def resize_image_if_needed(
     return cv2.resize(image, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
 
 
-def setup_logging(log_path: str = "world") -> str:
+def setup_logging(parent_log_path: str = "world") -> str:
     """
     setup logging for rerun along with annotations context for each hand
     """
-    rr.log(log_path, rr.ViewCoordinates.RUB, static=True)
+    rr.log(parent_log_path, rr.ViewCoordinates.RUB, static=True)
     class_descriptions = []
     for hand_idx, hand_type in enumerate(HAND_TYPE):
         class_descriptions.append(
@@ -225,8 +363,8 @@ def setup_logging(log_path: str = "world") -> str:
                 keypoint_connections=list(UME_HAND_CONNECTIONS),
             ),
         )
-    rr.log(f"{log_path}", rr.AnnotationContext(class_descriptions), static=True)
-    return log_path
+    rr.log(f"{parent_log_path}", rr.AnnotationContext(class_descriptions), static=True)
+    return parent_log_path
 
 
 def create_umetrack_view(
@@ -313,8 +451,8 @@ def main(config: UmeTrackVisualizeConfig) -> None:
     datastream = DataStream(video_path, annotation_path)
     camera_angles: list[float] = datastream.hand_pose_labels.camera_angles
 
-    log_path: str = setup_logging()
-    create_umetrack_view(log_path)
+    parent_log_path: str = setup_logging()
+    create_umetrack_view(parent_log_path)
 
     for frame_idx, frame_data in enumerate(datastream):
         multi_view_images, _multi_world_T_cam, hand_pose_dict = frame_data
@@ -332,7 +470,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                 landmark: Float32[ndarray, "n_kpts=21 3"] = landmarks_from_hand_pose(hand_model, hand_pose, hand_idx)
                 class_ids = np.full(len(landmark), hand_idx, dtype=np.uint16)
                 rr.log(
-                    f"{log_path}/{hand_type}/landmark",
+                    f"{parent_log_path}/{hand_type}/landmark",
                     rr.Points3D(landmark, keypoint_ids=KEYPOINT_IDS, class_ids=class_ids, show_labels=False),
                 )
 
@@ -369,7 +507,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                         current_cam, perspective_cam, current_image
                     )
 
-                    cropped_cam_log_path: str = f"{log_path}/recropped_camera_{hand_type}_{cam_idx}"
+                    cropped_cam_log_path: str = f"{parent_log_path}/recropped_camera_{hand_type}_{cam_idx}"
                     crop_log_path_name: str = f"crop_{hand_type}_{cam_idx}"
 
                     log_camera(
@@ -389,7 +527,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
 
         # log original camera camera data and projected landmarks
         for camera_idx, camera in enumerate(datastream.fisheye_cameras):
-            cam_log_path: str = f"{log_path}/camera_{camera_idx}"
+            cam_log_path: str = f"{parent_log_path}/camera_{camera_idx}"
             img_log_path_name: str = f"image_{camera_idx}"
             current_image: UInt8[ndarray, "h w 3"] = multi_view_images[camera_idx]
             log_camera(

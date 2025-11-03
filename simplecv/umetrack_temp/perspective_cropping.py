@@ -8,7 +8,7 @@ from simplecv.umetrack_temp.camera_models import PinholeCameraParameter
 from simplecv.umetrack_temp.cameras import Camera
 from simplecv.umetrack_temp.generic_hand_model import (
     NUM_JOINTS_PER_HAND,
-    HandModel,
+    HandModelTensor,
     SingleHandPose,
     landmarks_from_hand_pose,
 )
@@ -243,7 +243,7 @@ def gen_crop_parameters_from_points(
     )
 
 
-def neutral_joint_angles(up: HandModel, lower_factor: float = 0.5) -> torch.Tensor:
+def neutral_joint_angles(up: HandModelTensor, lower_factor: float = 0.5) -> torch.Tensor:
     joint_limits = up.joint_limits
     assert joint_limits is not None
     return joint_limits[..., 0] * lower_factor + joint_limits[..., 1] * (1 - lower_factor)
@@ -251,7 +251,7 @@ def neutral_joint_angles(up: HandModel, lower_factor: float = 0.5) -> torch.Tens
 
 def rank_hand_visibility_in_cameras(
     cameras: list[Camera],
-    hand_model: HandModel,
+    hand_model: HandModelTensor,
     hand_pose: SingleHandPose,
     hand_idx: int,
     min_required_vis_landmarks: int,
@@ -265,7 +265,7 @@ def rank_hand_visibility_in_cameras(
 
     Args:
         cameras (List[FisheyeCameraParameter]): A list of fisheye camera parameters to rank.
-        hand_model (HandModel): The model of the hand whose visibility is to be evaluated.
+        hand_model (HandModelTensor): The model of the hand whose visibility is to be evaluated.
         hand_pose (SingleHandPose): The pose of the hand in the scene.
         hand_idx (int): The index of the hand to be evaluated (0 is left 1 is right).
         min_required_vis_landmarks (int): The minimum number of landmarks a camera needs to see to be included in the ranking.
@@ -302,7 +302,7 @@ def rank_hand_visibility_in_cameras(
 
 
 def get_crop_points_from_hand_pose(
-    hand_model: HandModel,
+    hand_model: HandModelTensor,
     gt_hand_pose: SingleHandPose,
     hand_idx: int,
     num_crop_points: int,
@@ -315,7 +315,7 @@ def get_crop_points_from_hand_pose(
     neutral pose, and/or open hand pose.
 
     Args:
-        hand_model (HandModel): The hand model for pose generation.
+        hand_model (HandModelTensor): The hand model for pose generation.
         gt_hand_pose (SingleHandPose): The ground truth hand pose.
         hand_idx (int): Index of the hand.
         num_crop_points (int): Desired number of crop points (must be 21, 42, or 63).
