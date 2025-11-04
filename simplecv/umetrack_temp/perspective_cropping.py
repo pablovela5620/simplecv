@@ -2,9 +2,10 @@ import cv2
 import numpy as np
 import torch
 from jaxtyping import Float32, UInt8
+from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from simplecv.umetrack_temp.camera_models import PinholeCameraParameter
+from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.umetrack_temp.cameras import Camera
 from simplecv.umetrack_temp.generic_hand_model import (
     NUM_JOINTS_PER_HAND,
@@ -14,7 +15,7 @@ from simplecv.umetrack_temp.generic_hand_model import (
 )
 
 
-def normalized(vector: np.ndarray, axis: int = -1, epsilon: float = 5.43e-20) -> np.ndarray:
+def normalized(vector: ndarray, axis: int = -1, epsilon: float = 5.43e-20) -> ndarray:
     """
     Returns a normalized version of the input vector along the specified axis.
 
@@ -35,7 +36,7 @@ def normalized(vector: np.ndarray, axis: int = -1, epsilon: float = 5.43e-20) ->
     return normalized_vector
 
 
-def skew_matrix(vector: Float32[np.ndarray, "3"]) -> Float32[np.ndarray, "3 3"]:
+def skew_matrix(vector: Float32[ndarray, "3"]) -> Float32[ndarray, "3 3"]:
     """
     Computes the skew-symmetric matrix of a 3D vector.
 
@@ -57,7 +58,7 @@ def skew_matrix(vector: Float32[np.ndarray, "3"]) -> Float32[np.ndarray, "3 3"]:
     return skew_symmetric_matrix
 
 
-def from_two_vectors(vector_a: Float32[np.ndarray, "3"], vector_b: Float32[np.ndarray, "3"]) -> Float32[np.ndarray, "3 3"]:
+def from_two_vectors(vector_a: Float32[ndarray, "3"], vector_b: Float32[ndarray, "3"]) -> Float32[ndarray, "3 3"]:
     """
     Computes a 3x3 rotation matrix that rotates vector `vector_a` towards vector `vector_b`.
 
@@ -102,10 +103,10 @@ def from_two_vectors(vector_a: Float32[np.ndarray, "3"], vector_b: Float32[np.nd
 
 
 def make_look_at_matrix(
-    origin_cam_T_world: Float32[np.ndarray, "4 4"],
-    center: Float32[np.ndarray, "3"],
+    origin_cam_T_world: Float32[ndarray, "4 4"],
+    center: Float32[ndarray, "3"],
     camera_angle: float = 0,
-) -> Float32[np.ndarray, "4 4"]:
+) -> Float32[ndarray, "4 4"]:
     """
     Computes a 4x4 transformation matrix that transforms points from world coordinates to camera coordinates.
 
@@ -146,8 +147,8 @@ def make_look_at_matrix(
 
 
 def gen_intrinsics_from_bounding_pts(
-    pts_cam: Float32[np.ndarray, "num_pts 3"], width: int, height: int, min_focal: float = 5
-) -> tuple[Float32[np.ndarray, "2"], Float32[np.ndarray, "2"]]:
+    pts_cam: Float32[ndarray, "num_pts 3"], width: int, height: int, min_focal: float = 5
+) -> tuple[Float32[ndarray, "2"], Float32[ndarray, "2"]]:
     """
     Computes the camera intrinsics matrix from the input points in camera space and the target image size.
 
@@ -174,12 +175,12 @@ def gen_intrinsics_from_bounding_pts(
 
 def gen_crop_parameters_from_points(
     camera_orig: Camera,
-    pts_world: Float32[np.ndarray, "... 3"],
+    pts_world: Float32[ndarray, "... 3"],
     new_image_size: tuple[int, int],
     mirror_img_x: bool,
     camera_angle: float = 0,
     focal_multiplier: float = 0.95,
-) -> PinholeCameraParameter:
+) -> PinholeParameters:
     """
     Computes a new perspective camera that ensures all input points can be projected inside the image.
 
@@ -192,7 +193,7 @@ def gen_crop_parameters_from_points(
         focal_multiplier: The focal multiplier. When less than 1, we are zooming out a little. The effect on the image is some margin will be left at the boundary. Default is 0.95.
 
     Returns:
-        A PinholeCameraParameter object representing the new perspective camera.
+        A PinholeParameters object representing the new perspective camera.
     """
     # Implementation code here
     cam_T_world = camera_orig.cam_T_world.astype(np.float32, copy=False)
@@ -221,7 +222,7 @@ def gen_crop_parameters_from_points(
     )
     focal = focal_multiplier * focal
 
-    K: Float32[np.ndarray, "3 3"] = np.array(
+    K: Float32[ndarray, "3 3"] = np.array(
         [
             [focal[0], 0.0, principal_point[0]],
             [0.0, focal[1], principal_point[1]],
@@ -229,18 +230,21 @@ def gen_crop_parameters_from_points(
         ],
         dtype=np.float32,
     )
-    cam_r_world: Float32[np.ndarray, "3 3"] = new_cam_T_world[:3, :3].astype(np.float32, copy=False)
-    cam_t_world: Float32[np.ndarray, "3"] = new_cam_T_world[:3, 3].astype(np.float32, copy=False)
+    cam_r_world: Float32[ndarray, "3 3"] = new_cam_T_world[:3, :3].astype(np.float32, copy=False)
+    cam_t_world: Float32[ndarray, "3"] = new_cam_T_world[:3, 3].astype(np.float32, copy=False)
 
-    return PinholeCameraParameter(
-        K=K,
-        R=cam_r_world,
-        T=cam_t_world,
+    intrinsics = Intrinsics(
+        camera_conventions="RDF",
+        fl_x=float(K[0, 0]),
+        fl_y=float(K[1, 1]),
+        cx=float(K[0, 2]),
+        cy=float(K[1, 2]),
         height=new_image_size[1],
         width=new_image_size[0],
-        world2cam=True,
-        convention="opencv",
     )
+    extrinsics = Extrinsics(cam_R_world=cam_r_world, cam_t_world=cam_t_world)
+    base_name = getattr(camera_orig.camera_parameters, "name", "crop")
+    return PinholeParameters(name=f"{base_name}_crop", extrinsics=extrinsics, intrinsics=intrinsics)
 
 
 def neutral_joint_angles(up: HandModelTensor, lower_factor: float = 0.5) -> torch.Tensor:
@@ -264,7 +268,7 @@ def rank_hand_visibility_in_cameras(
     a minimum required number of landmarks.
 
     Args:
-        cameras (List[FisheyeCameraParameter]): A list of fisheye camera parameters to rank.
+        cameras (List[Camera]): A list of camera wrappers to rank.
         hand_model (HandModelTensor): The model of the hand whose visibility is to be evaluated.
         hand_pose (SingleHandPose): The pose of the hand in the scene.
         hand_idx (int): The index of the hand to be evaluated (0 is left 1 is right).
@@ -277,7 +281,8 @@ def rank_hand_visibility_in_cameras(
     n_landmarks_in_view = []
     ranked_cam_indices = []
     for cam_idx, camera in enumerate(cameras):
-        h, w = camera.camera_parameters.height, camera.camera_parameters.width
+        h = camera.camera_parameters.intrinsics.height
+        w = camera.camera_parameters.intrinsics.width
         landmarks_cam = camera.world_to_camera(landmarks_world)
         landmarks_uv = camera.camera_to_image(landmarks_cam)
 
@@ -306,7 +311,7 @@ def get_crop_points_from_hand_pose(
     gt_hand_pose: SingleHandPose,
     hand_idx: int,
     num_crop_points: int,
-) -> np.ndarray:
+) -> Float32[ndarray, "n_crop_points 3"]:
     """
     Generates crop points for hand images based on various hand poses.
 
@@ -321,7 +326,7 @@ def get_crop_points_from_hand_pose(
         num_crop_points (int): Desired number of crop points (must be 21, 42, or 63).
 
     Returns:
-        np.ndarray: Array of concatenated landmarks serving as crop points for the image.
+        ndarray: Array of concatenated landmarks serving as crop points for the image.
 
     Raises:
         AssertionError: If num_crop_points is not one of 21, 42, or 63.
@@ -348,10 +353,10 @@ def get_crop_points_from_hand_pose(
 def warp_image_between_cameras(
     src_camera: Camera,
     dst_camera: Camera,
-    src_image: UInt8[np.ndarray, "H W channels"],
+    src_image: UInt8[ndarray, "H W channels"],
     interpolation: int = cv2.INTER_LINEAR,
     depth_check: bool = True,
-) -> UInt8[np.ndarray, "H W channels"]:
+) -> UInt8[ndarray, "H W channels"]:
     """
     Warps an image from the source camera to the destination camera.
 
@@ -366,12 +371,13 @@ def warp_image_between_cameras(
         The warped image.
     """
     # Compute the destination image size
-    W, H = dst_camera.camera_parameters.width, dst_camera.camera_parameters.height
+    W = dst_camera.camera_parameters.intrinsics.width
+    H = dst_camera.camera_parameters.intrinsics.height
 
     # Generate a grid of destination image points
     px, py = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
     num_pixels = H * W
-    dst_img_pts: Float32[np.ndarray, "num_pixels 2"] = np.column_stack((px.flatten(), py.flatten())).astype(
+    dst_img_pts: Float32[ndarray, "num_pixels 2"] = np.column_stack((px.flatten(), py.flatten())).astype(
         np.float32, copy=False
     )
     assert dst_img_pts.shape[0] == num_pixels
@@ -389,8 +395,8 @@ def warp_image_between_cameras(
 
     # Convert the image points to map coordinates
     src_img_pts = src_img_pts.astype(np.float32)
-    map_x: Float32[np.ndarray, "H W"] = src_img_pts[:, 0].reshape((H, W))
-    map_y: Float32[np.ndarray, "H W"] = src_img_pts[:, 1].reshape((H, W))
+    map_x: Float32[ndarray, "H W"] = src_img_pts[:, 0].reshape((H, W))
+    map_y: Float32[ndarray, "H W"] = src_img_pts[:, 1].reshape((H, W))
 
     # Warp the source image to the destination image
     warped_image = cv2.remap(src_image, map_x, map_y, interpolation)

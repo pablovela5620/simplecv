@@ -1,5 +1,5 @@
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -9,16 +9,21 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from einops import rearrange
-from jaxtyping import Float, Float32, Int64, UInt8
+from jaxtyping import Float, Float32, Int, Int64, UInt8
 from numpy import ndarray
 from rerun import AnnotationInfo, ClassDescription
 from serde import field as serde_field
 from serde import serde
 from serde.json import from_json
 
-from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.umetrack_temp.camera_models import FisheyeCameraParameter, PinholeCameraParameter
+from simplecv.camera_parameters import (
+    Extrinsics,
+    Fisheye62Parameters,
+    Intrinsics,
+    KannalaBrandtDistortion,
+    PinholeParameters,
+)
+from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.umetrack_temp.cameras import Camera
 from simplecv.umetrack_temp.generic_hand_model import (
     LANDMARK,
@@ -35,16 +40,22 @@ from simplecv.umetrack_temp.perspective_cropping import (
     warp_image_between_cameras,
 )
 from simplecv.umetrack_temp.projection import project_points
-from simplecv.video_io import VideoReader
+from simplecv.video_io import MultiVideoReader
 
 HAND_TYPE = ("left", "right")
 KEYPOINT_IDS = np.array([landmark.value for landmark in LANDMARK], dtype=np.uint16)
 CAMERA_PANEL_ORDER: list[tuple[str, int]] = [
-    ("BL", 0),
-    ("BR", 1),
-    ("TL", 2),
+    ("TL", 0),
+    ("BL", 1),
+    ("BR", 2),
     ("TR", 3),
 ]
+CAMERA_FILE_NAMES: dict[str, str] = {
+    "TL": "top_left",
+    "BL": "bottom_left",
+    "BR": "bottom_right",
+    "TR": "top_right",
+}
 
 
 @serde
@@ -172,8 +183,19 @@ class UmeTrackAnnotation:
     camera_to_world_transforms: Float32[ndarray, "n_frames n_cams 4 4"]
 
 
+@dataclass
+class UmeTrackData:
+    multi_view_images: UInt8[ndarray, "n_cams frame_h single_cam_w 3"]
+    multi_world_T_cam: Float32[ndarray, "n_cams 4 4"]
+    gt_tracking: dict[int, SingleHandPose]
+
+
 class DataStream:
-    def __init__(self, video_path: Path, annotation_path: Path) -> None:
+    def __init__(
+        self,
+        annotation_path: Path,
+        video_paths: list[Path],
+    ) -> None:
         """
         Datastream for a single sequence. This provides the following:
         - camera intrinsics
@@ -181,7 +203,9 @@ class DataStream:
         - multiview monocular images
         - hand pose labels
         """
-        self.video_stream = VideoReader(video_path)
+        self._n_cams: int = len(CAMERA_PANEL_ORDER)
+        self.multi_video_stream: MultiVideoReader = MultiVideoReader(video_paths)
+
         annotation: UmeTrackAnnotation = from_json(UmeTrackAnnotation, annotation_path.read_text())
         # camera intrinsics
         self.fisheye_cameras = create_cameras(annotation.cameras)
@@ -198,11 +222,12 @@ class DataStream:
             hand_confidences=annotation.hand_confidences,
         )
         self._warned_singular_pose = False
+        self._warned_short_sequence = False
 
     def __len__(self):
         return len(self.hand_pose_labels)
 
-    def __iter__(self) -> Iterator[tuple[ndarray, ndarray, dict[int, SingleHandPose]]]:
+    def __iter__(self) -> Iterator[UmeTrackData]:
         """
         Returns:
             multi_view_images: (n_cams, frame_h, single_cam_w, 3)
@@ -210,21 +235,17 @@ class DataStream:
             gt_tracking: dict[int, SingleHandPose]
         """
         for frame_idx in range(self.__len__()):
-            gt_tracking = {}
-            # (h, n_cams * w, 3)
-            raw_mono_frame = self.video_stream[frame_idx]
-            raw_mono_images: UInt8[ndarray, "frame_h frame_w 3"] = np.asarray(raw_mono_frame, dtype=np.uint8)
-            frame_height, frame_width, _ = raw_mono_images.shape
-            n_cams = 4
-            if frame_width % n_cams != 0:
-                raise ValueError(f"Video width {frame_width} is not divisible by expected camera count {n_cams}.")
-            single_cam_width = frame_width // n_cams
-            multi_view_images: UInt8[ndarray, "n_cams frame_h single_cam_w 3"] = rearrange(
-                raw_mono_images,
-                "frame_h (n_cams single_cam_w) channels -> n_cams frame_h single_cam_w channels",
-                n_cams=n_cams,
-                single_cam_w=single_cam_width,
-            )
+            gt_tracking: dict[int, SingleHandPose] = {}
+            camera_frame_list = self.multi_video_stream[frame_idx]
+            if len(camera_frame_list) != self._n_cams:
+                raise ValueError(
+                    f"Expected {self._n_cams} camera frames, received {len(camera_frame_list)} "
+                    f"for frame index {frame_idx}."
+                )
+            camera_frames: list[UInt8[ndarray, "frame_h single_cam_w 3"]] = [
+                np.asarray(frame, dtype=np.uint8) for frame in camera_frame_list
+            ]
+            multi_view_images: UInt8[ndarray, "n_cams frame_h single_cam_w 3"] = np.stack(camera_frames, axis=0)
             multi_world_T_cam: Float32[ndarray, "n_cams 4 4"] = self.world_T_cam_all[frame_idx]
 
             # Skip frames where any camera pose is singular or invalid.
@@ -261,81 +282,54 @@ class DataStream:
 
             # set camera extrinsics as they change per frame (slam tracking)
             for cam_idx, world_T_cam in enumerate(multi_world_T_cam):
-                cam_T_world = np.linalg.inv(world_T_cam)
-                self.fisheye_cameras[cam_idx].camera_parameters.set_KRT(
-                    K=None, R=cam_T_world[:3, :3], T=cam_T_world[:3, 3]
-                )
+                cam_T_world: Float32[ndarray, "4 4"] = np.linalg.inv(world_T_cam)
                 self.fisheye_cameras[cam_idx].set_extrinsic(cam_T_world)
 
-            yield multi_view_images, multi_world_T_cam, gt_tracking
+            data: UmeTrackData = UmeTrackData(
+                multi_view_images=multi_view_images,
+                multi_world_T_cam=multi_world_T_cam,
+                gt_tracking=gt_tracking,
+            )
+            yield data
 
 
 def create_cameras(umtrack_camera_list: list[UmeTrackCameras]) -> list[Camera]:
-    """
-    Given annotations, convert to FisheryCameraParameter. This does not include extrinsic as they change per frame.
-    """
+    """Instantiate fisheye cameras with camera_parameters intrinsics/extrinsics."""
+
     cameras: list[Camera] = []
     for camera_name, umetrack_camera in enumerate(umtrack_camera_list):
-        cam_params = FisheyeCameraParameter(name=f"camera_{camera_name}")
-        cam_params.set_intrinsic(
-            width=umetrack_camera.image_size_x,
-            height=umetrack_camera.image_size_y,
-            fx=umetrack_camera.fx,
-            fy=umetrack_camera.fy,
-            cx=umetrack_camera.cx,
-            cy=umetrack_camera.cy,
+        intrinsics = Intrinsics(
+            camera_conventions="RDF",
+            fl_x=float(umetrack_camera.fx),
+            fl_y=float(umetrack_camera.fy),
+            cx=float(umetrack_camera.cx),
+            cy=float(umetrack_camera.cy),
+            height=int(umetrack_camera.image_size_y),
+            width=int(umetrack_camera.image_size_x),
         )
-        # dist coeff k can have between 4-6 params
-        # dist coeef p can have between 2-4 params, but we can only set 2 as p3/p4 dont make sense for tangential distortion
-        cam_params.set_dist_coeff(
-            dist_coeff_k=[
-                umetrack_camera.k1,
-                umetrack_camera.k2,
-                umetrack_camera.k3,
-                umetrack_camera.k4,
-                umetrack_camera.k5,
-                umetrack_camera.k6,
-            ],
-            dist_coeff_p=[
-                umetrack_camera.p1,
-                umetrack_camera.p2,
-            ],
+        extrinsics = Extrinsics(
+            cam_R_world=np.eye(3, dtype=np.float32),
+            cam_t_world=np.zeros(3, dtype=np.float32),
         )
-        cameras.append(Camera(cam_params))
+        distortion = KannalaBrandtDistortion(
+            k1=float(umetrack_camera.k1),
+            k2=float(umetrack_camera.k2),
+            k3=float(umetrack_camera.k3),
+            k4=float(umetrack_camera.k4),
+            k5=float(umetrack_camera.k5),
+            k6=float(umetrack_camera.k6),
+            p1=float(umetrack_camera.p1),
+            p2=float(umetrack_camera.p2),
+        )
+        camera_params = Fisheye62Parameters(
+            name=f"camera_{camera_name}",
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            distortion=distortion,
+        )
+        cameras.append(Camera(camera_params))
 
     return cameras
-
-
-def log_camera(
-    camera_log_path: str,
-    *,
-    image: UInt8[ndarray, "image_h image_w 3"],
-    cam_params: FisheyeCameraParameter | PinholeCameraParameter,
-    image_plane_distance: float,
-    image_path_name: str = "image",
-) -> None:
-    """
-    Logs image, camera pinhole, and camera extrinsic
-    """
-    image_log_path = f"{camera_log_path}/{image_path_name}"
-    rr.log(
-        image_log_path,
-        rr.Pinhole(
-            image_from_camera=cam_params.intrinsic33(),
-            resolution=(cam_params.width, cam_params.height),
-            image_plane_distance=image_plane_distance,
-        ),
-    )
-    rr.log(
-        camera_log_path,
-        rr.Transform3D(
-            translation=cam_params.extrinsic_t,
-            mat3x3=cam_params.extrinsic_r,
-            relation=rr.TransformRelation.ChildFromParent,
-        ),
-    )
-    # resized_image = resize_image_if_needed(image, cam_params.width, cam_params.height)
-    rr.log(image_log_path, rr.Image(image).compress(jpeg_quality=90))
 
 
 def resize_image_if_needed(
@@ -349,11 +343,11 @@ def resize_image_if_needed(
     return cv2.resize(image, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
 
 
-def setup_logging(parent_log_path: str = "world") -> str:
+def setup_logging(parent_log_path: Path) -> None:
     """
     setup logging for rerun along with annotations context for each hand
     """
-    rr.log(parent_log_path, rr.ViewCoordinates.RUB, static=True)
+    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RUB, static=True)
     class_descriptions = []
     for hand_idx, hand_type in enumerate(HAND_TYPE):
         class_descriptions.append(
@@ -364,33 +358,37 @@ def setup_logging(parent_log_path: str = "world") -> str:
             ),
         )
     rr.log(f"{parent_log_path}", rr.AnnotationContext(class_descriptions), static=True)
-    return parent_log_path
 
 
 def create_umetrack_view(
-    log_path: str = "world", camera_filter: list[Literal["TL", "TR", "BL", "BR"]] | None = None
-) -> None:
+    log_path: Path,
+    camera_ids: Sequence[str],
+    camera_filter: list[Literal["TL", "TR", "BL", "BR"]] | None = None,
+) -> rrb.ContainerLike:
     """Send a Rerun blueprint tailored for the UmeTrack visualization layout."""
 
     if camera_filter is None:
-        camera_filter = ["TL", "BR"]
-    spatial_view = rrb.Spatial3DView(origin=log_path, name="3D View")
+        camera_filter = ["BL", "BR"]
+    spatial_view = rrb.Spatial3DView(origin=f"{log_path}", name="3D View")
 
     camera_rows: list[rrb.ContainerLike] = []
     for display_name, camera_idx in CAMERA_PANEL_ORDER:
         if display_name not in camera_filter:
             continue
+        if camera_idx >= len(camera_ids):
+            continue
+        camera_id: str = camera_ids[camera_idx]
         crop_views = rrb.Vertical(
             contents=[
                 rrb.Spatial2DView(
-                    origin=f"{log_path}/recropped_camera_left_{camera_idx}/crop_left_{camera_idx}",
+                    origin=f"{log_path}/ego/{camera_id}_left_crop/pinhole/image",
                     contents=[
                         "+ $origin/**",
                     ],
                     name=f"{display_name} Left Crop",
                 ),
                 rrb.Spatial2DView(
-                    origin=f"{log_path}/recropped_camera_right_{camera_idx}/crop_right_{camera_idx}",
+                    origin=f"{log_path}/ego/{camera_id}_right_crop/pinhole/image",
                     contents=[
                         "+ $origin/**",
                     ],
@@ -402,7 +400,7 @@ def create_umetrack_view(
         )
 
         camera_view = rrb.Spatial2DView(
-            origin=f"{log_path}/camera_{camera_idx}/image_{camera_idx}",
+            origin=f"{log_path}/ego/{camera_id}/pinhole/video",
             contents=[
                 "+ $origin/**",
             ],
@@ -419,15 +417,13 @@ def create_umetrack_view(
 
     right_column = rrb.Vertical(contents=camera_rows, row_shares=[1] * len(camera_rows), name="Camera Panels")
 
-    blueprint = rrb.Blueprint(
-        rrb.Horizontal(
-            contents=[spatial_view, right_column],
-            column_shares=[3, 2],
-            name="UmeTrack Layout",
-        )
+    final_container: rrb.Horizontal = rrb.Horizontal(
+        contents=[spatial_view, right_column],
+        column_shares=[3, 2],
+        name="UmeTrack Layout",
     )
 
-    rr.send_blueprint(blueprint)
+    return final_container
 
 
 @dataclass
@@ -436,28 +432,69 @@ class UmeTrackVisualizeConfig:
 
     rr_config: RerunTyroConfig
     """Command-line options for spawning and configuring the Rerun viewer."""
-    data_path: Path
-    """Path to data, should be a directory that looks like 'UmeTrack_data/raw_data/x/x/x/user_xx/'."""
-    sequence_id: int = 1
-    """Sequence ID to visualize (0-indexed)."""
+    data_dir: Path
+    """Path to the split dataset. Either a recording directory or its parent containing `recording_*` folders."""
+    sequence_id: int = 0
+    """Recording index to visualize (0-indexed when selecting from a parent directory)."""
+    min_required_vis_landmarks: int = 19
+    """Minimum number of visible landmarks required to consider a hand visible in a camera."""
+    num_crop_points: Literal[21, 42, 63] = 63
+    """Number of points to use when generating the crop region around the hand."""
 
 
 def main(config: UmeTrackVisualizeConfig) -> None:
-    if not config.data_path.exists():
-        raise FileNotFoundError(config.data_path)
+    if not config.data_dir.exists():
+        raise FileNotFoundError(config.data_dir)
+    if not config.data_dir.is_dir():
+        raise NotADirectoryError(f"{config.data_dir} is not a directory")
+    recording_dirs: list[Path] = sorted(path for path in config.data_dir.glob("recording_*") if path.is_dir())
+    selected_dir: Path = recording_dirs[config.sequence_id]
+    video_paths: list[Path] = list(selected_dir.glob("*.mp4"))
+    # sort video paths based on CAMERA_FILE_NAMES order
+    video_paths: list[Path] = sorted(video_paths, key=lambda p: list(CAMERA_FILE_NAMES.values()).index(p.stem))
+    # there should always be 4 videos for ume track
+    if len(video_paths) != 4:
+        raise FileNotFoundError(f"Expected 4 camera videos in {selected_dir}, found {len(video_paths)}")
 
-    video_path: Path = sorted(config.data_path.glob("*.mp4"))[config.sequence_id]
-    annotation_path: Path = sorted(config.data_path.glob("*.json"))[config.sequence_id]
-    datastream = DataStream(video_path, annotation_path)
+    annotation_matches: list[Path] = sorted(selected_dir.glob("*.json"))
+    if not annotation_matches:
+        raise FileNotFoundError(f"Missing annotation JSON in {selected_dir}")
+
+    annotation_path: Path = annotation_matches[0]
+    datastream = DataStream(annotation_path=annotation_path, video_paths=video_paths)
     camera_angles: list[float] = datastream.hand_pose_labels.camera_angles
 
-    parent_log_path: str = setup_logging()
-    create_umetrack_view(parent_log_path)
+    parent_log_path: Path = Path("world")
+    camera_ids: list[str] = [video_path.stem for video_path in video_paths]
+    camera_entity_paths: list[Path] = [parent_log_path / "ego" / camera_id for camera_id in camera_ids]
+    timeline: str = "video_time"
+    setup_logging(parent_log_path)
 
+    video_log_paths: list[Path] = [camera_path / "pinhole" / "video" for camera_path in camera_entity_paths]
+    # log the video paths
+    timestamps_ns_list: list[Int[ndarray, "num_frames"]] = []
+    for video_path, video_log_path in zip(video_paths, video_log_paths, strict=True):
+        timestamps_ns: Int[ndarray, "num_frames"] = log_video(
+            video_path=video_path, video_log_path=video_log_path, timeline=timeline
+        )
+        timestamps_ns_list.append(timestamps_ns)
+
+    shortest_timestamp: Int[ndarray, "n_frames"] = min(timestamps_ns_list, key=len)
+
+    view_container: rrb.ContainerLike = create_umetrack_view(parent_log_path, camera_ids)
+    blueprint = rrb.Blueprint(view_container, collapse_panels=True)
+    rr.send_blueprint(blueprint)
+    frame_data: UmeTrackData
+    active_crop_entities: set[str] = set()
     for frame_idx, frame_data in enumerate(datastream):
-        multi_view_images, _multi_world_T_cam, hand_pose_dict = frame_data
-        rr.set_time("frame", sequence=frame_idx)
-        hand_model = datastream.hand_model
+        frame_timestamp_ns: np.int64 | None = (
+            shortest_timestamp[frame_idx] if frame_idx < len(shortest_timestamp) else None
+        )
+        if frame_timestamp_ns is None:
+            raise IndexError(f"No video timestamp available for frame index {frame_idx}.")
+        rr.set_time(timeline, timestamp=1e-9 * frame_timestamp_ns)
+        hand_model: HandModelTensor = datastream.hand_model
+        frame_active_crop_entities: set[str] = set()
         landmarks_dict: dict[str, Float32[ndarray, "n_kpts=21 3"] | None] = {
             "left": None,
             "right": None,
@@ -465,29 +502,30 @@ def main(config: UmeTrackVisualizeConfig) -> None:
 
         # log hand pose data
         for hand_idx, hand_type in enumerate(HAND_TYPE):
-            if hand_idx in hand_pose_dict:
-                hand_pose: SingleHandPose = hand_pose_dict[hand_idx]
+            if hand_idx in frame_data.gt_tracking:
+                hand_pose: SingleHandPose = frame_data.gt_tracking[hand_idx]
                 landmark: Float32[ndarray, "n_kpts=21 3"] = landmarks_from_hand_pose(hand_model, hand_pose, hand_idx)
-                class_ids = np.full(len(landmark), hand_idx, dtype=np.uint16)
                 rr.log(
                     f"{parent_log_path}/{hand_type}/landmark",
-                    rr.Points3D(landmark, keypoint_ids=KEYPOINT_IDS, class_ids=class_ids, show_labels=False),
+                    rr.Points3D(landmark, keypoint_ids=KEYPOINT_IDS, class_ids=hand_idx, show_labels=False),
                 )
 
                 ## Generating Crop based on 3d keypoints
                 # first are gt, second are neutral, third are open
-                crop_points = get_crop_points_from_hand_pose(hand_model, hand_pose, hand_idx, num_crop_points=63)
+                crop_points: Float32[np.ndarray, "n_crop_points 3"] = get_crop_points_from_hand_pose(
+                    hand_model, hand_pose, hand_idx, num_crop_points=config.num_crop_points
+                )
                 cam_indices: list[int] = rank_hand_visibility_in_cameras(
                     cameras=datastream.fisheye_cameras,
                     hand_model=hand_model,
                     hand_pose=hand_pose,
                     hand_idx=hand_idx,
-                    min_required_vis_landmarks=19,
+                    min_required_vis_landmarks=config.min_required_vis_landmarks,
                 )
                 # creating new perspective cameras
                 for cam_idx in cam_indices:
                     current_cam: Camera = datastream.fisheye_cameras[cam_idx]
-                    perspective_cam_params: PinholeCameraParameter = gen_crop_parameters_from_points(
+                    perspective_cam_params: PinholeParameters = gen_crop_parameters_from_points(
                         current_cam,
                         crop_points,
                         new_image_size=(96, 96),
@@ -498,44 +536,47 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                     perspective_cam = Camera(perspective_cam_params)
 
                     # perform image warping from src camera to dst camera
-                    current_image = resize_image_if_needed(
-                        multi_view_images[cam_idx],
-                        current_cam.camera_parameters.width,
-                        current_cam.camera_parameters.height,
-                    )
-                    crop: UInt8[ndarray, "crop_h crop_w 3"] = warp_image_between_cameras(
+                    current_image: UInt8[ndarray, "img_h img_w 3"] = frame_data.multi_view_images[cam_idx]
+                    crop: UInt8[ndarray, "crop_h=96 crop_w=96 3"] = warp_image_between_cameras(
                         current_cam, perspective_cam, current_image
                     )
 
-                    cropped_cam_log_path: str = f"{parent_log_path}/recropped_camera_{hand_type}_{cam_idx}"
-                    crop_log_path_name: str = f"crop_{hand_type}_{cam_idx}"
+                    crop_camera_id: str = f"{camera_ids[cam_idx]}_{hand_type}_crop"
+                    crop_camera_entity_path: Path = parent_log_path / "ego" / crop_camera_id
+                    crop_pinhole_log_path: str = f"{crop_camera_entity_path}/pinhole"
+                    try:
+                        log_pinhole(
+                            perspective_cam_params,
+                            crop_camera_entity_path,
+                            image_plane_distance=50.0,
+                        )
+                        rr.log(f"{crop_pinhole_log_path}/image", rr.Image(crop).compress(jpeg_quality=75))
+                        uv_cropped: Float[ndarray, "n_kpts=21 2"] = project_points(landmark, perspective_cam)
+                        rr.log(
+                            f"{crop_pinhole_log_path}/image/{hand_type}_landmark",
+                            rr.Points2D(uv_cropped, keypoint_ids=KEYPOINT_IDS, class_ids=hand_idx, show_labels=False),
+                        )
+                    except Exception:
+                        rr.log(f"{crop_camera_entity_path}", rr.Clear(recursive=True))
+                        continue
 
-                    log_camera(
-                        cropped_cam_log_path,
-                        image=crop,
-                        cam_params=perspective_cam_params,
-                        image_plane_distance=50.0,
-                        image_path_name=crop_log_path_name,
-                    )
-                    uv_cropped = project_points(landmark, perspective_cam)
-                    rr.log(
-                        f"{cropped_cam_log_path}/{crop_log_path_name}/{hand_type}_landmark",
-                        rr.Points2D(uv_cropped, keypoint_ids=KEYPOINT_IDS, class_ids=class_ids, show_labels=False),
-                    )
+                    frame_active_crop_entities.add(crop_camera_entity_path.as_posix())
 
                 landmarks_dict[hand_type] = landmark
 
+        stale_entities: set[str] = active_crop_entities - frame_active_crop_entities
+        for stale_entity in stale_entities:
+            rr.log(stale_entity, rr.Clear(recursive=True))
+        active_crop_entities = frame_active_crop_entities
+
         # log original camera camera data and projected landmarks
         for camera_idx, camera in enumerate(datastream.fisheye_cameras):
-            cam_log_path: str = f"{parent_log_path}/camera_{camera_idx}"
-            img_log_path_name: str = f"image_{camera_idx}"
-            current_image: UInt8[ndarray, "h w 3"] = multi_view_images[camera_idx]
-            log_camera(
-                cam_log_path,
-                image=current_image,
-                cam_params=camera.camera_parameters,
-                image_plane_distance=25.0,
-                image_path_name=img_log_path_name,
+            camera_entity_path: Path = camera_entity_paths[camera_idx]
+            pinhole_log_path: Path = camera_entity_path / "pinhole"
+            log_pinhole(
+                camera.camera_parameters,
+                camera_entity_path,
+                image_plane_distance=50.0,
             )
             for hand_idx, hand_type in enumerate(HAND_TYPE):
                 landmarks: Float32[ndarray, "n_kpts=21 3"] | None = landmarks_dict[hand_type]
@@ -543,7 +584,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
                     hand_landmarks: Float32[ndarray, "n_kpts=21 3"] = landmarks
                     uv: Float[np.ndarray, "num_points 2"] = project_points(hand_landmarks, camera)
                     rr.log(
-                        f"{cam_log_path}/{img_log_path_name}/{hand_type}_landmark",
+                        f"{pinhole_log_path}/video/{hand_type}_landmark",
                         rr.Points2D(
                             uv,
                             keypoint_ids=KEYPOINT_IDS,

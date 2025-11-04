@@ -37,6 +37,8 @@ class KannalaBrandtDistortion:
     k4: float = 0.0
     k5: float = 0.0
     k6: float = 0.0
+    p1: float = 0.0
+    p2: float = 0.0
 
 
 @dataclass
@@ -194,10 +196,10 @@ def rescale_intri(camera_intrinsics: Intrinsics, *, target_width: int, target_he
     Rescales the input image and intrinsic matrix by a given scale factor.
 
     Args:
-        cam (PinholeCameraParameter): The pinhole camera parameter.
+        camera_intrinsics: The camera intrinsics to rescale.
 
     Returns:
-        : The rescaled image frame and intrinsic matrix.
+        Intrinsics: Rescaled copy of the input intrinsics.
     """
     assert camera_intrinsics.height is not None, "Set Camera Height, currently None"
     assert camera_intrinsics.width is not None, "Set Camera Width, currently None"
@@ -375,21 +377,19 @@ def project_kannala_brandt(
 
     theta_d: Float[ndarray, "num_points"] = theta.copy()
     if dist_coeffs is not None:
-        theta2: Float[ndarray, "num_points"] = theta * theta
-        theta_power: Float[ndarray, "num_points"] = theta2
-        scale_poly: Float[ndarray, "num_points"] = np.ones_like(theta)
+        theta2: Float[ndarray, "num_points"] = np.asarray(theta * theta, dtype=np.float64)
+        poly: Float[ndarray, "num_points"] = np.full_like(theta2, float(dist_coeffs.k6), dtype=np.float64)
         for coeff in (
-            dist_coeffs.k1,
-            dist_coeffs.k2,
-            dist_coeffs.k3,
-            dist_coeffs.k4,
             dist_coeffs.k5,
-            dist_coeffs.k6,
+            dist_coeffs.k4,
+            dist_coeffs.k3,
+            dist_coeffs.k2,
+            dist_coeffs.k1,
         ):
-            if coeff != 0.0:
-                scale_poly += coeff * theta_power
-            theta_power *= theta2
-        theta_d = theta * scale_poly
+            poly = poly * theta2 + float(coeff)
+        scale_poly: Float[ndarray, "num_points"] = poly * theta2 + 1.0
+        theta_d = np.asarray(theta, dtype=np.float64) * scale_poly
+        theta_d = theta_d.astype(np.float32, copy=False)
 
     scale: Float[ndarray, "num_points"] = np.ones_like(r)
     mask: Bool[ndarray, "num_points"] = r > eps

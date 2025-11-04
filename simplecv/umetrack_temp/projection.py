@@ -13,14 +13,15 @@ def project_points(
 
     Args:
         points3d (Float[np.ndarray, "num_points 3"]): A numpy array containing the 3D coordinates of the points.
-        camera (Union[FisheyeCameraParameter, PinholeCameraParameter]): The camera parameters. Can be either a Fisheye or a Pinhole camera.
+        camera: Camera wrapper containing either fisheye or pinhole parameters.
 
     Returns:
         Float[np.ndarray, "num_points 2"]: A numpy array containing the 2D coordinates of the projected points.
     """
     points3d_cam: Float[np.ndarray, "num_points 3"] = camera.world_to_camera(points3d_world)
     points2d: Float[np.ndarray, "num_points 2"] = camera.camera_to_image(points3d_cam)
-    h, w = camera.camera_parameters.height, camera.camera_parameters.width
+    h = camera.camera_parameters.intrinsics.height
+    w = camera.camera_parameters.intrinsics.width
 
     # make sure points are within image bounds
     out_of_bounds = np.logical_or(points2d[:, 0] >= w, points2d[:, 1] >= h)
