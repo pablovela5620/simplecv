@@ -451,7 +451,7 @@ def log_hand_sequence(
     entity_path: str = f"{log_path}/{side.entity_suffix}"
     class_ids: UInt16[ndarray, "n_ume_kpts=21"] = QUEST_HAND_CLASS_IDS_BY_SIDE[side]
     head_extrinsic: QuestHeadExtrinsicsSample
-    for sample, head_extrinsic in zip(sequence, head_extrinsics, strict=True):
+    for sample, head_extrinsic in zip(sequence, head_extrinsics, strict=False):
         rr.set_time(timeline, duration=np.timedelta64(sample.timestamp_ns, "ns"))
         mapped_keypoints: Float32[ndarray, "n_ume_kpts=21 3"] = sample.keypoints_m[LANDMARK_TO_QUEST_INDEX]
         rr.log(
