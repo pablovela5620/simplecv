@@ -59,9 +59,9 @@ HAND_IDS: list[int] = [int(key) for key in HAND_ID2NAME]
 # (left hand; right hand is +21)
 _ASM2COCO: Final[dict[int, tuple[int, ...]]] = {
     5: (91, 9),  # wrist  → hand root & body wrist
-    6: (92,),  # thumb CMC  → thumb1
-    7: (93,),  # thumb MCP  → thumb2
-    # missing thumb IP → left as NaN (thumb3)
+    # thumb1 is synthesized later by interpolating wrist↔CMC
+    6: (93,),  # thumb CMC  → thumb2
+    7: (94,),  # thumb MCP  → thumb3
     0: (95,),  # thumb tip  → thumb4
     8: (96,),
     9: (97,),
@@ -110,10 +110,32 @@ def assembly21_to_coco133(
             coco_133[cid, :3] = kpts_lr[0, asm_id]
             coco_133[cid, 3] = 1.0
 
+    # Assembly-Hands omits the thumb base joint; synthesize it by averaging wrist↔CMC
+    left_wrist: Float32[ndarray, "3"] = kpts_lr[0, 5]
+    left_thumb_cmc: Float32[ndarray, "3"] = kpts_lr[0, 6]
+    left_thumb_base_valid: bool = not (
+        np.isnan(left_wrist).any() or np.isnan(left_thumb_cmc).any()
+    )
+    if left_thumb_base_valid:
+        left_thumb_base: Float32[ndarray, "3"] = (left_wrist + left_thumb_cmc) * np.float32(0.5)
+        coco_133[92, :3] = left_thumb_base
+        coco_133[92, 3] = np.float32(1.0)
+
     # right hand -----------------------------------------------------
     for asm_id, coco_ids in _ASM2COCO_R.items():
         for cid in coco_ids:
             coco_133[cid, :3] = kpts_lr[1, asm_id]
             coco_133[cid, 3] = 1.0
+
+    # Same interpolation for the right thumb base
+    right_wrist: Float32[ndarray, "3"] = kpts_lr[1, 5]
+    right_thumb_cmc: Float32[ndarray, "3"] = kpts_lr[1, 6]
+    right_thumb_base_valid: bool = not (
+        np.isnan(right_wrist).any() or np.isnan(right_thumb_cmc).any()
+    )
+    if right_thumb_base_valid:
+        right_thumb_base: Float32[ndarray, "3"] = (right_wrist + right_thumb_cmc) * np.float32(0.5)
+        coco_133[113, :3] = right_thumb_base
+        coco_133[113, 3] = np.float32(1.0)
 
     return coco_133
