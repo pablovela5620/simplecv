@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -330,17 +329,6 @@ def create_cameras(umtrack_camera_list: list[UmeTrackCameras]) -> list[Camera]:
         cameras.append(Camera(camera_params))
 
     return cameras
-
-
-def resize_image_if_needed(
-    image: UInt8[ndarray, "image_h image_w 3"], target_width: int, target_height: int
-) -> UInt8[ndarray, "target_h target_w 3"]:
-    """
-    Resizes the provided image to the target resolution if required.
-    """
-    if image.shape[1] == target_width and image.shape[0] == target_height:
-        return image
-    return cv2.resize(image, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
 
 
 def setup_logging(parent_log_path: Path) -> None:

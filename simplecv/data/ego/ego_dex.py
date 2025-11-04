@@ -19,7 +19,6 @@ else:  # pragma: no cover - runtime alias to avoid circular import
 
 
 class EgoDexSequence(BaseEgoSequence[EgoDexConfig]):
-
     def load_video_paths(self) -> list[Path]:
         sequence_path: Path = self.config.root_directory / self.config.split / self.config.sequence_name
         video_path: Path = sequence_path / f"{self.config.episode}.mp4"
@@ -59,7 +58,15 @@ class EgoDexSequence(BaseEgoSequence[EgoDexConfig]):
             for i in range(world_T_camera.shape[0]):
                 pinhole = PinholeParameters(
                     name=cam_name,
-                    intrinsics=Intrinsics(fl_x=fl_x, fl_y=fl_y, cx=cx, cy=cy, camera_conventions="RDF"),
+                    intrinsics=Intrinsics(
+                        fl_x=fl_x,
+                        fl_y=fl_y,
+                        cx=cx,
+                        cy=cy,
+                        camera_conventions="RDF",
+                        height=int(cy * 2),
+                        width=int(cx * 2),
+                    ),
                     extrinsics=Extrinsics(world_R_cam=world_T_camera[i][:3, :3], world_t_cam=world_T_camera[i][:3, 3]),
                 )
                 ego_cam_list.append(pinhole)

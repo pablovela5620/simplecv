@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import torch
-from jaxtyping import Float32, UInt8
+from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
@@ -371,34 +371,39 @@ def warp_image_between_cameras(
         The warped image.
     """
     # Compute the destination image size
-    W = dst_camera.camera_parameters.intrinsics.width
-    H = dst_camera.camera_parameters.intrinsics.height
+    W: int = dst_camera.camera_parameters.intrinsics.width
+    H: int = dst_camera.camera_parameters.intrinsics.height
 
     # Generate a grid of destination image points
-    px, py = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
-    num_pixels = H * W
+    meshgrid_axes: tuple[Float32[ndarray, "H W"], Float32[ndarray, "H W"]] = np.meshgrid(
+        np.arange(W, dtype=np.float32),
+        np.arange(H, dtype=np.float32),
+    )
+    px: Float32[ndarray, "H W"] = meshgrid_axes[0]
+    py: Float32[ndarray, "H W"] = meshgrid_axes[1]
+    num_pixels: int = H * W
     dst_img_pts: Float32[ndarray, "num_pixels 2"] = np.column_stack((px.flatten(), py.flatten())).astype(
         np.float32, copy=False
     )
     assert dst_img_pts.shape[0] == num_pixels
 
     # Compute the corresponding world points and camera points
-    dst_cam_pts = dst_camera.image_to_camera(dst_img_pts)
-    world_pts = dst_camera.camera_to_world(dst_cam_pts)
-    src_cam_pts = src_camera.world_to_camera(world_pts)
-    src_img_pts = src_camera.camera_to_image(src_cam_pts)
+    dst_cam_pts: Float32[ndarray, "num_pixels 3"] = dst_camera.image_to_camera(dst_img_pts)
+    world_pts: Float32[ndarray, "num_pixels 3"] = dst_camera.camera_to_world(dst_cam_pts)
+    src_cam_pts: Float32[ndarray, "num_pixels 3"] = src_camera.world_to_camera(world_pts)
+    src_img_pts: Float32[ndarray, "num_pixels 2"] = src_camera.camera_to_image(src_cam_pts)
 
     # Mask out points with negative z coordinates
     if depth_check:
-        mask = src_cam_pts[:, 2] < 0
+        mask: Bool[ndarray, "num_pixels"] = src_cam_pts[:, 2] < 0
         src_img_pts[mask] = -1
 
     # Convert the image points to map coordinates
-    src_img_pts = src_img_pts.astype(np.float32)
-    map_x: Float32[ndarray, "H W"] = src_img_pts[:, 0].reshape((H, W))
-    map_y: Float32[ndarray, "H W"] = src_img_pts[:, 1].reshape((H, W))
+    src_img_pts_float32: Float32[ndarray, "num_pixels 2"] = src_img_pts.astype(np.float32)
+    map_x: Float32[ndarray, "H W"] = src_img_pts_float32[:, 0].reshape((H, W))
+    map_y: Float32[ndarray, "H W"] = src_img_pts_float32[:, 1].reshape((H, W))
 
     # Warp the source image to the destination image
-    warped_image = cv2.remap(src_image, map_x, map_y, interpolation)
+    warped_image: UInt8[ndarray, "H W channels"] = cv2.remap(src_image, map_x, map_y, interpolation)
 
     return warped_image

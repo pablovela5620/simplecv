@@ -505,9 +505,9 @@ def landmarks_from_hand_pose(
     Returns:
         Float32[np.ndarray, "num_landmarks 3"]: The 3D landmarks in the world space.
     """
-    xf = hand_pose.wrist_xform.copy()
+    xf: Float32[np.ndarray, "4 4"] = hand_pose.wrist_xform.copy()
     # This function expects the user hand model to be a left hand.
     if hand_idx == RIGHT_HAND_INDEX:
         xf[:, 0] *= -1
-    landmarks = skin_landmarks_np(hand_model, hand_pose.joint_angles, xf)
+    landmarks: Float32[np.ndarray, "... num_landmarks 3"] = skin_landmarks_np(hand_model, hand_pose.joint_angles, xf)
     return landmarks
