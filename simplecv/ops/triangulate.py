@@ -1,7 +1,11 @@
+from collections.abc import Sequence
+
 import numpy as np
 from einops import rearrange
 from jaxtyping import Float, Int
 from numpy import ndarray
+
+from simplecv.camera_parameters import KannalaBrandtDistortion, apply_radial_tangential_distortion
 
 
 def projectN3(
@@ -126,6 +130,45 @@ def arctan_proj_3d_vectorized(
     uv: Float[ndarray, "n_frames n_views n_joints 2"] = uv_hom[..., :2] / denom_safe
 
     return uv
+
+
+def apply_kannala_brandt_distortion_batch(
+    uv_stack: Float[ndarray, "n_frames n_views n_kpts 2"],
+    intrinsics_stack: Float[ndarray, "n_views 3 3"],
+    distortions: Sequence[KannalaBrandtDistortion | None],
+) -> Float[ndarray, "n_frames n_views n_kpts 2"]:
+    """Apply per-view Kannala–Brandt distortion to a stack of UV coordinates."""
+
+    if all(distortion is None for distortion in distortions):
+        return uv_stack
+
+    uv_distorted: Float[ndarray, "n_frames n_views n_kpts 2"] = uv_stack.copy()
+    K_views: Float[ndarray, "n_views 3 3"] = np.asarray(intrinsics_stack)
+
+    fx: Float[ndarray, "n_views"] = K_views[:, 0, 0]
+    fy: Float[ndarray, "n_views"] = K_views[:, 1, 1]
+    cx: Float[ndarray, "n_views"] = K_views[:, 0, 2]
+    cy: Float[ndarray, "n_views"] = K_views[:, 1, 2]
+
+    uv_normalized: Float[ndarray, "n_frames n_views n_kpts 2"] = uv_distorted.copy()
+    uv_normalized[..., 0] = (uv_normalized[..., 0] - cx[None, :, None]) / fx[None, :, None]
+    uv_normalized[..., 1] = (uv_normalized[..., 1] - cy[None, :, None]) / fy[None, :, None]
+
+    n_frames: int = uv_stack.shape[0]
+    n_kpts: int = uv_stack.shape[2]
+
+    for view_idx, distortion in enumerate(distortions):
+        if distortion is None:
+            continue
+        view_norm: Float[ndarray, "n_frames n_kpts 2"] = uv_normalized[:, view_idx, :, :]
+        view_norm_flat: Float[ndarray, "_ 2"] = view_norm.reshape(n_frames * n_kpts, 2)
+        distorted_flat: Float[ndarray, "_ 2"] = apply_radial_tangential_distortion(distortion, view_norm_flat)
+        uv_normalized[:, view_idx, :, :] = distorted_flat.reshape(n_frames, n_kpts, 2)
+
+    uv_distorted[..., 0] = uv_normalized[..., 0] * fx[None, :, None] + cx[None, :, None]
+    uv_distorted[..., 1] = uv_normalized[..., 1] * fy[None, :, None] + cy[None, :, None]
+
+    return uv_distorted
 
 
 def batch_triangulate(
