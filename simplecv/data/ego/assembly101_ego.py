@@ -13,7 +13,7 @@ from serde import field as serde_field
 from serde.json import from_json
 from tqdm import tqdm
 
-from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
 
 if TYPE_CHECKING:
@@ -149,7 +149,7 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
 
         return ego_video_files
 
-    def load_ego_cams(self) -> dict[str, list[PinholeParameters]]:
+    def load_ego_cams(self) -> dict[str, list[Fisheye62Parameters]]:
         ############################################
         # Get Intrinsic Parameters for Ego Cameras #
         ############################################
@@ -167,7 +167,7 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
 
         fisheye62: OVFishEye62 = record.Camera
 
-        distortion: BrownConradyDistortion = BrownConradyDistortion(
+        distortion: KannalaBrandtDistortion = KannalaBrandtDistortion(
             k1=fisheye62.k1,
             k2=fisheye62.k2,
             k3=fisheye62.k3,
@@ -208,8 +208,8 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
             for k in sorted(ego_extri_cameras, key=int)  # numeric (“natural”) sort
         }
 
-        # create list of PinholeParameters for ego cameras
-        ego_pinhole_dict: dict[CameraNames, list[PinholeParameters]] = {
+        # create list of Fisheye62Parameters for ego cameras
+        ego_fisheye_dict: dict[CameraNames, list[Fisheye62Parameters]] = {
             "e1": [],
             "e2": [],
             "e3": [],
@@ -217,14 +217,14 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
         }
         ego_cam: EgoExtri211 | EgoExtri843
         for _, ego_cam in tqdm(ego_extri_cameras.items(), desc="Processing ego cameras"):
-            for key in ego_pinhole_dict:
+            for key in ego_fisheye_dict:
                 cam_T_world = getattr(ego_cam, key)
                 extri: Extrinsics = Extrinsics(
                     world_R_cam=cam_T_world[:3, :3],
                     world_t_cam=cam_T_world[:3, 3] * np.float32(1e-3),
                 )
-                ego_pinhole_dict[key].append(
-                    PinholeParameters(
+                ego_fisheye_dict[key].append(
+                    Fisheye62Parameters(
                         name=f"{key}",
                         intrinsics=intrinsics,
                         extrinsics=extri,
@@ -232,11 +232,11 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
                     )
                 )
 
-        return ego_pinhole_dict
+        return ego_fisheye_dict
 
     def align_cams_and_videos(
-        self, video_path_list: list[Path], ego_cam_dict: dict[CameraNames, list[PinholeParameters]]
-    ) -> tuple[dict[CameraNames, list[PinholeParameters]], dict[CameraNames, Path]]:
+        self, video_path_list: list[Path], ego_cam_dict: dict[CameraNames, list[Fisheye62Parameters]]
+    ) -> tuple[dict[CameraNames, list[Fisheye62Parameters]], dict[CameraNames, Path]]:
         """Align cameras and videos based on the sequence."""
         assert len(video_path_list) == len(ego_cam_dict), (
             f"Number of videos {len(video_path_list)} does not match number of cameras {len(ego_cam_dict)}"

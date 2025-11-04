@@ -1,6 +1,7 @@
 """Rerun visualization helpers for combined exo- and ego-centric datasets."""
 
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
@@ -13,7 +14,12 @@ from einops import rearrange
 from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 
-from simplecv.camera_parameters import PinholeParameters
+from simplecv.camera_parameters import (
+    Fisheye62Parameters,
+    KannalaBrandtDistortion,
+    PinholeParameters,
+    apply_radial_tangential_distortion,
+)
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
@@ -25,7 +31,7 @@ from simplecv.data.skeleton.coco_133 import (
     LEFT_HAND_IDX,
     RIGHT_HAND_IDX,
 )
-from simplecv.ops.triangulate import proj_3d_vectorized
+from simplecv.ops.triangulate import arctan_proj_3d_vectorized, proj_3d_vectorized
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
@@ -182,7 +188,7 @@ def create_container(
 
 def filter_out_of_bounds_keypoints(
     uv_stack: Float[ndarray, "... 2"],
-    camera_params: PinholeParameters,
+    camera_params: PinholeParameters | Fisheye62Parameters,
     margin_percentage: float = 0.2,
 ) -> Float[ndarray, "... 2"]:
     """Clamp keypoints to the image bounds with a configurable border margin.
@@ -190,7 +196,7 @@ def filter_out_of_bounds_keypoints(
     Args:
         uv_stack (Float[np.ndarray, "... 2"]): Stacked 2D keypoint coordinates
             with the last axis holding ``(u, v)`` image coordinates.
-        camera_params (PinholeParameters): Intrinsics describing the sensor used
+        camera_params (PinholeParameters | Fisheye62Parameters): Intrinsics describing the sensor used
             to determine valid image extents.
         margin_percentage (float): Fractional padding applied beyond the raw
             image dimensions before clipping.
@@ -218,6 +224,44 @@ def filter_out_of_bounds_keypoints(
         filtered_uv[..., 1],
     )
     return filtered_uv
+
+
+def apply_kannala_brandt_distortion_batch(
+    uv_stack: Float[ndarray, "n_frames n_views n_kpts 2"],
+    intrinsics_stack: Float[ndarray, "n_views 3 3"],
+    distortions: Sequence[KannalaBrandtDistortion | None],
+) -> Float[ndarray, "n_frames n_views n_kpts 2"]:
+    """Apply per-view Kannala–Brandt distortion to a stack of UV coordinates."""
+    if all(distortion is None for distortion in distortions):
+        return uv_stack
+
+    uv_distorted: Float[ndarray, "n_frames n_views n_kpts 2"] = uv_stack.copy()
+    K_views: Float[ndarray, "n_views 3 3"] = np.asarray(intrinsics_stack)
+
+    fx: Float[ndarray, "n_views"] = K_views[:, 0, 0]
+    fy: Float[ndarray, "n_views"] = K_views[:, 1, 1]
+    cx: Float[ndarray, "n_views"] = K_views[:, 0, 2]
+    cy: Float[ndarray, "n_views"] = K_views[:, 1, 2]
+
+    uv_normalized: Float[ndarray, "n_frames n_views n_kpts 2"] = uv_distorted.copy()
+    uv_normalized[..., 0] = (uv_normalized[..., 0] - cx[None, :, None]) / fx[None, :, None]
+    uv_normalized[..., 1] = (uv_normalized[..., 1] - cy[None, :, None]) / fy[None, :, None]
+
+    n_frames: int = uv_stack.shape[0]
+    n_kpts: int = uv_stack.shape[2]
+
+    for view_idx, distortion in enumerate(distortions):
+        if distortion is None:
+            continue
+        view_norm: Float[ndarray, "n_frames n_kpts 2"] = uv_normalized[:, view_idx, :, :]
+        view_norm_flat: Float[ndarray, "_ 2"] = view_norm.reshape(n_frames * n_kpts, 2)
+        distorted_flat: Float[ndarray, "_ 2"] = apply_radial_tangential_distortion(distortion, view_norm_flat)
+        uv_normalized[:, view_idx, :, :] = distorted_flat.reshape(n_frames, n_kpts, 2)
+
+    uv_distorted[..., 0] = uv_normalized[..., 0] * fx[None, :, None] + cx[None, :, None]
+    uv_distorted[..., 1] = uv_normalized[..., 1] * fy[None, :, None] + cy[None, :, None]
+
+    return uv_distorted
 
 
 def visibility_mask_from_depth(
@@ -562,12 +606,17 @@ def log_exoego_batch(
                 stacklevel=2,
             )
         else:
-            Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
-                [pinhole.projection_matrix for pinhole in exo_cam_param_list]
-            )
-            uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = proj_3d_vectorized(
-                xyz_hom=xyz_hom_stack, P=Pall_exo
-            )
+            if isinstance(exo_cam_param_list[0], PinholeParameters):
+                Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
+                    [pinhole.projection_matrix for pinhole in exo_cam_param_list]
+                )
+                uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = proj_3d_vectorized(
+                    xyz_hom=xyz_hom_stack, P=Pall_exo
+                )
+            else:
+                raise NotImplementedError(
+                    f"Exo camera parameters of type '{type(exo_cam_param_list[0])}' are not supported."
+                )
             proj_rows_exo: Float[ndarray, "n_views 4"] = Pall_exo[:, 2, :]
             for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
                 exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
@@ -650,9 +699,22 @@ def log_exoego_batch(
             pinhole_log_path: Path = cam_log_path / "pinhole"
 
             # make Pall for specific camera
-            Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
-                [pinhole.projection_matrix for pinhole in ego_cam_param_list]
-            )
+            if isinstance(ego_cam_param_list[0], PinholeParameters):
+                Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
+                    [pinhole.projection_matrix for pinhole in ego_cam_param_list]
+                )
+                use_fisheye: bool = False
+            elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
+                Pall = np.stack([fisheye.projection_matrix for fisheye in ego_cam_param_list])
+                K_ego = np.stack([fisheye.intrinsics.k_matrix for fisheye in ego_cam_param_list])
+                cam_T_world_ego = np.stack([fisheye.extrinsics.cam_T_world for fisheye in ego_cam_param_list])
+                distortions_ego = [fisheye.distortion for fisheye in ego_cam_param_list]
+                use_fisheye: bool = True
+            else:
+                raise NotImplementedError(
+                    f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
+                )
+
             # Align coordinate, confidence, and camera-parameter buffers when their lengths differ.
             n_frames_total: int = min(len(xyz_hom_stack), len(ego_cam_param_list))
             xyz_hom_trim: Float[ndarray, "n_frames 133 4"] = xyz_hom_stack[:n_frames_total]
@@ -668,12 +730,24 @@ def log_exoego_batch(
 
                 # Get batch data
                 xyz_hom_batch = xyz_hom_trim[start_idx:end_idx]  # (batch_frames, 133, 4)
-                P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
 
-                # Use the vectorized projection function on the batch
-                uv_batch: Float[ndarray, "batch_frames batch_frames 133 2"] = proj_3d_vectorized(
-                    xyz_hom=xyz_hom_batch, P=P_batch
-                )
+                P_batch: Float[ndarray, "batch_frames 3 4"] = Pall[start_idx:end_idx]
+                if use_fisheye is False:
+                    uv_batch = proj_3d_vectorized(xyz_hom=xyz_hom_batch, P=P_batch)
+                else:
+                    K_batch: Float[ndarray, "batch_frames 3 3"] = K_ego[start_idx:end_idx]
+                    cam_T_world_batch: Float[ndarray, "batch_frames 4 4"] = cam_T_world_ego[start_idx:end_idx]
+                    uv_batch = arctan_proj_3d_vectorized(
+                        xyz_hom=xyz_hom_batch,
+                        cam_T_world=cam_T_world_batch,
+                        K=K_batch,
+                    )
+                    distortions_batch: Sequence[KannalaBrandtDistortion | None] = distortions_ego[start_idx:end_idx]
+                    uv_batch = apply_kannala_brandt_distortion_batch(
+                        uv_batch,
+                        intrinsics_stack=K_batch,
+                        distortions=distortions_batch,
+                    )
 
                 # Extract diagonal to get frame-to-frame correspondence
                 batch_len = end_idx - start_idx
@@ -846,8 +920,8 @@ def setup_scene(
 
         # log the ego cameras and their trajectories
         shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
-        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = cast(
-            dict[CamNameType, list[PinholeParameters]], ego_sequence.ego_cam_dict
+        ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
+            dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
         )
         for cam_name, ego_cam_param_list in ego_cam_dict.items():
             if not ego_cam_param_list:
@@ -855,9 +929,9 @@ def setup_scene(
             n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
             if n_frames_cam <= 0:
                 continue
-            trimmed_cam_params: list[PinholeParameters] = ego_cam_param_list[:n_frames_cam]
+            trimmed_cam_params: list[PinholeParameters | Fisheye62Parameters] = ego_cam_param_list[:n_frames_cam]
             # We assume that all cameras share intrinsics across frames
-            first_cam: PinholeParameters = trimmed_cam_params[0]
+            first_cam: PinholeParameters | Fisheye62Parameters = trimmed_cam_params[0]
             cam_log_path: Path = parent_log_path / "ego" / str(cam_name)
             pinhole_log_path: Path = cam_log_path / "pinhole"
             rr.log(

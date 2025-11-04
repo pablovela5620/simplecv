@@ -3,7 +3,7 @@ from typing import Literal
 
 import numpy as np
 from einops import rearrange
-from jaxtyping import Bool, Float
+from jaxtyping import Float
 from numpy import ndarray
 
 
@@ -97,15 +97,12 @@ class Intrinsics:
     fl_y: float
     cx: float
     cy: float
-    height: int | None = None
-    width: int | None = None
+    height: int
+    width: int
     k_matrix: Float[ndarray, "3 3"] = field(init=False)
 
     def __post_init__(self):
         self.compute_k_matrix()
-        if self.height is None or self.width is None:
-            self.height = int(2 * self.cy)
-            self.width = int(2 * self.cx)
 
     def compute_k_matrix(self):
         # Compute the camera matrix using the focal length and principal point
@@ -274,10 +271,10 @@ def arctan_projection(
 
 
 def apply_radial_tangential_distortion(
-    dist_coeffs: BrownConradyDistortion | None, points2d: Float[np.ndarray, "num_points 2"]
+    distortion: KannalaBrandtDistortion, points2d: Float[np.ndarray, "num_points 2"]
 ) -> Float[np.ndarray, "num_points 2"]:
     """
-    Applies Brown–Conrady distortion (radial, tangential, thin-prism, and tilt) to normalized 2D points.
+    Applies radial and tangential distortion to normalized 2D points.
 
     Args:
         dist_coeffs (Float[np.ndarray, "8"]): The distortion coefficients.
@@ -289,30 +286,25 @@ def apply_radial_tangential_distortion(
     Note:
         The points2d input should be normalized before being passed to this function.
     """
-    if dist_coeffs is None:
-        return points2d.copy()
-
-    eps: float = 2.0**-128
-    base_r2: Float[ndarray, "num_points 1"] = (points2d * points2d).sum(axis=-1, keepdims=True)
-    base_r2 = np.clip(base_r2, -(np.pi**2), np.pi**2)
-    base_r4: Float[ndarray, "num_points 1"] = base_r2 * base_r2
-    base_r6: Float[ndarray, "num_points 1"] = base_r4 * base_r2
+    k1, k2, p1, p2, k3, k4, k5, k6 = (
+        distortion.k1,
+        distortion.k2,
+        distortion.p1,
+        distortion.p2,
+        distortion.k3,
+        distortion.k4,
+        distortion.k5,
+        distortion.k6,
+    )
     # radial component
-    r2 = base_r2
-    r4 = base_r4
-    r6 = base_r6
+    r2 = (points2d * points2d).sum(axis=-1, keepdims=True)
+    r2 = np.clip(r2, -(np.pi**2), np.pi**2)
+    r4 = r2 * r2
+    r6 = r2 * r4
     r8 = r4 * r4
     r10 = r4 * r6
     r12 = r6 * r6
-    radial = (
-        1
-        + dist_coeffs.k1 * r2
-        + dist_coeffs.k2 * r4
-        + dist_coeffs.k3 * r6
-        + dist_coeffs.k4 * r8
-        + dist_coeffs.k5 * r10
-        + dist_coeffs.k6 * r12
-    )
+    radial = 1 + k1 * r2 + k2 * r4 + k3 * r6 + k4 * r8 + k5 * r10 + k6 * r12
     uv = points2d * radial
 
     # tangential component
@@ -321,114 +313,6 @@ def apply_radial_tangential_distortion(
     y2 = y * y
     xy = x * y
     r2 = x2 + y2
-    x += 2 * dist_coeffs.p2 * xy + dist_coeffs.p1 * (r2 + 2 * x2)
-    y += 2 * dist_coeffs.p1 * xy + dist_coeffs.p2 * (r2 + 2 * y2)
-
-    # thin prism component (s1-s4)
-    if any(coefficient != 0.0 for coefficient in (dist_coeffs.s1, dist_coeffs.s2, dist_coeffs.s3, dist_coeffs.s4)):
-        base_r2_flat: Float[ndarray, "num_points"] = base_r2[:, 0]
-        base_r4_flat: Float[ndarray, "num_points"] = base_r4[:, 0]
-        x += dist_coeffs.s1 * base_r2_flat + dist_coeffs.s2 * base_r4_flat
-        y += dist_coeffs.s3 * base_r2_flat + dist_coeffs.s4 * base_r4_flat
-
-    # image plane tilt (tau_x, tau_y)
-    if dist_coeffs.tau_x != 0.0 or dist_coeffs.tau_y != 0.0:
-        cos_tx = np.cos(dist_coeffs.tau_x)
-        sin_tx = np.sin(dist_coeffs.tau_x)
-        cos_ty = np.cos(dist_coeffs.tau_y)
-        sin_ty = np.sin(dist_coeffs.tau_y)
-
-        tilt_matrix: Float[ndarray, "3 3"] = np.array(
-            [
-                [cos_ty, sin_ty * sin_tx, -sin_ty * cos_tx],
-                [0.0, cos_tx, sin_tx],
-                [sin_ty, -cos_ty * sin_tx, cos_ty * cos_tx],
-            ],
-            dtype=points2d.dtype,
-        )
-
-        homogeneous_points: Float[ndarray, "num_points 3"] = np.stack((x, y, np.ones_like(x)), axis=-1)
-        tilted_points: Float[ndarray, "num_points 3"] = homogeneous_points @ tilt_matrix.T
-        denom: Float[ndarray, "num_points"] = tilted_points[:, 2]
-        denom = np.where(
-            np.abs(denom) > eps,
-            denom,
-            np.where(denom >= 0, eps, -eps),
-        )
-        x = tilted_points[:, 0] / denom
-        y = tilted_points[:, 1] / denom
-
+    x += 2 * p2 * xy + p1 * (r2 + 2 * x2)
+    y += 2 * p1 * xy + p2 * (r2 + 2 * y2)
     return np.stack((x, y), axis=-1)
-
-
-def project_kannala_brandt(
-    points_3d_cam: Float[np.ndarray, "num_points 3"],
-    dist_coeffs: KannalaBrandtDistortion | None,
-) -> Float[np.ndarray, "num_points 2"]:
-    """Project camera-frame points to the normalized image plane using Kannala–Brandt distortion."""
-
-    eps: float = 2.0**-128
-    x: Float[ndarray, "num_points"] = points_3d_cam[:, 0]
-    y: Float[ndarray, "num_points"] = points_3d_cam[:, 1]
-    z: Float[ndarray, "num_points"] = points_3d_cam[:, 2]
-
-    r: Float[ndarray, "num_points"] = np.sqrt(x * x + y * y)
-    theta: Float[ndarray, "num_points"] = np.arctan2(r, z)
-
-    theta_d: Float[ndarray, "num_points"] = theta.copy()
-    if dist_coeffs is not None:
-        theta2: Float[ndarray, "num_points"] = np.asarray(theta * theta, dtype=np.float64)
-        poly: Float[ndarray, "num_points"] = np.full_like(theta2, float(dist_coeffs.k6), dtype=np.float64)
-        for coeff in (
-            dist_coeffs.k5,
-            dist_coeffs.k4,
-            dist_coeffs.k3,
-            dist_coeffs.k2,
-            dist_coeffs.k1,
-        ):
-            poly = poly * theta2 + float(coeff)
-        scale_poly: Float[ndarray, "num_points"] = poly * theta2 + 1.0
-        theta_d = np.asarray(theta, dtype=np.float64) * scale_poly
-        theta_d = theta_d.astype(np.float32, copy=False)
-
-    scale: Float[ndarray, "num_points"] = np.ones_like(r)
-    mask: Bool[ndarray, "num_points"] = r > eps
-    scale[mask] = theta_d[mask] / r[mask]
-
-    x_dist: Float[ndarray, "num_points"] = x * scale
-    y_dist: Float[ndarray, "num_points"] = y * scale
-
-    # Points exactly on the optical axis should remain at the principal point.
-    x_dist[~mask] = 0.0
-    y_dist[~mask] = 0.0
-
-    return np.stack((x_dist, y_dist), axis=-1)
-
-
-def fisheye_projection(
-    points_3d_world: Float[ndarray, "num_points 3"], camera: Fisheye62Parameters
-) -> Float[ndarray, "num_points 2"]:
-    # world to camera
-    points_3d_hom_world: Float[ndarray, "num_points 4"] = to_homogeneous(points_3d_world)
-    points_3d_hom_cam: Float[ndarray, "num_points 4"] = (camera.extrinsics.cam_T_world @ points_3d_hom_world.T).T
-    points_3d_cam: Float[ndarray, "num_points 3"] = from_homogeneous(points_3d_hom_cam)
-    # camera to image via Kannala–Brandt model
-    points_2d_norm: Float[ndarray, "num_points 2"] = project_kannala_brandt(points_3d_cam, camera.distortion)
-
-    points_2d_distorted: Float[ndarray, "num_points 2"] = np.empty_like(points_2d_norm)
-    points_2d_distorted[:, 0] = points_2d_norm[:, 0] * camera.intrinsics.fl_x + camera.intrinsics.cx
-    points_2d_distorted[:, 1] = points_2d_norm[:, 1] * camera.intrinsics.fl_y + camera.intrinsics.cy
-
-    # make sure points are within image bounds
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(
-        points_2d_distorted[:, 0] >= camera.intrinsics.width,
-        points_2d_distorted[:, 1] >= camera.intrinsics.height,
-    )
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 0] < 0)
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 1] < 0)
-    # make sure points are in front of camera
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_3d_cam[:, 2] < 0)
-
-    # if out of bounds, set to -1
-    points_2d_distorted[out_of_bounds, :] = np.nan
-    return points_2d_distorted
