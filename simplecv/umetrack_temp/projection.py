@@ -20,8 +20,8 @@ def project_points(
     """
     points3d_cam: Float[np.ndarray, "num_points 3"] = camera.world_to_camera(points3d_world)
     points2d: Float[np.ndarray, "num_points 2"] = camera.camera_to_image(points3d_cam)
-    h = camera.camera_parameters.intrinsics.height
-    w = camera.camera_parameters.intrinsics.width
+    h: int = camera.camera_parameters.intrinsics.height
+    w: int = camera.camera_parameters.intrinsics.width
 
     # make sure points are within image bounds
     out_of_bounds = np.logical_or(points2d[:, 0] >= w, points2d[:, 1] >= h)

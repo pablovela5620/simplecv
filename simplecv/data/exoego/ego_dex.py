@@ -82,39 +82,6 @@ class EgoDexSequence(BaseExoEgoSequence[EgoDexConfig]):
         # convert from AVP to COCO 133
         xyz_coco_stack, conf_coco_stack = avp_to_coco_hands(xyz_avp=xyz_stack, conf_avp=conf_stack)
         xyzc_stack: Float32[ndarray, "n_frames 133 4"] = np.concatenate([xyz_coco_stack, conf_coco_stack], axis=-1)
-        # homogeneous coordinates for projection
-        # xyz_hom_stack: Float32[ndarray, "n_frames 68 4"] = np.concatenate(
-        #     [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
-        # )
-
-        # project 3D points to 2D using the camera parameters
-        # ego_cam_dict = self.ego_cam_dict
-        # # there should be only one camera in the dict, assert that
-        # assert len(ego_cam_dict) == 1, f"Expected single camera, got {len(ego_cam_dict)}"
-        # pinhole_params: PinholeParameters = next(iter(ego_cam_dict.values()))[0]
-        # P: Float32[ndarray, "3 4"] = pinhole_params.projection_matrix.astype(np.float32)
-        # # n_views 3 4, in this case only one view since its not a multicamera dataset
-        # Pall: Float32[ndarray, "1 3 4"] = P[np.newaxis, ...]
-
-        # uv_stack: Float32[ndarray, "n_frames 1 68 2"] = proj_3d_vectorized(xyz_hom=xyz_hom_stack, P=Pall)
-
-        # # --- mark 2‑D points that project outside the image bounds BEFORE we
-        # #     fuse them with confidences so that the NaNs propagate ---
-        # uv_stack[..., 0] = np.where(
-        #     (uv_stack[..., 0] < 0) | (uv_stack[..., 0] > pinhole_params.intrinsics.width),
-        #     np.nan,
-        #     uv_stack[..., 0],
-        # )
-        # uv_stack[..., 1] = np.where(
-        #     (uv_stack[..., 1] < 0) | (uv_stack[..., 1] > pinhole_params.intrinsics.height),
-        #     np.nan,
-        #     uv_stack[..., 1],
-        # )
-
-        # uvc_stack: Float32[ndarray, "n_frames 1 68 3"] = np.concatenate(
-        #     [uv_stack, conf_stack[:, np.newaxis, ...]], axis=-1
-        # )
-
         return xyzc_stack
 
     @classmethod
