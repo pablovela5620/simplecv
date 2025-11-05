@@ -108,15 +108,36 @@ class UmeTrackEgoSequence(BaseEgoSequence[UmeTrackConfig]):
         # these only contain intrinsics and distortion parameters, extrinsics are zeroed out
         fishey_params: list[Fisheye62Parameters] = create_fisheye_camparams(umtrack_camera_list=annotation.cameras)
         # these contain the extrinsics in meters, need to assign them to the fisheye cameras
-        self.world_T_cam_all: Float32[ndarray, "n_frames n_cams 4 4"] = annotation.camera_to_world_transforms
+        world_T_cam_all_mm: Float32[ndarray, "n_frames n_cams 4 4"] = annotation.camera_to_world_transforms
+        scale_to_meters: float = 1e-3
+        self.world_T_cam_all: Float32[ndarray, "n_frames n_cams 4 4"] = world_T_cam_all_mm.copy()
+        self.world_T_cam_all[..., :3, 3] *= np.float32(scale_to_meters)
         final_fisheye_params: dict[str, list[Fisheye62Parameters]] = {k: [] for k in CAMERA_FILE_NAMES}
+        prev_cam_T_world: Float32[ndarray, "n_cams 4 4"] = np.tile(
+            np.eye(4, dtype=np.float32),
+            (len(CAMERA_FILE_NAMES), 1, 1),
+        )
         for cam_idx, cam_name in enumerate(CAMERA_FILE_NAMES):
             # intrinsics and distortion are already set and the same for all frames per camera
             cam_params: Fisheye62Parameters = fishey_params[cam_idx]
             updated_fisheye_list: list[Fisheye62Parameters] = []
             for frame_idx in range(self.world_T_cam_all.shape[0]):
                 world_T_cam: Float32[ndarray, "4 4"] = self.world_T_cam_all[frame_idx, cam_idx]
-                cam_T_world: Float32[ndarray, "4 4"] = np.linalg.inv(world_T_cam)
+                # deal with potential singular matrices by reusing the last valid extrinsics
+                try:
+                    cam_T_world: Float32[ndarray, "4 4"] = np.linalg.inv(world_T_cam)
+                except np.linalg.LinAlgError:
+                    cam_T_world = prev_cam_T_world[cam_idx]
+                    world_T_cam = np.linalg.inv(cam_T_world)
+                    self.world_T_cam_all[frame_idx, cam_idx] = world_T_cam
+                else:
+                    if np.all(np.isfinite(cam_T_world)):
+                        prev_cam_T_world[cam_idx] = cam_T_world
+                    else:
+                        cam_T_world = prev_cam_T_world[cam_idx]
+                        world_T_cam = np.linalg.inv(cam_T_world)
+                        self.world_T_cam_all[frame_idx, cam_idx] = world_T_cam
+
                 cam_R_world: Float32[ndarray, "3 3"] = cam_T_world[:3, :3]
                 cam_t_world: Float32[ndarray, "3"] = cam_T_world[:3, 3]
                 extrinsics: Extrinsics = Extrinsics(
@@ -153,9 +174,9 @@ class UmeTrackEgoSequence(BaseEgoSequence[UmeTrackConfig]):
         for idx, (cam_name, expected_stem) in enumerate(CAMERA_FILE_NAMES.items()):
             assert cam_name in ego_cam_dict, f"Camera {cam_name} missing from ego camera dictionary."
             video_path: Path = video_path_list[idx]
-            assert (
-                video_path.stem == expected_stem
-            ), f"Video at index {idx} stem '{video_path.stem}' does not match expected '{expected_stem}'."
+            assert video_path.stem == expected_stem, (
+                f"Video at index {idx} stem '{video_path.stem}' does not match expected '{expected_stem}'."
+            )
 
             aligned_cam_dict[cam_name] = ego_cam_dict[cam_name]
             aligned_video_map[cam_name] = video_path
@@ -169,4 +190,4 @@ class UmeTrackEgoSequence(BaseEgoSequence[UmeTrackConfig]):
     @property
     def image_plane_distance(self) -> int | float:
         """Get the image plane distance for the camera in meters."""
-        return 25
+        return 0.025
