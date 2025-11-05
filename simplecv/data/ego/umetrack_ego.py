@@ -75,7 +75,7 @@ class UmeTrackEgoSequence(BaseEgoSequence[UmeTrackConfig]):
             / self.config.data_type
             / self.config.hand_interaction
             / self.config.split
-            / self.config.user_name
+            / f"user_{self.config.user:02d}"
             / f"recording_{self.config.recording_id:02d}"
         )
         assert recording_dir.exists() and recording_dir.is_dir(), (
@@ -99,7 +99,7 @@ class UmeTrackEgoSequence(BaseEgoSequence[UmeTrackConfig]):
             / self.config.data_type
             / self.config.hand_interaction
             / self.config.split
-            / self.config.user_name
+            / f"user_{self.config.user:02d}"
             / f"recording_{self.config.recording_id:02d}"
             / f"recording_{self.config.recording_id:02d}.json"
         )

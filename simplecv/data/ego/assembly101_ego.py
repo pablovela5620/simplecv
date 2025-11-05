@@ -1,7 +1,7 @@
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import rerun as rr
@@ -14,7 +14,7 @@ from serde.json import from_json
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
-from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
+from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, EgoData
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.assembly101 import Assembly101Config
@@ -141,7 +141,7 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
 
     def load_video_paths(self) -> list[Path]:
         """Load the paths to the video files."""
-        video_dir: Path = self.config.root_directory / "videos" / self.config.encoding / self.config.sequence_name
+        video_dir: Path = self.config.root_directory / "videos" / "av1-720-new" / self.config.sequence_name
         assert video_dir.exists(), f"Directory {video_dir} does not exist"
         ego_video_files: list[Path] = sorted(
             [file for file in video_dir.iterdir() if file.is_file() and file.name.startswith("HMC")]
@@ -149,7 +149,7 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
 
         return ego_video_files
 
-    def load_ego_cams(self) -> dict[str, list[Fisheye62Parameters]]:
+    def load_ego_cams(self) -> dict[str, list[CameraParam]]:
         ############################################
         # Get Intrinsic Parameters for Ego Cameras #
         ############################################
@@ -161,11 +161,14 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
         intri_json_path: Path = intri_jsons[0]
         assert intri_json_path.exists(), f"File {intri_json_path} does not exist"
 
-        records: list[CameraRecord] = from_json(list[CameraRecord], intri_json_path.read_text())
-        print(f"Loaded {len(records)} camera records from {intri_json_path.name}")
-        record: CameraRecord = records[-1]  # Use the first record to get the camera name
-
-        fisheye62: OVFishEye62 = record.Camera
+        intri_text: str = intri_json_path.read_text()
+        records: list[CameraRecord] = from_json(list[CameraRecord], intri_text)
+        assert records, f"No camera records found in {intri_json_path}"
+        record: CameraRecord = records[-1]
+        camera_record: OpenCV | OVFishEye62 = record.Camera
+        if not isinstance(camera_record, OVFishEye62):
+            raise ValueError(f"Expected OVFishEye62 camera record, but received {type(camera_record).__name__}")
+        fisheye62: OVFishEye62 = camera_record
 
         distortion: KannalaBrandtDistortion = KannalaBrandtDistortion(
             k1=fisheye62.k1,
@@ -201,15 +204,18 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
             extrinsics_ego: dict[str, Any] = json.load(f)
 
         schema: type[EgoExtri843] | type[EgoExtri211] = pick_schema(extrinsics_ego)
-        ego_extri_cameras: dict[str, schema] = from_json(dict[str, schema], extrinsics_ego_path.read_text())  # type: ignore
-
-        ego_extri_cameras = {
-            k: ego_extri_cameras[k]
-            for k in sorted(ego_extri_cameras, key=int)  # numeric (“natural”) sort
-        }
+        extrinsics_text: str = extrinsics_ego_path.read_text()
+        if schema is EgoExtri843:
+            raw_ego_cameras: dict[str, EgoExtri843] = from_json(dict[str, EgoExtri843], extrinsics_text)
+            ego_extri_cameras: dict[str, EgoExtri843 | EgoExtri211] = {
+                key: raw_ego_cameras[key] for key in sorted(raw_ego_cameras, key=int)
+            }
+        else:
+            raw_ego_cameras_211: dict[str, EgoExtri211] = from_json(dict[str, EgoExtri211], extrinsics_text)
+            ego_extri_cameras = {key: raw_ego_cameras_211[key] for key in sorted(raw_ego_cameras_211, key=int)}
 
         # create list of Fisheye62Parameters for ego cameras
-        ego_fisheye_dict: dict[CameraNames, list[Fisheye62Parameters]] = {
+        ego_fisheye_dict: dict[str, list[Fisheye62Parameters]] = {
             "e1": [],
             "e2": [],
             "e3": [],
@@ -232,7 +238,7 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
                     )
                 )
 
-        return ego_fisheye_dict
+        return cast(dict[str, list[CameraParam]], ego_fisheye_dict)
 
     def align_cams_and_videos(
         self, video_path_list: list[Path], ego_cam_dict: dict[CameraNames, list[Fisheye62Parameters]]

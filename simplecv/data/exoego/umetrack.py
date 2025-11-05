@@ -27,7 +27,7 @@ class UmeTrackConfig(BaseExoEgoDatasetConfig):
     data_type: Literal["synthetic", "real"] = "real"
     split: Literal["training", "testing"] = "training"
     hand_interaction: Literal["separate_hand", "hand_hand"] = "separate_hand"
-    user_name: str = "user_15"
+    user: int = 15
     recording_id: int = 0
 
 
@@ -51,7 +51,7 @@ class UmeTrackSequence(BaseExoEgoSequence[UmeTrackConfig]):
             / self.config.data_type
             / self.config.hand_interaction
             / self.config.split
-            / self.config.user_name
+            / f"user_{self.config.user:02d}"
             / f"recording_{self.config.recording_id:02d}"
         )
         annotation_path: Path = recording_dir / f"recording_{self.config.recording_id:02d}.json"
