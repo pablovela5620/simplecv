@@ -17,7 +17,7 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.ops import conventions
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
-from simplecv.umetrack_temp.generic_hand_model import LANDMARK, UME_HAND_CONNECTIONS
+from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK, UME_HAND_CONNECTIONS
 
 
 class QuestHandLandmark(IntEnum):

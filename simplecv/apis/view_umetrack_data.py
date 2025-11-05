@@ -1,14 +1,13 @@
 import warnings
 from collections.abc import Iterator, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-import torch
-from jaxtyping import Float, Float32, Int, Int64, UInt8
+from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 from rerun import AnnotationInfo, ClassDescription
 from serde import field as serde_field
@@ -24,10 +23,10 @@ from simplecv.camera_parameters import (
 )
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.umetrack_temp.cameras import Camera
-from simplecv.umetrack_temp.generic_hand_model import (
+from simplecv.umetrack_temp.generic_hand_model_numpy import (
     LANDMARK,
     UME_HAND_CONNECTIONS,
-    HandModelTensor,
+    HandModelNumpy,
     HandPoseLabels,
     SingleHandPose,
     landmarks_from_hand_pose,
@@ -113,64 +112,6 @@ class UmeTrackCameras:
 
 
 @serde
-class HandModelNumpy:
-    """Hand model parameters stored as NumPy arrays.
-
-    Notes:
-        Serde loads each field as a NumPy ndarray with the dtype/shape indicated
-        by the jaxtyping annotations below.
-    """
-
-    joint_rotation_axes: Float32[ndarray, "n_joints=22 3"]
-    """Unit rotation axes for each joint frame."""
-    joint_rest_positions: Float32[ndarray, "n_joints=22 3"]
-    """Joint rest positions expressed in the hand root frame."""
-    joint_frame_index: Int64[ndarray, "n_joints=22"]
-    """Mapping from joint to the frame index used during skinning."""
-    joint_parent: Int64[ndarray, "n_joints=22"]
-    """Parent joint indices (negative values indicate the root)."""
-    joint_first_child: Int64[ndarray, "n_joints=22"]
-    """Index to the first child joint for hierarchical traversal."""
-    joint_next_sibling: Int64[ndarray, "n_joints=22"]
-    """Index to the next sibling joint for hierarchical traversal."""
-    landmark_rest_positions: Float32[ndarray, "num_landmarks 3"]
-    """Rest pose landmark coordinates in the hand model frame."""
-    landmark_rest_bone_weights: Float32[ndarray, "num_landmarks max_landmark_weights"]
-    """Bone blend weights per landmark."""
-    landmark_rest_bone_indices: Int64[ndarray, "num_landmarks max_landmark_weights"]
-    """Bone indices paired with `landmark_rest_bone_weights`."""
-    hand_scale: Float32[ndarray, ""]
-    """Global uniform hand scale factor."""
-    mesh_vertices: Float32[ndarray, "num_mesh_vertices 3"]
-    """Skinned mesh vertices at rest pose."""
-    mesh_triangles: Int64[ndarray, "num_mesh_faces 3"]
-    """Triangle indices defining the mesh topology."""
-    dense_bone_weights: Float32[ndarray, "num_mesh_vertices num_joint_frames"]
-    """Blend weights used for dense mesh skinning."""
-    joint_limits: Float32[ndarray, "n_joints=22 joint_limit_bounds"]
-    """Lower/upper joint angle limits in radians."""
-
-
-def hand_model_numpy_to_tensor(hand_model: HandModelNumpy) -> HandModelTensor:
-    """Convert a NumPy-backed hand model into its torch tensor counterpart.
-
-    Args:
-        hand_model: Serde-deserialized hand model containing NumPy arrays.
-
-    Returns:
-        A `HandModelTensor` with each field materialized as a torch tensor.
-
-    Notes:
-        The conversion preserves the dtype coming from NumPy; this assumes the
-        serde loader already supplied the correct float32 / int64 arrays.
-    """
-    tensor_fields: dict[str, torch.Tensor] = {
-        name: torch.from_numpy(value) for name, value in asdict(hand_model).items()
-    }
-    return HandModelTensor(**tensor_fields)
-
-
-@serde
 class UmeTrackAnnotation:
     cameras: list[UmeTrackCameras]
     """Intrinsic definitions for each UmeTrack fisheye camera."""
@@ -210,7 +151,7 @@ class DataStream:
         self.fisheye_cameras = create_cameras(annotation.cameras)
         # camera extrinsics (slam pose of each camera)
         self.world_T_cam_all: Float32[ndarray, "n_frames n_cams 4 4"] = annotation.camera_to_world_transforms
-        self.hand_model: HandModelTensor = hand_model_numpy_to_tensor(annotation.hand_model)
+        self.hand_model: HandModelNumpy = annotation.hand_model
 
         self.hand_pose_labels = HandPoseLabels(
             camera_angles=[float(angle) for angle in annotation.camera_angles],
@@ -481,7 +422,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
         if frame_timestamp_ns is None:
             raise IndexError(f"No video timestamp available for frame index {frame_idx}.")
         rr.set_time(timeline, timestamp=1e-9 * frame_timestamp_ns)
-        hand_model: HandModelTensor = datastream.hand_model
+        hand_model: HandModelNumpy = datastream.hand_model
         frame_active_crop_entities: set[str] = set()
         landmarks_dict: dict[str, Float32[ndarray, "n_kpts=21 3"] | None] = {
             "left": None,

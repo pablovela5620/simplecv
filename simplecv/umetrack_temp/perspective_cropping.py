@@ -1,17 +1,18 @@
 import cv2
 import numpy as np
-import torch
 from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.umetrack_temp.cameras import Camera
-from simplecv.umetrack_temp.generic_hand_model import (
+from simplecv.umetrack_temp.generic_hand_model_numpy import (
     NUM_JOINTS_PER_HAND,
-    HandModelTensor,
     SingleHandPose,
     landmarks_from_hand_pose,
+)
+from simplecv.umetrack_temp.generic_hand_model_numpy import (
+    HandModelNumpy as HandModel,
 )
 
 
@@ -247,15 +248,16 @@ def gen_crop_parameters_from_points(
     return PinholeParameters(name=f"{base_name}_crop", extrinsics=extrinsics, intrinsics=intrinsics)
 
 
-def neutral_joint_angles(up: HandModelTensor, lower_factor: float = 0.5) -> torch.Tensor:
+def neutral_joint_angles(up: HandModel, lower_factor: float = 0.5) -> Float32[ndarray, "n_joints=22"]:
     joint_limits = up.joint_limits
     assert joint_limits is not None
-    return joint_limits[..., 0] * lower_factor + joint_limits[..., 1] * (1 - lower_factor)
+    neutral_pose = joint_limits[..., 0] * lower_factor + joint_limits[..., 1] * (1 - lower_factor)
+    return np.asarray(neutral_pose, dtype=np.float32)
 
 
 def rank_hand_visibility_in_cameras(
     cameras: list[Camera],
-    hand_model: HandModelTensor,
+    hand_model: HandModel,
     hand_pose: SingleHandPose,
     hand_idx: int,
     min_required_vis_landmarks: int,
@@ -307,7 +309,7 @@ def rank_hand_visibility_in_cameras(
 
 
 def get_crop_points_from_hand_pose(
-    hand_model: HandModelTensor,
+    hand_model: HandModel,
     gt_hand_pose: SingleHandPose,
     hand_idx: int,
     num_crop_points: int,
@@ -332,8 +334,9 @@ def get_crop_points_from_hand_pose(
         AssertionError: If num_crop_points is not one of 21, 42, or 63.
     """
     assert num_crop_points in [21, 42, 63]
+    neutral_joint_angles_np: Float32[ndarray, "n_joints=22"] = neutral_joint_angles(hand_model)
     neutral_hand_pose = SingleHandPose(
-        joint_angles=neutral_joint_angles(hand_model).numpy(),
+        joint_angles=neutral_joint_angles_np,
         wrist_xform=gt_hand_pose.wrist_xform,
     )
     open_hand_pose = SingleHandPose(

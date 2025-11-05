@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import IntEnum
 from typing import NamedTuple
 
@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from jaxtyping import Float32, Int64
 from torch import Tensor
+
+from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy
 
 NUM_LANDMARKS_PER_HAND = 21
 NUM_FINGERTIPS_PER_HAND = 5
@@ -70,7 +72,7 @@ UME_HAND_CONNECTIONS = frozenset(
 
 
 @dataclass
-class HandModelTensor:
+class HandModelTorch:
     joint_rotation_axes: Float32[Tensor, "n_joints=22 3"]
     joint_rest_positions: Float32[Tensor, "n_joints=22 3"]
     joint_frame_index: Int64[Tensor, "n_joints=22"]
@@ -85,6 +87,12 @@ class HandModelTensor:
     mesh_triangles: Int64[Tensor, "num_mesh_faces 3"]
     dense_bone_weights: Float32[Tensor, "num_mesh_vertices num_joint_frames"]
     joint_limits: Float32[Tensor, "n_joints=22 joint_limit_bounds"]
+
+
+def hand_model_numpy_to_tensor(hand_model: HandModelNumpy) -> HandModelTorch:
+    """Materialise the serde-loaded hand model using NumPy arrays only."""
+
+    return HandModelTorch(**asdict(hand_model))
 
 
 class SingleHandPose(NamedTuple):
@@ -109,7 +117,7 @@ class HandPoseLabels:
     """List of camera angles in degrees."""
     camera_to_world_transforms: Float32[np.ndarray, "n_frames n_cams 4 4"]
     """Camera to world transform matrix."""
-    hand_model: HandModelTensor
+    hand_model: HandModelTorch
     """Hand model."""
     joint_angles: Float32[np.ndarray, "n_frames n_hands=2 n_joints=22"]
     """Joint angles in degrees."""
@@ -432,7 +440,7 @@ def _skin_points(
 
 
 def skin_landmarks(
-    hand_model: HandModelTensor,
+    hand_model: HandModelTorch,
     joint_angles: Float32[Tensor, "... n_joints=22"],
     wrist_transforms: Float32[Tensor, "... 4 4"],
 ) -> Float32[Tensor, "... num_landmarks 3"]:
@@ -466,7 +474,7 @@ def skin_landmarks(
 
 
 def skin_landmarks_np(
-    hand_model: HandModelTensor,
+    hand_model: HandModelTorch,
     joint_angles: Float32[np.ndarray, "... n_joints=22"],
     wrist_transforms: Float32[np.ndarray, "... 4 4"],
 ) -> Float32[np.ndarray, "... num_landmarks 3"]:
@@ -492,7 +500,7 @@ def skin_landmarks_np(
 
 
 def landmarks_from_hand_pose(
-    hand_model: HandModelTensor, hand_pose: SingleHandPose, hand_idx: int
+    hand_model: HandModelTorch, hand_pose: SingleHandPose, hand_idx: int
 ) -> Float32[np.ndarray, "num_landmarks 3"]:
     """
     Compute 3D landmarks in the world space given the hand model and hand pose.

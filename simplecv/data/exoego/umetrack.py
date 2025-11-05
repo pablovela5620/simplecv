@@ -10,14 +10,14 @@ from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from serde.json import from_json
 
-from simplecv.apis.view_umetrack_data import UmeTrackAnnotation, hand_model_numpy_to_tensor
+from simplecv.apis.view_umetrack_data import UmeTrackAnnotation
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.umetrack_ego import UmeTrackEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
-from simplecv.umetrack_temp.generic_hand_model import HandModelTensor, SingleHandPose, landmarks_from_hand_pose
+from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, SingleHandPose, landmarks_from_hand_pose
 
 
 @dataclass
@@ -58,7 +58,7 @@ class UmeTrackSequence(BaseExoEgoSequence[UmeTrackConfig]):
         assert annotation_path.exists(), f"Annotation file {annotation_path} does not exist."
 
         annotation: UmeTrackAnnotation = from_json(UmeTrackAnnotation, annotation_path.read_text())
-        hand_model_tensor: HandModelTensor = hand_model_numpy_to_tensor(annotation.hand_model)
+        hand_model_tensor: HandModelNumpy = annotation.hand_model
 
         num_frames: int = annotation.joint_angles.shape[0]
         # initialize with NaNs and zero confidence
