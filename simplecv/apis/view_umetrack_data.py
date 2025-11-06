@@ -362,9 +362,9 @@ class UmeTrackVisualizeConfig:
     rr_config: RerunTyroConfig
     """Command-line options for spawning and configuring the Rerun viewer."""
     data_dir: Path
-    """Path to the split dataset. Either a recording directory or its parent containing `recording_*` folders."""
+    """Parent directory containing one or more `recording_*` folders."""
     sequence_id: int = 0
-    """Recording index to visualize (0-indexed when selecting from a parent directory)."""
+    """Recording index to visualize (0-indexed within the parent directory)."""
     min_required_vis_landmarks: int = 19
     """Minimum number of visible landmarks required to consider a hand visible in a camera."""
     num_crop_points: Literal[21, 42, 63] = 63
@@ -377,6 +377,15 @@ def main(config: UmeTrackVisualizeConfig) -> None:
     if not config.data_dir.is_dir():
         raise NotADirectoryError(f"{config.data_dir} is not a directory")
     recording_dirs: list[Path] = sorted(path for path in config.data_dir.glob("recording_*") if path.is_dir())
+    if not recording_dirs:
+        raise FileNotFoundError(
+            f"Expected at least one 'recording_*' directory under {config.data_dir}. "
+            "Pass the parent directory containing the recordings."
+        )
+    if not 0 <= config.sequence_id < len(recording_dirs):
+        raise ValueError(
+            f"sequence_id {config.sequence_id} is out of range for {len(recording_dirs)} recordings in {config.data_dir}."
+        )
     selected_dir: Path = recording_dirs[config.sequence_id]
     video_paths: list[Path] = list(selected_dir.glob("*.mp4"))
     # sort video paths based on CAMERA_FILE_NAMES order
