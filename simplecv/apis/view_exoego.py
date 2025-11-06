@@ -830,10 +830,11 @@ def setup_scene(
     )
 
 
-def visualize_exo_ego(config: VisualizeConfig):
+def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConfig):
     """Entry-point used by ``tools/view_exoego.py`` to drive the visualization.
 
     Args:
+        exoego_sequence (BaseExoEgoSequence): The exo-ego sequence to visualize.
         config (VisualizeConfig): Run configuration describing dataset,
             logging toggles, and viewer options.
 
@@ -841,7 +842,7 @@ def visualize_exo_ego(config: VisualizeConfig):
         None: Side-effectful logging call sequence that feeds the Rerun viewer.
     """
     start_time: float = timer()
-    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()  # one-liner
+
     rr.log("/", exoego_sequence.world_coordinate_system, static=True)
     set_annotation_context()
 
@@ -880,3 +881,16 @@ def visualize_exo_ego(config: VisualizeConfig):
         )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
+
+
+def main(config: VisualizeConfig) -> None:
+    """
+    Entry-point used by ``tools/view_exoego.py`` to drive the visualization.
+    Seperated out so that we can use visualize_exo_ego in other contexts.
+
+    Args:
+        config (VisualizeConfig): Run configuration describing dataset,
+            logging toggles, and viewer options.
+    """
+    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
+    visualize_exo_ego(exoego_sequence, config)

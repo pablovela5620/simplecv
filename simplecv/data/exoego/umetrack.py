@@ -1,11 +1,12 @@
 from collections.abc import Generator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import rerun as rr
 from jaxtyping import Float32
+from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from serde.json import from_json
@@ -29,10 +30,11 @@ class UmeTrackConfig(BaseExoEgoDatasetConfig):
     hand_interaction: Literal["separate_hand", "hand_hand"] = "separate_hand"
     user: int = 15
     recording_id: int = 0
+    sequence_name: str = ""
 
 
 class UmeTrackSequence(BaseExoEgoSequence[UmeTrackConfig]):
-    """Assembly101 dataset adapter with 3D annotations expressed in meters."""
+    """UmeTrack dataset adapter emitting 3D annotations in meters."""
 
     def __getitem__(self, idx) -> None:
         return None
@@ -119,23 +121,70 @@ class UmeTrackSequence(BaseExoEgoSequence[UmeTrackConfig]):
     @classmethod
     def iter_episode_sequences(cls, cfg: UmeTrackConfig) -> Generator["UmeTrackSequence", None, None]:
         """
-        Iterates over all episode sequences in the dataset specified by the given configuration.
+        Iterate over every recording in the UmeTrack dataset rooted at ``cfg.root_directory``.
 
-        This class method yields `Assembly101Sequence` instances for each sequence found in the dataset directory structure.
-        It expects the dataset to be organized with subject directories named "subject_*", each containing sequence directories.
+        The layout is expected to follow ``data_type/hand_interaction/split/user_xx/recording_xx``.
+        Nested loops keep the traversal explicit: each directory level is validated and the
+        discovered identifiers override the corresponding fields in a copied configuration.
 
         Args:
-            cfg (Assembly101Config): Configuration object specifying the root directory and other parameters.
+            cfg: Configuration object describing the dataset root and default options.
 
         Yields:
-            Assembly101Sequence: An instance for each sequence found, with configuration updated for the current subject and sequence.
-
-        Notes:
-            - Uses natural sorting for subject and sequence directories.
-            - Prints subject ID and sequence name for each iteration using `icecream.ic`.
-            - Pauses execution for user input after each sequence (likely for debugging).
+            Instances of :class:`UmeTrackSequence`, one per recording discovered on disk.
         """
-        raise NotImplementedError("UmeTrack dataset does not support iterating over multiple sequences.")
+        root_dir: Path = cfg.root_directory
+        assert root_dir.exists(), f"UmeTrack root directory {root_dir} does not exist."
+
+        data_type_dirs: list[Path] = natsorted([d for d in root_dir.iterdir() if d.is_dir()])
+        for data_type_dir in data_type_dirs:
+            data_type: str = data_type_dir.name
+            if data_type not in {"synthetic", "real"}:
+                continue
+
+            hand_dirs: list[Path] = natsorted([d for d in data_type_dir.iterdir() if d.is_dir()])
+            for hand_dir in hand_dirs:
+                hand_interaction: str = hand_dir.name
+                if hand_interaction not in {"separate_hand", "hand_hand"}:
+                    continue
+
+                split_dirs: list[Path] = natsorted([d for d in hand_dir.iterdir() if d.is_dir()])
+                for split_dir in split_dirs:
+                    split: str = split_dir.name
+                    if split not in {"training", "testing"}:
+                        continue
+
+                    user_dirs: list[Path] = natsorted([d for d in split_dir.glob("user_*") if d.is_dir()])
+                    for user_dir in user_dirs:
+                        try:
+                            user_id: int = int(user_dir.name.split("_")[-1])
+                        except ValueError:
+                            continue
+
+                        recording_dirs: list[Path] = natsorted([d for d in user_dir.glob("recording_*") if d.is_dir()])
+                        for recording_dir in recording_dirs:
+                            try:
+                                recording_id: int = int(recording_dir.name.split("_")[-1])
+                            except ValueError:
+                                continue
+
+                            episode_cfg: UmeTrackConfig = replace(
+                                cfg,
+                                data_type=data_type,
+                                hand_interaction=hand_interaction,
+                                split=split,
+                                user=user_id,
+                                recording_id=recording_id,
+                                sequence_name=(
+                                    f"{data_type}/{hand_interaction}/{split}/"
+                                    f"user_{user_id:02d}/recording_{recording_id:02d}"
+                                ),
+                            )
+
+                            try:
+                                yield cls(episode_cfg)
+                            except Exception as exc:  # pragma: no cover - defensive skip for corrupted recordings
+                                print(f"[skip] {recording_dir}: {exc}")
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
