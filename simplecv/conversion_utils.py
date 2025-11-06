@@ -10,7 +10,7 @@ from serde import field as serde_field
 from serde import serde
 from serde.json import to_json
 
-from simplecv.camera_parameters import Distortion, Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.image_types import BGRList
 from simplecv.ops import conventions
 
@@ -125,7 +125,7 @@ def save_to_nerfstudio(
     assert len(pinhole_param_list) > 0
 
     example_intri: Intrinsics = pinhole_param_list[0].intrinsics
-    example_dist: Distortion | None = pinhole_param_list[0].distortion
+    example_dist: BrownConradyDistortion | None = pinhole_param_list[0].distortion
 
     # save to nerfstudio format
     ns_data = NerfstudioData(

@@ -12,7 +12,7 @@ from numpy import ndarray
 from pyarrow import ChunkedArray
 from rerun_bindings import Recording, RecordingView
 
-from simplecv.camera_parameters import PinholeParameters
+from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 
 
 def get_safe_application_id() -> str:
@@ -66,7 +66,7 @@ class RerunTyroConfig:
 
 
 def log_pinhole(
-    camera: PinholeParameters,
+    camera: PinholeParameters | Fisheye62Parameters,
     cam_log_path: Path,
     image_plane_distance: int | float = 0.5,
     static: bool = False,

@@ -3,24 +3,42 @@ from typing import Literal
 
 import numpy as np
 from einops import rearrange
-from jaxtyping import Bool, Float
+from jaxtyping import Float
 from numpy import ndarray
 
 
 @dataclass
-class Distortion:
-    """
-    Brown Conrady distortion model
-    """
+class BrownConradyDistortion:
+    """Brown–Conrady distortion model with optional thin-prism and tilt terms."""
 
     k1: float
     k2: float
     p1: float
     p2: float
     k3: float
-    k4: float | None = None
-    k5: float | None = None
-    k6: float | None = None
+    k4: float = 0.0
+    k5: float = 0.0
+    k6: float = 0.0
+    s1: float = 0.0
+    s2: float = 0.0
+    s3: float = 0.0
+    s4: float = 0.0
+    tau_x: float = 0.0
+    tau_y: float = 0.0
+
+
+@dataclass
+class KannalaBrandtDistortion:
+    """Kannala–Brandt fisheye distortion model (odd-order radial polynomial)."""
+
+    k1: float = 0.0
+    k2: float = 0.0
+    k3: float = 0.0
+    k4: float = 0.0
+    k5: float = 0.0
+    k6: float = 0.0
+    p1: float = 0.0
+    p2: float = 0.0
 
 
 @dataclass
@@ -79,15 +97,12 @@ class Intrinsics:
     fl_y: float
     cx: float
     cy: float
-    height: int | None = None
-    width: int | None = None
+    height: int
+    width: int
     k_matrix: Float[ndarray, "3 3"] = field(init=False)
 
     def __post_init__(self):
         self.compute_k_matrix()
-        if self.height is None or self.width is None:
-            self.height = 2 * self.cy
-            self.width = 2 * self.cx
 
     def compute_k_matrix(self):
         # Compute the camera matrix using the focal length and principal point
@@ -113,7 +128,7 @@ class PinholeParameters:
     extrinsics: Extrinsics
     intrinsics: Intrinsics
     projection_matrix: Float[ndarray, "3 4"] = field(init=False)
-    distortion: Distortion | None = None
+    distortion: BrownConradyDistortion | None = None
 
     def __post_init__(self) -> None:
         self.compute_projection_matrix()
@@ -125,15 +140,13 @@ class PinholeParameters:
 
 @dataclass
 class Fisheye62Parameters:
-    """
-    Has 6 radial (k) parameters and 2 tangential (p) distortion parameters
-    """
+    """Kannala–Brandt fisheye camera described by up to 6 radial coefficients."""
 
     name: str
     extrinsics: Extrinsics
     intrinsics: Intrinsics
+    distortion: KannalaBrandtDistortion | None = None
     projection_matrix: Float[ndarray, "3 4"] = field(init=False)
-    distortion: Distortion | None = None
 
     def __post_init__(self) -> None:
         self.compute_projection_matrix()
@@ -180,10 +193,10 @@ def rescale_intri(camera_intrinsics: Intrinsics, *, target_width: int, target_he
     Rescales the input image and intrinsic matrix by a given scale factor.
 
     Args:
-        cam (PinholeCameraParameter): The pinhole camera parameter.
+        camera_intrinsics: The camera intrinsics to rescale.
 
     Returns:
-        : The rescaled image frame and intrinsic matrix.
+        Intrinsics: Rescaled copy of the input intrinsics.
     """
     assert camera_intrinsics.height is not None, "Set Camera Height, currently None"
     assert camera_intrinsics.width is not None, "Set Camera Width, currently None"
@@ -227,7 +240,7 @@ def perspective_projection(
 
 
 def arctan_projection(
-    points_3d: Float[np.ndarray, "num_points 3"], K: Float[np.ndarray, "3 3"]
+    points_3d_cam: Float[np.ndarray, "num_points 3"], K: Float[np.ndarray, "3 3"]
 ) -> Float[np.ndarray, "num_points 2"]:
     """
     Project 3D points in camera coordinates to 2D using arctan projection
@@ -240,18 +253,14 @@ def arctan_projection(
         A numpy array of shape (num_points, 2) representing the 2D image coordinates of the projected points
     """
     # Compute the radial distance of each 3D point from the camera center
-    r: Float[ndarray, "num_points"] = np.sqrt(
-        np.sum(np.square(points_3d[:, :2]), axis=-1)
-    )
+    r: Float[ndarray, "num_points"] = np.sqrt(np.sum(np.square(points_3d_cam[:, :2]), axis=-1))
     eps: float = 2.0**-128
     # Compute the angles of the 2D image coordinates with respect to the camera center using arctan2
-    s: Float[ndarray, "num_points"] = np.arctan2(r, points_3d[:, 2]) / np.maximum(
-        r, eps
-    )
+    s: Float[ndarray, "num_points"] = np.arctan2(r, points_3d_cam[:, 2]) / np.maximum(r, eps)
     # Scale the angles by the radial distance to obtain the final 2D image coordinates in camera coordinates
-    points_2d_cam: Float[ndarray, "num_points 2"] = np.zeros((points_3d.shape[0], 2))
-    points_2d_cam[:, 0] = points_3d[:, 0] * s
-    points_2d_cam[:, 1] = points_3d[:, 1] * s
+    points_2d_cam: Float[ndarray, "num_points 2"] = np.zeros((points_3d_cam.shape[0], 2))
+    points_2d_cam[:, 0] = points_3d_cam[:, 0] * s
+    points_2d_cam[:, 1] = points_3d_cam[:, 1] * s
     # Convert the camera coordinates to homogeneous coordinates
     points_2d_hom: Float[ndarray, "num_points 3"] = to_homogeneous(points_2d_cam)
     # Apply the camera intrinsic matrix to the homogeneous coordinates to obtain the final 2D image coordinates in homogeneous coordinates
@@ -262,7 +271,7 @@ def arctan_projection(
 
 
 def apply_radial_tangential_distortion(
-    dist_coeffs: Distortion, points2d: Float[np.ndarray, "num_points 2"]
+    distortion: KannalaBrandtDistortion, points2d: Float[np.ndarray, "num_points 2"]
 ) -> Float[np.ndarray, "num_points 2"]:
     """
     Applies radial and tangential distortion to normalized 2D points.
@@ -277,6 +286,16 @@ def apply_radial_tangential_distortion(
     Note:
         The points2d input should be normalized before being passed to this function.
     """
+    k1, k2, p1, p2, k3, k4, k5, k6 = (
+        distortion.k1,
+        distortion.k2,
+        distortion.p1,
+        distortion.p2,
+        distortion.k3,
+        distortion.k4,
+        distortion.k5,
+        distortion.k6,
+    )
     # radial component
     r2 = (points2d * points2d).sum(axis=-1, keepdims=True)
     r2 = np.clip(r2, -(np.pi**2), np.pi**2)
@@ -285,15 +304,7 @@ def apply_radial_tangential_distortion(
     r8 = r4 * r4
     r10 = r4 * r6
     r12 = r6 * r6
-    radial = (
-        1
-        + dist_coeffs.k1 * r2
-        + dist_coeffs.k2 * r4
-        + dist_coeffs.k3 * r6
-        + dist_coeffs.k4 * r8
-        + dist_coeffs.k5 * r10
-        + dist_coeffs.k6 * r12
-    )
+    radial = 1 + k1 * r2 + k2 * r4 + k3 * r6 + k4 * r8 + k5 * r10 + k6 * r12
     uv = points2d * radial
 
     # tangential component
@@ -302,44 +313,6 @@ def apply_radial_tangential_distortion(
     y2 = y * y
     xy = x * y
     r2 = x2 + y2
-    x += 2 * dist_coeffs.p2 * xy + dist_coeffs.p1 * (r2 + 2 * x2)
-    y += 2 * dist_coeffs.p1 * xy + dist_coeffs.p2 * (r2 + 2 * y2)
+    x += 2 * p2 * xy + p1 * (r2 + 2 * x2)
+    y += 2 * p1 * xy + p2 * (r2 + 2 * y2)
     return np.stack((x, y), axis=-1)
-
-
-def fisheye_projection(
-    points_3d_world: Float[ndarray, "num_points 3"], camera: Fisheye62Parameters
-) -> Float[ndarray, "num_points 2"]:
-    # world to camera
-    points_3d_hom_world: Float[ndarray, "num_points 4"] = to_homogeneous(points_3d_world)
-    points_3d_hom_cam: Float[ndarray, "num_points 4"] = (camera.extrinsics.cam_T_world @ points_3d_hom_world.T).T
-    points_3d_cam: Float[ndarray, "num_points 3"] = from_homogeneous(points_3d_hom_cam)
-    # camera to image
-    points_2d_undist: Float[ndarray, "num_points 2"] = arctan_projection(points_3d_cam, camera.intrinsics.k_matrix)
-    # normalize points for distortion
-    points_2d_undist[:, 0] -= camera.intrinsics.cx
-    points_2d_undist[:, 1] -= camera.intrinsics.cy
-    points_2d_undist[:, 0] /= camera.intrinsics.fl_x
-    points_2d_undist[:, 1] /= camera.intrinsics.fl_y
-
-    points_2d_distorted = apply_radial_tangential_distortion(camera.distortion, points_2d_undist)
-
-    # denormalize points after applying distortion
-    points_2d_distorted[:, 0] *= camera.intrinsics.fl_x
-    points_2d_distorted[:, 1] *= camera.intrinsics.fl_y
-    points_2d_distorted[:, 0] += camera.intrinsics.cx
-    points_2d_distorted[:, 1] += camera.intrinsics.cy
-
-    # make sure points are within image bounds
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(
-        points_2d_distorted[:, 0] >= camera.intrinsics.width,
-        points_2d_distorted[:, 1] >= camera.intrinsics.height,
-    )
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 0] < 0)
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_2d_distorted[:, 1] < 0)
-    # make sure points are in front of camera
-    out_of_bounds: Bool[ndarray, "num_points"] = np.logical_or(out_of_bounds, points_3d_cam[:, 2] < 0)
-
-    # if out of bounds, set to -1
-    points_2d_distorted[out_of_bounds, :] = np.nan
-    return points_2d_distorted

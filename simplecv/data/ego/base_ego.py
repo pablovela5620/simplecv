@@ -7,7 +7,7 @@ from typing import Generic, TypeVar
 from jaxtyping import Float
 from numpy import ndarray
 
-from simplecv.camera_parameters import PinholeParameters
+from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.image_types import BGRList
 from simplecv.video_io import MultiVideoReader
@@ -15,10 +15,12 @@ from simplecv.video_io import MultiVideoReader
 CamNameType = TypeVar("CamNameType", bound=str)
 ConfigT = TypeVar("ConfigT", bound=BaseExoEgoDatasetConfig)
 
+CameraParam = PinholeParameters | Fisheye62Parameters
+
 
 @dataclass
 class EgoData:
-    cam_params_list: list[PinholeParameters]
+    cam_params_list: list[CameraParam]
     bgr_list: BGRList
 
 
@@ -40,12 +42,15 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
         #############
         # LOAD DATA #
         #############
-        self._ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = self.load_ego_cams()
+        self._ego_cam_dict: dict[CamNameType, list[CameraParam]] = self.load_ego_cams()
         self._video_path_list: list[Path] = self.load_video_paths()
         self._ego_video_name_list: list[str] = []
         if self._ego_cam_dict:
             # Sort the cameras and videos based on the sequence to make sure they align correctly
-            sorted_cams_and_videos: tuple[dict[CamNameType, list[PinholeParameters]], dict[CamNameType, Path]] = (
+            sorted_cams_and_videos: tuple[
+                dict[CamNameType, list[CameraParam]],
+                dict[CamNameType, Path],
+            ] = (
                 self.align_cams_and_videos(video_path_list=self._video_path_list, ego_cam_dict=self._ego_cam_dict)
             )
             # validate that the number of cameras matches the number of videos and names are aligned
@@ -90,7 +95,7 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
         pass
 
     @abstractmethod
-    def load_ego_cams(self) -> dict[str, list[PinholeParameters]]:
+    def load_ego_cams(self) -> dict[str, list[CameraParam]]:
         pass
 
     # @abstractmethod
@@ -101,13 +106,15 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
 
     @abstractmethod
     def align_cams_and_videos(
-        self, video_path_list: list[Path], ego_cam_dict: dict[CamNameType, list[PinholeParameters]]
-    ) -> tuple[dict[CamNameType, list[PinholeParameters]], dict[CamNameType, Path]]:
+        self,
+        video_path_list: list[Path],
+        ego_cam_dict: dict[CamNameType, list[CameraParam]],
+    ) -> tuple[dict[CamNameType, list[CameraParam]], dict[CamNameType, Path]]:
         """Align cameras and videos based on the sequence."""
         pass
 
     @property
-    def ego_cam_dict(self) -> dict[str, list[PinholeParameters]]:
+    def ego_cam_dict(self) -> dict[str, list[CameraParam]]:
         """Get the dictionary of egocentric cameras."""
         return self._ego_cam_dict
 

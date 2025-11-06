@@ -7,7 +7,7 @@ from jaxtyping import Float
 from numpy import ndarray
 
 from simplecv.camera_parameters import (
-    Distortion,
+    BrownConradyDistortion,
     Extrinsics,
     Intrinsics,
     PinholeParameters,
@@ -125,7 +125,7 @@ def load_cameras(data_path: Path) -> list[PinholeParameters]:
             cy=cam["K"][1, 2],
         )
         cam_distortion: Float[ndarray, "5"] = cam["dist"].squeeze()  # noqa UP307
-        distortion = Distortion(
+        distortion = BrownConradyDistortion(
             k1=float(cam_distortion[0]),
             k2=float(cam_distortion[1]),
             p1=float(cam_distortion[2]),

@@ -39,7 +39,6 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
     split: Literal["train", "val", "test"] | None = None
     sequence_name: str = "nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"  # "nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345"
     resize: Resolution | None = None  # Resize the video to this resolution, if None, no resizing is done.
-    encoding: Literal["h264", "av1", "av1-720-new"] = "av1-720-new"  # Encoding format of the video files.
 
 
 class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
@@ -67,13 +66,13 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
         # sort all_3d_landmarks by frame number
         all_xyz_dict = dict(sorted(all_xyz_dict.items(), key=lambda item: int(item[0])))
 
-        all_xyz_dict: dict[int, Hand3DKeypoints] = {
+        loaded_xyz_dict: dict[int, Hand3DKeypoints] = {
             int(k): from_dict(Hand3DKeypoints, v) for k, v in all_xyz_dict.items()
         }
 
         xyz_stack_list: list[Float32[ndarray, "2 21 3"]] = []
-        for frame_number, _ in enumerate(tqdm(all_xyz_dict)):
-            keypoints: Hand3DKeypoints = all_xyz_dict[frame_number]
+        for frame_number, _ in enumerate(tqdm(loaded_xyz_dict)):
+            keypoints: Hand3DKeypoints = loaded_xyz_dict[frame_number]
             xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
 
         # Concatenate keypoints from all frames vertically to get a (num_frames 21, 3) array.
