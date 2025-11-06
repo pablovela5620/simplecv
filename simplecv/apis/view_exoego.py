@@ -1,7 +1,6 @@
 """Rerun visualization helpers for combined exo- and ego-centric datasets."""
 
 import warnings
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
@@ -14,7 +13,7 @@ from einops import rearrange
 from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 
-from simplecv.camera_parameters import Fisheye62Parameters, KannalaBrandtDistortion, PinholeParameters
+from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
@@ -26,17 +25,14 @@ from simplecv.data.skeleton.coco_133 import (
     LEFT_HAND_IDX,
     RIGHT_HAND_IDX,
 )
-from simplecv.ops.triangulate import (
-    apply_kannala_brandt_distortion_batch,
-    arctan_proj_3d_vectorized,
-    proj_3d_vectorized,
-)
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
     log_pinhole,
     log_video,
 )
+from simplecv.sensors.camera.brown_conrady import project_brown_conrady_batched
+from simplecv.sensors.camera.fisheye62 import project_kannala_brandt_batched
 from simplecv.video_io import MultiVideoReader
 
 # Improve console readability when inspecting numeric debugging output.
@@ -183,75 +179,6 @@ def create_container(
     contents: rrb.ContainerLike = main_view
 
     return contents
-
-
-def filter_out_of_bounds_keypoints(
-    uv_stack: Float[ndarray, "... 2"],
-    camera_params: PinholeParameters | Fisheye62Parameters,
-    margin_percentage: float = 0.2,
-) -> Float[ndarray, "... 2"]:
-    """Clamp keypoints to the image bounds with a configurable border margin.
-
-    Args:
-        uv_stack (Float[np.ndarray, "... 2"]): Stacked 2D keypoint coordinates
-            with the last axis holding ``(u, v)`` image coordinates.
-        camera_params (PinholeParameters | Fisheye62Parameters): Intrinsics describing the sensor used
-            to determine valid image extents.
-        margin_percentage (float): Fractional padding applied beyond the raw
-            image dimensions before clipping.
-
-    Returns:
-        Float[np.ndarray, "... 2"]: Input coordinates with out-of-bounds values
-            replaced by ``NaN`` so Rerun elides those samples during rendering.
-    """
-    # Some loaders leave width/height unset; fall back to doubling the principal point.
-    intrinsic_width: int | None = camera_params.intrinsics.width
-    intrinsic_height: int | None = camera_params.intrinsics.height
-    width: float = float(intrinsic_width if intrinsic_width is not None else 2 * camera_params.intrinsics.cx)
-    height: float = float(intrinsic_height if intrinsic_height is not None else 2 * camera_params.intrinsics.cy)
-    margin_x: float = margin_percentage * width
-    margin_y: float = margin_percentage * height
-
-    filtered_uv: Float[ndarray, "... 2"] = uv_stack.copy()
-
-    filtered_uv[..., 0] = np.where(
-        (filtered_uv[..., 0] < -margin_x) | (filtered_uv[..., 0] > width + margin_x), np.nan, filtered_uv[..., 0]
-    )
-    filtered_uv[..., 1] = np.where(
-        (filtered_uv[..., 1] < -margin_y) | (filtered_uv[..., 1] > height + margin_y),
-        np.nan,
-        filtered_uv[..., 1],
-    )
-    return filtered_uv
-
-
-
-
-def visibility_mask_from_depth(
-    depth: Float[ndarray, "n_frames n_joints"],
-) -> tuple[np.ndarray, float]:
-    """Convert signed depths into a visibility mask.
-
-    Dataset conventions differ (some cameras look along ``-Z``), so we infer the appropriate
-    sign per tensor by looking at the average finite depth value.
-
-    Args:
-        depth: Projected depth per frame/keypoint.
-
-    Returns:
-        A tuple ``(mask, sign)`` where ``mask`` is ``True`` when points lie in front of the
-        camera, and ``sign`` captures the orientation that was inferred from the data.
-    """
-
-    depth_valid: np.ndarray = depth[np.isfinite(depth)]
-    if depth_valid.size == 0:
-        depth_sign: float = 1.0
-    else:
-        depth_sign = float(np.sign(depth_valid.mean()))
-        if depth_sign == 0.0:
-            depth_sign = 1.0
-    visibility: np.ndarray = depth * depth_sign > 0.0
-    return visibility, depth_sign
 
 
 def compute_vertex_normals_batch(
@@ -493,16 +420,13 @@ def log_exoego_batch(
     ##########################
     # batch send all 3D data #
     ##########################
-    ### Send XYZ coordinates
     xyzc_stack_all: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
     n_frames_labels: int = len(xyzc_stack_all)
     n_frames_timestamps: int = len(shortest_timestamp)
     n_frames_total: int = min(n_frames_labels, n_frames_timestamps)
+
     xyzc_stack: Float[ndarray, "n_frames 133 4"] = xyzc_stack_all[0:n_frames_total]
     xyz_stack: Float[ndarray, "n_frames 133 3"] = xyzc_stack[:, :, :3]
-    xyz_hom_stack: Float[ndarray, "n_frames 133 4"] = np.concatenate(
-        [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
-    )
     conf_stack: Float[ndarray, "n_frames 133"] = xyzc_stack[:, :, 3]
     colors: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(confidence_scores=conf_stack[..., np.newaxis])
     if n_frames_total > 0:
@@ -570,31 +494,19 @@ def log_exoego_batch(
             )
         else:
             if isinstance(exo_cam_param_list[0], PinholeParameters):
-                Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
-                    [pinhole.projection_matrix for pinhole in exo_cam_param_list]
+                uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = project_brown_conrady_batched(
+                    xyz_stack_world=xyz_stack, pinhole_param_list=exo_cam_param_list
                 )
-                uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = proj_3d_vectorized(
-                    xyz_hom=xyz_hom_stack, P=Pall_exo
-                )
+
             else:
                 raise NotImplementedError(
                     f"Exo camera parameters of type '{type(exo_cam_param_list[0])}' are not supported."
                 )
-            proj_rows_exo: Float[ndarray, "n_views 4"] = Pall_exo[:, 2, :]
+            # proj_rows_exo: Float[ndarray, "n_views 4"] = Pall_exo[:, 2, :]
             for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
                 exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
                 exo_pinhole_path: Path = exo_cam_path / "pinhole"
                 uv_exo: Float[ndarray, "n_frames 133 2"] = uv_raw_stack[:, exo_cam_idx, :, :].copy()
-                # The third row of the projection matrix encodes the depth equation. Multiply it with the
-                # homogeneous xyz (einsum collapses the last axis) to recover the signed distance in camera space.
-                # Depth is necessary so we can drop keypoints that land behind the sensor.
-                depth_exo: Float[ndarray, "n_frames 133"] = np.einsum(
-                    "fnd,d->fn", xyz_hom_stack, proj_rows_exo[exo_cam_idx]
-                )
-                visibility_mask_exo, _ = visibility_mask_from_depth(depth_exo)
-                uv_exo[~visibility_mask_exo] = np.nan
-                uv_exo = filter_out_of_bounds_keypoints(uv_exo, exo_cam, margin_percentage=0.0)
-                # filter batch with invalid values
                 n_frames_cam: int = len(uv_exo)
                 if n_frames_cam == 0:
                     continue
@@ -604,9 +516,6 @@ def log_exoego_batch(
                 ).astype(np.float32)
                 colors_cam: UInt8[ndarray, "n_frames kpts 3"] = colors[0:n_frames_cam].copy()
                 conf_cam: Float[ndarray, "n_frames kpts"] = conf_stack[0:n_frames_cam].copy()
-                invalid_mask_exo: np.ndarray = ~visibility_mask_exo[0:n_frames_cam]
-                conf_cam[invalid_mask_exo] = 0.0
-                colors_cam[invalid_mask_exo] = 0
                 colors_flat_2d: UInt8[ndarray, "n_total 3"] = rearrange(
                     colors_cam,
                     "n_frames kpts dim -> (n_frames kpts) dim",
@@ -661,69 +570,51 @@ def log_exoego_batch(
             cam_log_path: Path = parent_log_path / "ego" / cam_name
             pinhole_log_path: Path = cam_log_path / "pinhole"
 
-            # make Pall for specific camera
-            if isinstance(ego_cam_param_list[0], PinholeParameters):
-                Pall: Float[ndarray, "n_frames 3 4"] = np.stack(
-                    [pinhole.projection_matrix for pinhole in ego_cam_param_list]
-                )
-                use_fisheye: bool = False
-            elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
-                Pall = np.stack([fisheye.projection_matrix for fisheye in ego_cam_param_list])
-                K_ego = np.stack([fisheye.intrinsics.k_matrix for fisheye in ego_cam_param_list])
-                cam_T_world_ego = np.stack([fisheye.extrinsics.cam_T_world for fisheye in ego_cam_param_list])
-                distortions_ego = [fisheye.distortion for fisheye in ego_cam_param_list]
-                use_fisheye: bool = True
-            else:
-                raise NotImplementedError(
-                    f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
-                )
-
             # Align coordinate, confidence, and camera-parameter buffers when their lengths differ.
-            n_frames_total: int = min(len(xyz_hom_stack), len(ego_cam_param_list))
-            xyz_hom_trim: Float[ndarray, "n_frames 133 4"] = xyz_hom_stack[:n_frames_total]
+            n_frames_total: int = min(len(xyz_stack), len(ego_cam_param_list))
+            xyz_trim: Float[ndarray, "n_frames 133 3"] = xyz_stack[:n_frames_total]
             conf_trim: Float[ndarray, "n_frames 133"] = conf_stack[:n_frames_total]
             color_trim: UInt8[ndarray, "n_frames 133 3"] = colors[:n_frames_total]
 
             uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((n_frames_total, 133, 2))
 
             # Process in batches to balance memory usage and performance
-            batch_size = min(100, len(xyz_hom_stack))  # Adjust based on available memory
+            batch_size = min(100, len(xyz_stack))  # Adjust based on available memory
             for start_idx in range(0, n_frames_total, batch_size):
                 end_idx: int = min(start_idx + batch_size, n_frames_total)
 
-                # Get batch data
-                xyz_hom_batch = xyz_hom_trim[start_idx:end_idx]  # (batch_frames, 133, 4)
-
-                P_batch: Float[ndarray, "batch_frames 3 4"] = Pall[start_idx:end_idx]
-                if use_fisheye is False:
-                    uv_batch = proj_3d_vectorized(xyz_hom=xyz_hom_batch, P=P_batch)
-                else:
-                    K_batch: Float[ndarray, "batch_frames 3 3"] = K_ego[start_idx:end_idx]
-                    cam_T_world_batch: Float[ndarray, "batch_frames 4 4"] = cam_T_world_ego[start_idx:end_idx]
-                    uv_batch = arctan_proj_3d_vectorized(
-                        xyz_hom=xyz_hom_batch,
-                        cam_T_world=cam_T_world_batch,
-                        K=K_batch,
+                if isinstance(ego_cam_param_list[0], PinholeParameters):
+                    pinhole_slice: list[PinholeParameters] = cast(
+                        list[PinholeParameters], ego_cam_param_list[start_idx:end_idx]
                     )
-                    distortions_batch: Sequence[KannalaBrandtDistortion | None] = distortions_ego[start_idx:end_idx]
-                    uv_batch = apply_kannala_brandt_distortion_batch(
-                        uv_batch,
-                        intrinsics_stack=K_batch,
-                        distortions=distortions_batch,
+                    uv_batch = project_brown_conrady_batched(
+                        xyz_stack_world=xyz_trim[start_idx:end_idx],
+                        pinhole_param_list=pinhole_slice,
+                        filter_invalid=True,
+                    )
+
+                elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
+                    fisheye_slice: list[Fisheye62Parameters] = cast(
+                        list[Fisheye62Parameters], ego_cam_param_list[start_idx:end_idx]
+                    )
+                    uv_batch = project_kannala_brandt_batched(
+                        xyz_stack_world=xyz_trim[start_idx:end_idx],
+                        pinhole_param_list=fisheye_slice,
+                        filter_invalid=True,
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
                     )
 
                 # Extract diagonal to get frame-to-frame correspondence
                 batch_len = end_idx - start_idx
-                uv_batch_diagonal = uv_batch[np.arange(batch_len), np.arange(batch_len)]  # (batch_frames, 133, 2)
+                indices = np.arange(batch_len)
+                uv_batch_diagonal = uv_batch[indices, indices]
 
                 # Store results
                 uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
 
-            proj_rows_ego: Float[ndarray, "n_frames 4"] = Pall[:n_frames_total, 2, :]
-            depth_ego: Float[ndarray, "n_frames 133"] = np.einsum("fnd,fd->fn", xyz_hom_trim, proj_rows_ego)
-            visibility_mask_ego, _ = visibility_mask_from_depth(depth_ego)
-            uv_ego_stack[~visibility_mask_ego] = np.nan
-            uv_ego_stack = filter_out_of_bounds_keypoints(uv_ego_stack, ego_cam_param_list[0], margin_percentage=0.0)
             n_frames_cam: int = len(uv_ego_stack)
             if n_frames_cam > 0:
                 positions_flat_ego: Float[ndarray, "n_total 2"] = rearrange(
@@ -732,9 +623,6 @@ def log_exoego_batch(
                 ).astype(np.float32)
                 colors_ego: UInt8[ndarray, "n_frames kpts 3"] = color_trim[0:n_frames_cam].copy()
                 conf_ego: Float[ndarray, "n_frames kpts"] = conf_trim[0:n_frames_cam].copy()
-                invalid_mask_ego: np.ndarray = ~visibility_mask_ego[0:n_frames_cam]
-                conf_ego[invalid_mask_ego] = 0.0
-                colors_ego[invalid_mask_ego] = 0
                 colors_flat_ego: UInt8[ndarray, "n_total 3"] = rearrange(
                     colors_ego,
                     "n_frames kpts dim -> (n_frames kpts) dim",
@@ -992,38 +880,3 @@ def visualize_exo_ego(config: VisualizeConfig):
         )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
-
-
-def visibility_mask_from_projection(
-    xyz_hom: Float[ndarray, "n_frames n_joints 4"],
-    projection_rows: Float[ndarray, "n_views 4"],
-) -> tuple[Float[ndarray, "n_frames n_joints"], Float[ndarray, "n_views"]]:
-    """Derive per-frame visibility masks by inspecting projected depths.
-
-    Args:
-        xyz_hom: Homogeneous 3D keypoints (w=1) expressed in the world frame.
-        projection_rows: Third rows extracted from ``P`` matrices (``[0, 0, 1, 0]``-like).
-
-    Returns:
-        A tuple ``(visibility, depth_signs)`` where ``visibility`` is ``True`` when the
-        projected depth is positive in that camera's convention, and ``depth_signs`` records the
-        per-view sign that was inferred from the data.
-    """
-
-    depth: Float[ndarray, "n_frames n_views n_joints"] = np.einsum("fjd,vd->fvj", xyz_hom, projection_rows)
-    visibility: np.ndarray = np.zeros_like(depth, dtype=bool)
-    depth_signs: Float[ndarray, "n_views"] = np.ones(projection_rows.shape[0], dtype=float)
-
-    for view_idx in range(projection_rows.shape[0]):
-        depth_view: Float[ndarray, "n_frames n_joints"] = depth[:, view_idx, :]
-        depth_valid: np.ndarray = depth_view[np.isfinite(depth_view)]
-        if depth_valid.size == 0:
-            depth_sign: float = 1.0
-        else:
-            depth_sign = float(np.sign(depth_valid.mean()))
-            if depth_sign == 0.0:
-                depth_sign = 1.0
-        depth_signs[view_idx] = depth_sign
-        visibility[:, view_idx, :] = depth_view * depth_sign > 0.0
-
-    return visibility, depth_signs

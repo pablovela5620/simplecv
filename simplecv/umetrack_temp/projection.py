@@ -30,7 +30,7 @@ def project_points(
     # make sure points are in front of camera
     out_of_bounds = np.logical_or(out_of_bounds, points3d_cam[:, 2] < 0)
 
-    # if out of bounds, set to -1
+    # if out of bounds, set to nan
     points2d[out_of_bounds, :] = np.nan
 
     return points2d

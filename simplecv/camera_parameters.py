@@ -240,7 +240,7 @@ def perspective_projection(
 
 
 def arctan_projection(
-    points_3d: Float[np.ndarray, "num_points 3"], K: Float[np.ndarray, "3 3"]
+    points_3d_cam: Float[np.ndarray, "num_points 3"], K: Float[np.ndarray, "3 3"]
 ) -> Float[np.ndarray, "num_points 2"]:
     """
     Project 3D points in camera coordinates to 2D using arctan projection
@@ -253,14 +253,14 @@ def arctan_projection(
         A numpy array of shape (num_points, 2) representing the 2D image coordinates of the projected points
     """
     # Compute the radial distance of each 3D point from the camera center
-    r: Float[ndarray, "num_points"] = np.sqrt(np.sum(np.square(points_3d[:, :2]), axis=-1))
+    r: Float[ndarray, "num_points"] = np.sqrt(np.sum(np.square(points_3d_cam[:, :2]), axis=-1))
     eps: float = 2.0**-128
     # Compute the angles of the 2D image coordinates with respect to the camera center using arctan2
-    s: Float[ndarray, "num_points"] = np.arctan2(r, points_3d[:, 2]) / np.maximum(r, eps)
+    s: Float[ndarray, "num_points"] = np.arctan2(r, points_3d_cam[:, 2]) / np.maximum(r, eps)
     # Scale the angles by the radial distance to obtain the final 2D image coordinates in camera coordinates
-    points_2d_cam: Float[ndarray, "num_points 2"] = np.zeros((points_3d.shape[0], 2))
-    points_2d_cam[:, 0] = points_3d[:, 0] * s
-    points_2d_cam[:, 1] = points_3d[:, 1] * s
+    points_2d_cam: Float[ndarray, "num_points 2"] = np.zeros((points_3d_cam.shape[0], 2))
+    points_2d_cam[:, 0] = points_3d_cam[:, 0] * s
+    points_2d_cam[:, 1] = points_3d_cam[:, 1] * s
     # Convert the camera coordinates to homogeneous coordinates
     points_2d_hom: Float[ndarray, "num_points 3"] = to_homogeneous(points_2d_cam)
     # Apply the camera intrinsic matrix to the homogeneous coordinates to obtain the final 2D image coordinates in homogeneous coordinates
