@@ -1,8 +1,13 @@
+import hashlib
 import io
+import json
+import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import av
@@ -13,6 +18,95 @@ from pyarrow import ChunkedArray
 from rerun_bindings import Recording, RecordingView
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+
+
+def _default_cache_root() -> Path:
+    env_override: str | None = os.environ.get("SIMPLECV_VIDEO_CACHE")
+    if env_override:
+        return Path(env_override).expanduser()
+    return Path.home() / ".cache" / "simplecv" / "exoego_videos"
+
+
+@dataclass(slots=True)
+class _VideoCacheMetadata:
+    rrd_mtime_ns: int
+    rrd_size: int
+
+
+class VideoCache:
+    """Filesystem-backed cache for remuxed AssetVideo blobs."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root: Path = (root or _default_cache_root()).expanduser()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _bucket_dir(self, rrd_path: Path) -> Path:
+        resolved: Path = rrd_path.resolve()
+        sha1: str = hashlib.sha1(str(resolved).encode(), usedforsecurity=False).hexdigest()
+        bucket: Path = self.root / sha1
+        bucket.mkdir(parents=True, exist_ok=True)
+        return bucket
+
+    def _fingerprint(self, rrd_path: Path) -> tuple[int, int]:
+        stat_result: os.stat_result = rrd_path.stat()
+        return stat_result.st_mtime_ns, stat_result.st_size
+
+    def _metadata_path(self, mp4_path: Path) -> Path:
+        return mp4_path.with_suffix(mp4_path.suffix + ".json")
+
+    def _load_metadata(self, metadata_path: Path) -> _VideoCacheMetadata | None:
+        try:
+            payload: Any = json.loads(metadata_path.read_text())
+            return _VideoCacheMetadata(
+                rrd_mtime_ns=int(payload["rrd_mtime_ns"]),
+                rrd_size=int(payload["rrd_size"]),
+            )
+        except FileNotFoundError:
+            return None
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return None
+
+    def get(self, *, rrd_path: Path, camera_name: str) -> Path | None:
+        bucket: Path = self._bucket_dir(rrd_path)
+        cached_mp4: Path = bucket / f"{camera_name}.mp4"
+        metadata_path: Path = self._metadata_path(cached_mp4)
+        metadata: _VideoCacheMetadata | None = self._load_metadata(metadata_path)
+        if metadata is None or not cached_mp4.exists():
+            return None
+        current_mtime, current_size = self._fingerprint(rrd_path)
+        if metadata.rrd_mtime_ns != current_mtime or metadata.rrd_size != current_size:
+            try:
+                cached_mp4.unlink(missing_ok=True)
+                metadata_path.unlink(missing_ok=True)
+            finally:
+                return None
+        return cached_mp4
+
+    def store(self, *, rrd_path: Path, camera_name: str, source_path: Path) -> None:
+        bucket: Path = self._bucket_dir(rrd_path)
+        dest: Path = bucket / f"{camera_name}.mp4"
+        metadata_path: Path = self._metadata_path(dest)
+        tmp_dest: Path = dest.with_suffix(dest.suffix + ".tmp")
+        shutil.copy2(source_path, tmp_dest)
+        os.replace(tmp_dest, dest)
+        mtime, size = self._fingerprint(rrd_path)
+        metadata_payload: dict[str, int] = {"rrd_mtime_ns": mtime, "rrd_size": size}
+        metadata_path.write_text(json.dumps(metadata_payload))
+
+
+_CACHE_DISABLED: bool = os.environ.get("SIMPLECV_VIDEO_CACHE_DISABLE", "0") in {"1", "true", "True"}
+_VIDEO_CACHE: VideoCache | None = None
+
+
+def get_video_cache() -> VideoCache | None:
+    """Return process-wide video cache unless disabled via env."""
+
+    global _VIDEO_CACHE
+    if _CACHE_DISABLED:
+        return None
+    if _VIDEO_CACHE is None:
+        _VIDEO_CACHE = VideoCache()
+    return _VIDEO_CACHE
 
 
 def get_safe_application_id() -> str:

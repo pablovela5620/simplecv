@@ -198,7 +198,7 @@ def _make_distortion(oak_i: OakIntrinsics) -> BrownConradyDistortion:
 
 def _make_extrinsics(H_left_to_cam: Float[np.ndarray, "4 4"]) -> Extrinsics:
     R: Float[np.ndarray, "3 3"] = H_left_to_cam[:3, :3].astype(np.float32)
-    t: Float[np.ndarray, "3"] = H_left_to_cam[:3, 3].astype(np.float32)  # * 1e-3  # mm -> meters
+    t: Float[np.ndarray, "3"] = H_left_to_cam[:3, 3].astype(np.float32) * 1e-3  # mm -> meters
     extr: Extrinsics = Extrinsics(world_R_cam=R, world_t_cam=t)
     return extr
 
