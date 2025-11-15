@@ -139,8 +139,8 @@ QUEST_HAND_CLASS_IDS_BY_SIDE: dict[QuestHandSide, UInt16[ndarray, "n_ume_kpts"]]
 class QuestHandDictRow:
     """Raw CSV row for Quest 3 + Oak-D hand poses."""
 
-    ts_seconds: float = serde_field(rename="timestamp")
-    """Original timestamp in seconds."""
+    ts_ns: int = serde_field(rename="ts_ns")
+    """Capture timestamp measured in nanoseconds from recording start."""
 
     palm_x: float
     """Palm center X coordinate in meters."""
@@ -385,7 +385,7 @@ def load_hand_sequence(csv_path: Path) -> QuestHandPoseSequence:
                 for prefix in _QUEST_HAND_LANDMARK_PREFIXES
             ]
             xyz_hand: Float32[ndarray, "n_landmarks=26 3"] = np.array(xyz_hand_list, dtype=np.float32)
-            timestamp_ns: int = int(np.floor(sample.ts_seconds * 1_000_000_000.0))
+            timestamp_ns: int = int(sample.ts_ns)
 
             samples.append(QuestHandPoseSample(timestamp_ns=timestamp_ns, keypoints_m=xyz_hand))
 
@@ -519,8 +519,8 @@ def log_hand_sequence(
 class QuestHeadPoseDictRow:
     """Raw CSV row containing Quest head pose information for both controllers."""
 
-    ts_seconds: float = serde_field(rename="timestamp")
-    """Original timestamp of the sample, measured in seconds."""
+    ts_ns: int = serde_field(rename="ts_ns")
+    """Capture timestamp of the sample, measured in nanoseconds."""
 
     left_pos_x: float
     """Left tracker X coordinate in meters."""
@@ -644,7 +644,7 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
                 world_t_cam=right_translation_cv,
             )
 
-            timestamp_ns: int = int(np.floor(quest_row.ts_seconds * 1_000_000_000.0))
+            timestamp_ns: int = int(quest_row.ts_ns)
             sample: QuestHeadExtrinsicsSample = QuestHeadExtrinsicsSample(
                 timestamp_ns=timestamp_ns,
                 left_extrinsics=left_extrinsics,
@@ -688,15 +688,25 @@ class QuestCaptureResolution:
 
 @serde(type_check=coerce)
 class QuestCameraIntrinsicsDocument:
-    """Quest camera intrinsics JSON document. Keep only important bits"""
+    """Quest camera intrinsics JSON document. Keep only important bits."""
 
     lens_intrinsics: QuestLensIntrinsics
     """Calibrated lens intrinsics expressed in pixel units."""
     capture_resolution: QuestCaptureResolution
     """Image resolution active during capture."""
+    positional_layout: str | None = None
+    """Optional tag describing whether the camera is layed out on the left or right eye."""
 
 
-def load_camera_intrinsics(intrinsics_path: Path) -> Intrinsics:
+@serde(type_check=coerce)
+class QuestCombinedCalibrationDocument:
+    """Quest calibration document containing intrinsics for multiple sensors."""
+
+    intrinsics: list[QuestCameraIntrinsicsDocument]
+    """Per-camera intrinsics blocks present in the calibration JSON."""
+
+
+def load_camera_intrinsics(intrinsics_path: Path, *, positional_layout: str | None = None) -> Intrinsics:
     """Load Quest camera intrinsics metadata from a JSON file."""
     if not intrinsics_path.exists():
         raise FileNotFoundError(intrinsics_path)
@@ -704,17 +714,43 @@ def load_camera_intrinsics(intrinsics_path: Path) -> Intrinsics:
     with intrinsics_path.open(encoding="utf-8") as file:
         raw_intrinsics: dict[str, object] = json.load(file)
 
+    def _build_intrinsics(doc: QuestCameraIntrinsicsDocument) -> Intrinsics:
+        return Intrinsics(
+            camera_conventions="RDF",
+            fl_x=doc.lens_intrinsics.focal_length_x,
+            fl_y=doc.lens_intrinsics.focal_length_y,
+            cx=doc.lens_intrinsics.principal_point_x,
+            cy=doc.lens_intrinsics.principal_point_y,
+            width=doc.capture_resolution.width,
+            height=doc.capture_resolution.height,
+        )
+
+    if "intrinsics" in raw_intrinsics:
+        calibration_doc: QuestCombinedCalibrationDocument = from_dict(QuestCombinedCalibrationDocument, raw_intrinsics)
+        if positional_layout is None:
+            raise ValueError(
+                "Combined calibration JSON detected. Please provide positional_layout (e.g. 'left' or 'right')."
+            )
+
+        matching_docs: list[QuestCameraIntrinsicsDocument] = [
+            doc for doc in calibration_doc.intrinsics if doc.positional_layout == positional_layout
+        ]
+        if not matching_docs:
+            available_layouts: set[str] = {
+                doc.positional_layout for doc in calibration_doc.intrinsics if doc.positional_layout is not None
+            }
+            raise ValueError(
+                f"Could not find intrinsics for layout '{positional_layout}' in {intrinsics_path}. "
+                f"Available layouts: {sorted(available_layouts)}"
+            )
+        return _build_intrinsics(matching_docs[0])
+
     intrinsics_doc: QuestCameraIntrinsicsDocument = from_dict(QuestCameraIntrinsicsDocument, raw_intrinsics)
-    intrinsics: Intrinsics = Intrinsics(
-        camera_conventions="RDF",
-        fl_x=intrinsics_doc.lens_intrinsics.focal_length_x,
-        fl_y=intrinsics_doc.lens_intrinsics.focal_length_y,
-        cx=intrinsics_doc.lens_intrinsics.principal_point_x,
-        cy=intrinsics_doc.lens_intrinsics.principal_point_y,
-        width=intrinsics_doc.capture_resolution.width,
-        height=intrinsics_doc.capture_resolution.height,
-    )
-    return intrinsics
+    if positional_layout is not None and intrinsics_doc.positional_layout not in (None, positional_layout):
+        raise ValueError(
+            f"Requested layout '{positional_layout}' mismatches JSON layout '{intrinsics_doc.positional_layout}'."
+        )
+    return _build_intrinsics(intrinsics_doc)
 
 
 def _log_head_cameras(
@@ -768,8 +804,7 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
     left_csv: Path = data_root / "quest" / "left_hand_poses.csv"
     right_csv: Path = data_root / "quest" / "right_hand_poses.csv"
     head_csv: Path = data_root / "quest" / "head_pose.csv"
-    intrinsics_left_json: Path = data_root / "quest" / "intrinsics_left.json"
-    intrinsics_right_json: Path = data_root / "quest" / "intrinsics_right.json"
+    calibration_json: Path = data_root / "quest" / "calibration.json"
     left_video_path: Path = data_root / "quest" / "left.mp4"
     right_video_path: Path = data_root / "quest" / "right.mp4"
     if not left_csv.exists():
@@ -778,18 +813,16 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
         raise FileNotFoundError(right_csv)
     if not head_csv.exists():
         raise FileNotFoundError(head_csv)
-    if not intrinsics_left_json.exists():
-        raise FileNotFoundError(intrinsics_left_json)
-    if not intrinsics_right_json.exists():
-        raise FileNotFoundError(intrinsics_right_json)
+    if not calibration_json.exists():
+        raise FileNotFoundError(calibration_json)
     if not left_video_path.exists():
         raise FileNotFoundError(left_video_path)
     if not right_video_path.exists():
         raise FileNotFoundError(right_video_path)
 
     head_extrinsics: list[QuestHeadExtrinsicsSample] = load_head_sequence(head_csv)
-    left_intrinsics: Intrinsics = load_camera_intrinsics(intrinsics_left_json)
-    right_intrinsics: Intrinsics = load_camera_intrinsics(intrinsics_right_json)
+    left_intrinsics: Intrinsics = load_camera_intrinsics(calibration_json, positional_layout="left")
+    right_intrinsics: Intrinsics = load_camera_intrinsics(calibration_json, positional_layout="right")
 
     _log_head_cameras(
         head_extrinsics,
