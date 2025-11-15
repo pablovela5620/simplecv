@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import shutil
 import tempfile
 import warnings
 from dataclasses import dataclass
@@ -16,7 +17,12 @@ from rerun_bindings import Recording
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType, EgoData
-from simplecv.rerun_log_utils import mux_h264_to_mp4, read_h264_samples_from_rrd, write_asset_video_blob
+from simplecv.rerun_log_utils import (
+    get_video_cache,
+    mux_h264_to_mp4,
+    read_h264_samples_from_rrd,
+    write_asset_video_blob,
+)
 from simplecv.video_io import VideoReader
 
 if TYPE_CHECKING:
@@ -53,8 +59,19 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         rrd_path: Path = self.config.rrd_path
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
+        video_cache = get_video_cache()
+        # Cache remuxed MP4s on disk so repeat runs avoid the expensive AssetVideo extraction.
+        # TODO(pablo): Once MultiVideoReader understands RRD blobs directly, drop the cache in favor of in-memory readers.
+
         video_path_map: dict[str, Path] = {}
         for stream in streams:
+            mp4_path: Path = Path(remux_tmpdir.name) / f"{stream.name}.mp4"
+            if video_cache is not None:
+                cached_path = video_cache.get(rrd_path=rrd_path, camera_name=stream.name)
+                if cached_path is not None:
+                    shutil.copy2(cached_path, mp4_path)
+                    video_path_map[stream.name] = mp4_path
+                    continue
             match stream.data_kind:
                 case "video_stream":
                     times, samples = read_h264_samples_from_rrd(
@@ -62,10 +79,8 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                         stream.video_entity,
                         self._video_timeline,
                     )
-                    mp4_path: Path = Path(remux_tmpdir.name) / f"{stream.name}.mp4"
                     mux_h264_to_mp4(times, samples, str(mp4_path))
                 case "asset_video":
-                    mp4_path = Path(remux_tmpdir.name) / f"{stream.name}.mp4"
                     write_asset_video_blob(
                         recording,
                         timeline=self._video_timeline,
@@ -75,6 +90,8 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 case _:
                     raise ValueError(f"Unsupported data kind for RRD camera stream: {stream.data_kind}")
             assert mp4_path.exists(), f"Expected remuxed ego video at {mp4_path}"
+            if video_cache is not None:
+                video_cache.store(rrd_path=rrd_path, camera_name=stream.name, source_path=mp4_path)
             video_path_map[stream.name] = mp4_path
 
         self._video_path_map: dict[str, Path] = video_path_map
@@ -226,9 +243,20 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         if reader is not None:
             batch = reader.read_next_batch()
             if batch is not None and batch.num_rows > 0:
-                k_value = self._first_valid_value(batch.column(0))
-                camera_xyz_value = self._first_valid_value(batch.column(1), allow_none=True)
-                resolution_value = self._first_valid_value(batch.column(2), allow_none=True)
+                k_value = self._first_valid_value(
+                    batch.column(0),
+                    component_name=f"{pinhole_entity}:Pinhole:image_from_camera",
+                )
+                camera_xyz_value = self._first_valid_value(
+                    batch.column(1),
+                    allow_none=True,
+                    component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
+                )
+                resolution_value = self._first_valid_value(
+                    batch.column(2),
+                    allow_none=True,
+                    component_name=f"{pinhole_entity}:Pinhole:resolution",
+                )
 
         if k_value is None:
             _, k_col_dyn, camera_xyz_col_dyn, resolution_col_dyn = view.select(
@@ -237,9 +265,20 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 f"{pinhole_entity}:Pinhole:camera_xyz",
                 f"{pinhole_entity}:Pinhole:resolution",
             ).read_all()
-            k_value = self._first_valid_value(k_col_dyn)
-            camera_xyz_value = self._first_valid_value(camera_xyz_col_dyn, allow_none=True)
-            resolution_value = self._first_valid_value(resolution_col_dyn, allow_none=True)
+            k_value = self._first_valid_value(
+                k_col_dyn,
+                component_name=f"{pinhole_entity}:Pinhole:image_from_camera",
+            )
+            camera_xyz_value = self._first_valid_value(
+                camera_xyz_col_dyn,
+                allow_none=True,
+                component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
+            )
+            resolution_value = self._first_valid_value(
+                resolution_col_dyn,
+                allow_none=True,
+                component_name=f"{pinhole_entity}:Pinhole:resolution",
+            )
 
         if k_value is None:
             raise ValueError(f"Missing image_from_camera for {pinhole_entity}")
@@ -285,32 +324,32 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         rotation_flat_list: list[Float32[ndarray, "9"]] = []
 
         try:
-            _, t_col, R_col = view.select(
-                timeline,
+            static_reader = view.select_static(
                 f"{entity}:Transform3D:translation",
                 f"{entity}:Transform3D:mat3x3",
-            ).read_all()
-            translation_list = self._column_to_vec3_list(t_col)
-            rotation_flat_list = self._column_to_vec9_list(R_col)
+            )
         except ValueError:
-            pass
+            static_reader = None
+
+        if static_reader is not None:
+            batch = static_reader.read_next_batch()
+            if batch is not None:
+                translation_list = self._column_to_vec3_list(batch.column(0))
+                rotation_flat_list = self._column_to_vec9_list(batch.column(1))
 
         if not translation_list or not rotation_flat_list:
             try:
-                static_reader = view.select_static(
+                _, t_col, R_col = view.select(
+                    timeline,
                     f"{entity}:Transform3D:translation",
                     f"{entity}:Transform3D:mat3x3",
-                )
+                ).read_all()
+                if not translation_list:
+                    translation_list = self._column_to_vec3_list(t_col)
+                if not rotation_flat_list:
+                    rotation_flat_list = self._column_to_vec9_list(R_col)
             except ValueError:
-                static_reader = None
-
-            if static_reader is not None:
-                batch = static_reader.read_next_batch()
-                if batch is not None:
-                    if not translation_list:
-                        translation_list = self._column_to_vec3_list(batch.column(0))
-                    if not rotation_flat_list:
-                        rotation_flat_list = self._column_to_vec9_list(batch.column(1))
+                pass
 
         if not translation_list:
             zero_translation: Float32[ndarray, "3"] = np.zeros(3, dtype=np.float32)
@@ -445,6 +484,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         column: pa.Array | pa.ChunkedArray,
         *,
         allow_none: bool = False,
+        component_name: str | None = None,
     ) -> Any:
         py_values = (
             column.combine_chunks().to_pylist() if isinstance(column, pa.ChunkedArray) else column.to_pylist()
@@ -456,4 +496,5 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 return value
         if allow_none:
             return None
-        raise ValueError("Expected at least one non-null value in column")
+        column_name = component_name or "(unknown component)"
+        raise ValueError(f"Expected at least one non-null value in column '{column_name}'")

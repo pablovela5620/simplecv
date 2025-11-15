@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import shutil
 import tempfile
 import warnings
 from dataclasses import dataclass
@@ -16,7 +17,12 @@ from rerun_bindings import Recording
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.rerun_log_utils import mux_h264_to_mp4, read_h264_samples_from_rrd, write_asset_video_blob
+from simplecv.rerun_log_utils import (
+    get_video_cache,
+    mux_h264_to_mp4,
+    read_h264_samples_from_rrd,
+    write_asset_video_blob,
+)
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.rrd_exoego import RRDExoEgoConfig
@@ -65,19 +71,26 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         self._camera_streams: list[_RRDCameraStream] = self._discover_camera_streams(schema)
         assert self._camera_streams, "No exo camera streams found in recording"
 
+        video_cache = get_video_cache()
+        # Store remuxed MP4s on disk so subsequent visualizations reuse them instantly.
+        # TODO(pablo): Replace cache reuse with an RRD-backed video reader once MultiVideoReader can operate on blobs.
+
         video_paths: list[Path] = []
-        # TODO avoid remuxing when possible. The rrd already contains byte data, so use something like
-        # whats shown in RRDVideoReader.
         for camera_stream in self._camera_streams:
+            mp4_path: Path = Path(self._remux_tmpdir.name) / f"{camera_stream.name}.mp4"
+            if video_cache is not None:
+                cached_path = video_cache.get(rrd_path=rrd_path, camera_name=camera_stream.name)
+                if cached_path is not None:
+                    shutil.copy2(cached_path, mp4_path)
+                    video_paths.append(mp4_path)
+                    continue
             match camera_stream.data_kind:
                 case "video_stream":
                     times, samples = read_h264_samples_from_rrd(
                         str(rrd_path), camera_stream.video_entity, self._video_timeline
                     )
-                    mp4_path: Path = Path(self._remux_tmpdir.name) / f"{camera_stream.name}.mp4"
                     mux_h264_to_mp4(times, samples, str(mp4_path))
                 case "asset_video":
-                    mp4_path = Path(self._remux_tmpdir.name) / f"{camera_stream.name}.mp4"
                     write_asset_video_blob(
                         self._recording,
                         timeline=self._video_timeline,
@@ -88,6 +101,8 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
                     raise ValueError(f"Unsupported data kind for RRD camera stream: {camera_stream.data_kind}")
 
             assert mp4_path.exists(), f"Expected remuxed video at {mp4_path}"
+            if video_cache is not None:
+                video_cache.store(rrd_path=rrd_path, camera_name=camera_stream.name, source_path=mp4_path)
             video_paths.append(mp4_path)
 
         return video_paths
@@ -192,42 +207,73 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
 
     def _load_intrinsics(self, recording: Recording, pinhole_entity: str, timeline: str) -> Intrinsics:
         view = recording.view(index=timeline, contents=pinhole_entity)
-        reader = view.select_static(
-            f"{pinhole_entity}:Pinhole:image_from_camera",
-            f"{pinhole_entity}:Pinhole:camera_xyz",
-            f"{pinhole_entity}:Pinhole:resolution",
-        )
-        batch = reader.read_next_batch()
-        if batch is None:
-            raise ValueError(f"No static pinhole data found for entity {pinhole_entity}")
+        try:
+            reader = view.select_static(
+                f"{pinhole_entity}:Pinhole:image_from_camera",
+                f"{pinhole_entity}:Pinhole:camera_xyz",
+                f"{pinhole_entity}:Pinhole:resolution",
+            )
+        except ValueError:
+            reader = None
 
-        k_col = batch.column(0)
-        camera_xyz_col = batch.column(1)
-        resolution_col = batch.column(2)
+        k_value: Any | None = None
+        camera_xyz_value: Any | None = None
+        resolution_value: Any | None = None
 
-        if k_col.null_count == len(k_col):
+        if reader is not None:
+            batch = reader.read_next_batch()
+            if batch is not None and batch.num_rows > 0:
+                k_value = self._first_valid_value(
+                    batch.column(0),
+                    component_name=f"{pinhole_entity}:Pinhole:image_from_camera",
+                )
+                camera_xyz_value = self._first_valid_value(
+                    batch.column(1),
+                    allow_none=True,
+                    component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
+                )
+                resolution_value = self._first_valid_value(
+                    batch.column(2),
+                    allow_none=True,
+                    component_name=f"{pinhole_entity}:Pinhole:resolution",
+                )
+
+        if k_value is None:
+            _, k_col_dyn, camera_xyz_col_dyn, resolution_col_dyn = view.select(
+                timeline,
+                f"{pinhole_entity}:Pinhole:image_from_camera",
+                f"{pinhole_entity}:Pinhole:camera_xyz",
+                f"{pinhole_entity}:Pinhole:resolution",
+            ).read_all()
+            k_value = self._first_valid_value(k_col_dyn, component_name=f"{pinhole_entity}:Pinhole:image_from_camera")
+            camera_xyz_value = self._first_valid_value(
+                camera_xyz_col_dyn,
+                allow_none=True,
+                component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
+            )
+            resolution_value = self._first_valid_value(
+                resolution_col_dyn,
+                allow_none=True,
+                component_name=f"{pinhole_entity}:Pinhole:resolution",
+            )
+
+        if k_value is None:
             raise ValueError(f"Missing image_from_camera for {pinhole_entity}")
-        k_item = k_col[0].as_py()
-        if isinstance(k_item, list) and len(k_item) == 1 and isinstance(k_item[0], list):
-            k_item = k_item[0]
-        k_matrix: Float32[ndarray, "3 3"] = np.array(k_item, dtype=np.float32).reshape(3, 3, order="F")
+        if isinstance(k_value, list) and len(k_value) == 1 and isinstance(k_value[0], list):
+            k_value = k_value[0]
+        k_matrix: Float32[ndarray, "3 3"] = np.array(k_value, dtype=np.float32).reshape(3, 3, order="F")
 
         camera_conventions = "RDF"
-        if camera_xyz_col.null_count != len(camera_xyz_col):
-            camera_xyz_value = camera_xyz_col[0].as_py()
-            if isinstance(camera_xyz_value, list) and len(camera_xyz_value) == 3:
-                # Map Rerun axis triplet to known conventions; fall back to RDF.
-                axis_tuple = tuple(int(v) for v in camera_xyz_value)
-                if axis_tuple == (3, 5, 2):
-                    camera_conventions = "RUB"
+        if isinstance(camera_xyz_value, list) and len(camera_xyz_value) == 3:
+            axis_tuple = tuple(int(v) for v in camera_xyz_value)
+            if axis_tuple == (3, 5, 2):
+                camera_conventions = "RUB"
 
         width: int | None = None
         height: int | None = None
-        if resolution_col.null_count != len(resolution_col):
-            resolution_value = resolution_col[0].as_py()
-            if isinstance(resolution_value, list) and len(resolution_value) == 2:
-                width = int(round(resolution_value[0]))
-                height = int(round(resolution_value[1]))
+        if isinstance(resolution_value, list) and len(resolution_value) == 2:
+            width = int(round(resolution_value[0]))
+            height = int(round(resolution_value[1]))
 
         if width is None:
             width = int(round(2 * float(k_matrix[0, 2])))
@@ -274,8 +320,14 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
                 f"{entity}:Transform3D:translation",
                 f"{entity}:Transform3D:mat3x3",
             ).read_all()
-            translation_value = translation_value or self._first_valid_value(t_col)
-            rotation_value = rotation_value or self._first_valid_value(R_col)
+            translation_value = translation_value or self._first_valid_value(
+                t_col,
+                component_name=f"{entity}:Transform3D:translation",
+            )
+            rotation_value = rotation_value or self._first_valid_value(
+                R_col,
+                component_name=f"{entity}:Transform3D:mat3x3",
+            )
 
         translation_arr = np.array(translation_value, dtype=np.float32)
         if translation_arr.ndim > 1:
@@ -293,6 +345,7 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         column: pa.ChunkedArray,
         *,
         allow_none: bool = False,
+        component_name: str | None = None,
     ) -> Any:
         for value in column.combine_chunks().to_pylist():
             if value is None and not allow_none:
@@ -301,7 +354,8 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
                 return value
         if allow_none:
             return None
-        raise ValueError("Expected at least one non-null value in column")
+        column_name = component_name or "(unknown component)"
+        raise ValueError(f"Expected at least one non-null value in column '{column_name}'")
 
     @property
     def image_plane_distance(self) -> int | float:
