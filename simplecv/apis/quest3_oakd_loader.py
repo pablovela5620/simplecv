@@ -445,7 +445,7 @@ def log_hand_sequence(
     *,
     side: QuestHandSide,
     log_path: str,
-    timeline: str = "quest_time",
+    timeline: str = "video_time",
 ) -> None:
     """Log a Quest hand sequence into the active Rerun recording."""
     entity_path: str = f"{log_path}/{side.entity_suffix}"
@@ -475,7 +475,10 @@ def log_hand_sequence(
             intrinsics=right_intrinsics,
         )
         # project into each eye camera
-        for camera_name, pinhole_param in [("left", left_pinhole), ("right", right_pinhole)]:
+        for camera_name, pinhole_param in [
+            ("quest3_left", left_pinhole),
+            ("quest3_right", right_pinhole),
+        ]:
             xyz_hom_stack: Float32[ndarray, "n_frames=1 n_ume_kpts=21 4"] = np.concatenate(
                 [mapped_keypoints, np.ones_like(mapped_keypoints[..., :1])], axis=-1
             )[np.newaxis, ...]
@@ -505,7 +508,7 @@ def log_hand_sequence(
             uv_frame = np.where(valid_mask[:, None], uv_frame, np.nan)
 
             rr.log(
-                f"/world/ego/quest3/{camera_name}/pinhole/video/uv_{side.label}",
+                f"/world/ego/{camera_name}/pinhole/video/uv_{side.label}",
                 rr.Points2D(
                     uv_frame,
                     keypoint_ids=UME_HAND_KEYPOINT_IDS,
@@ -758,13 +761,11 @@ def _log_head_cameras(
     *,
     left_intrinsics: Intrinsics,
     right_intrinsics: Intrinsics,
-    log_path: str,
-    timeline: str = "quest_time",
+    left_cam_path: Path,
+    right_cam_path: Path,
+    timeline: str = "video_time",
 ) -> None:
     """Log Quest head cameras over time using the provided intrinsics and extrinsics."""
-
-    left_cam_path: Path = Path(f"{log_path}/left")
-    right_cam_path: Path = Path(f"{log_path}/right")
 
     for sample in samples:
         rr.set_time(timeline, duration=np.timedelta64(sample.timestamp_ns, "ns"))
@@ -796,7 +797,7 @@ def _log_head_cameras(
         )
 
 
-def main(config: Quest3OakDVisualizeConfig) -> None:
+def load_and_log_quest_data(config: Quest3OakDVisualizeConfig, *, timeline: str = "video_time") -> list[Path]:
     data_root: Path = config.data_dir
     if not data_root.exists():
         raise FileNotFoundError(data_root)
@@ -824,27 +825,33 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
     left_intrinsics: Intrinsics = load_camera_intrinsics(calibration_json, positional_layout="left")
     right_intrinsics: Intrinsics = load_camera_intrinsics(calibration_json, positional_layout="right")
 
+    quest_left_cam_path: Path = Path("/world/ego/quest3_left")
+    quest_right_cam_path: Path = Path("/world/ego/quest3_right")
+
     _log_head_cameras(
         head_extrinsics,
         left_intrinsics=left_intrinsics,
         right_intrinsics=right_intrinsics,
-        log_path="/world/ego/quest3",
+        left_cam_path=quest_left_cam_path,
+        right_cam_path=quest_right_cam_path,
+        timeline=timeline,
     )
 
-    _log_annotation_context(
-        "/world/ego/quest3",
-        sides=[QuestHandSide.LEFT, QuestHandSide.RIGHT],
-    )
+    for quest_cam_path in (quest_left_cam_path, quest_right_cam_path):
+        _log_annotation_context(
+            str(quest_cam_path),
+            sides=[QuestHandSide.LEFT, QuestHandSide.RIGHT],
+        )
 
     _left_video_timestamps_ns = log_video(
         video_path=left_video_path,
-        video_log_path=Path("/world/ego/quest3/left/pinhole/video"),
-        timeline="quest_time",
+        video_log_path=quest_left_cam_path / "pinhole" / "video",
+        timeline=timeline,
     )
     _right_video_timestamps_ns = log_video(
         video_path=right_video_path,
-        video_log_path=Path("/world/ego/quest3/right/pinhole/video"),
-        timeline="quest_time",
+        video_log_path=quest_right_cam_path / "pinhole" / "video",
+        timeline=timeline,
     )
 
     sequences: list[tuple[QuestHandSide, QuestHandPoseSequence]] = [
@@ -862,4 +869,15 @@ def main(config: Quest3OakDVisualizeConfig) -> None:
             right_intrinsics=right_intrinsics,
             side=side,
             log_path=log_path,
+            timeline=timeline,
         )
+
+    quest_pinhole_paths: list[Path] = [
+        quest_left_cam_path / "pinhole",
+        quest_right_cam_path / "pinhole",
+    ]
+    return quest_pinhole_paths
+
+
+def main(config: Quest3OakDVisualizeConfig) -> None:
+    load_and_log_quest_data(config)
