@@ -4,16 +4,22 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import cast
+from typing import Literal, cast
 
+import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import tyro
+from jaxtyping import Float
 from natsort import natsorted
+from numpy import ndarray
 from rerun.blueprint import ContainerLike
+from serde import serde
+from serde.json import from_json
 from tqdm.auto import tqdm
 
-from simplecv.rerun_log_utils import RerunTyroConfig, log_video
+from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
+from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_utils import Resolution, reencode_video_optimal
 
 
@@ -84,6 +90,251 @@ class VideoIngestEntry:
         """Rerun entity path for the camera's pinhole node."""
 
         return self.camera_log_path / "pinhole"
+
+
+@serde
+class OakIntrinsics:
+    """Intrinsics payload emitted by the OAK capture rig."""
+
+    socket: Literal["CAM_A", "CAM_B", "CAM_C"]
+    """Hardware connector identifier reported by DepthAI (`CAM_A`, `CAM_B`, or `CAM_C`)."""
+    width: int
+    """Captured frame width in pixels for the associated stream."""
+    height: int
+    """Captured frame height in pixels for the associated stream."""
+    intrinsics: Float[ndarray, "3 3"]
+    """Row-major 3×3 pinhole intrinsics matrix (fx, fy, cx, cy)."""
+    distortion: Float[ndarray, "14"]
+    """Full 14-coefficient distortion vector provided by the OAK calibration tool."""
+    fov_deg: float
+    """Horizontal field of view in degrees reported for the sensor."""
+
+
+@serde
+class OakExtrinsics:
+    R: Float[ndarray, "3 3"]
+    """Rotation matrix describing the rigid transform."""
+    T: Float[ndarray, "3"]
+    """Translation vector describing the rigid transform."""
+    matrix_4x4: Float[ndarray, "4 4"]
+    """Homogeneous 4x4 transformation matrix."""
+
+
+@serde
+class OakCalibration:
+    """Calibration payload emitted by the OAK capture rig."""
+
+    device_mxid: str
+    """Unique Matrix/DepthAI device identifier encoded in the `calibration.json`."""
+    right: OakIntrinsics
+    """Right mono camera intrinsics/extrinsics block forwarded verbatim from the capture tool."""
+    left: OakIntrinsics
+    """Left mono camera intrinsics/extrinsics block used as the stereo reference."""
+    rgb: OakIntrinsics | None
+    """Optional RGB sensor calibration payload (``None`` for depth-only recordings)."""
+    extrinsics_left_to_right: OakExtrinsics
+    """Rigid transform describing ``left``→``right`` alignment in the calibration file's units."""
+    extrinsics_left_to_rgb: OakExtrinsics | None
+    """Rigid transform describing ``left``→``rgb`` alignment, omitted when RGB is absent."""
+
+
+def _make_intrinsics(oak_i: OakIntrinsics) -> Intrinsics:
+    K: Float[np.ndarray, "3 3"] = oak_i.intrinsics.astype(np.float32)
+    fx: float = float(K[0, 0])
+    fy: float = float(K[1, 1])
+    cx: float = float(K[0, 2])
+    cy: float = float(K[1, 2])
+    width: int = int(oak_i.width)
+    height: int = int(oak_i.height)
+
+    intr: Intrinsics = Intrinsics(
+        camera_conventions="RDF",
+        fl_x=fx,
+        fl_y=fy,
+        cx=cx,
+        cy=cy,
+        width=width,
+        height=height,
+    )
+    return intr
+
+
+def _make_distortion(oak_i: OakIntrinsics) -> BrownConradyDistortion:
+    d: Float[np.ndarray, "14"] = oak_i.distortion.astype(np.float32)
+    # OpenCV 14-term order: [k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4,tau_x,tau_y]
+    k1: float = float(d[0])
+    k2: float = float(d[1])
+    p1: float = float(d[2])
+    p2: float = float(d[3])
+    k3: float = float(d[4])
+    k4: float = float(d[5])
+    k5: float = float(d[6])
+    k6: float = float(d[7])
+    s1: float = float(d[8])
+    s2: float = float(d[9])
+    s3: float = float(d[10])
+    s4: float = float(d[11])
+    tau_x: float = float(d[12])
+    tau_y: float = float(d[13])
+
+    dist: BrownConradyDistortion = BrownConradyDistortion(
+        k1=k1,
+        k2=k2,
+        p1=p1,
+        p2=p2,
+        k3=k3,
+        k4=k4,
+        k5=k5,
+        k6=k6,
+        s1=s1,
+        s2=s2,
+        s3=s3,
+        s4=s4,
+        tau_x=tau_x,
+        tau_y=tau_y,
+    )
+    return dist
+
+
+def _make_extrinsics(H_left_to_cam: Float[np.ndarray, "4 4"]) -> Extrinsics:
+    R: Float[np.ndarray, "3 3"] = H_left_to_cam[:3, :3].astype(np.float32)
+    t: Float[np.ndarray, "3"] = H_left_to_cam[:3, 3].astype(np.float32)  # * 1e-3  # mm -> meters
+    extr: Extrinsics = Extrinsics(world_R_cam=R, world_t_cam=t)
+    return extr
+
+
+def _build_pinhole(name: str, oak_i: OakIntrinsics, H_left_to_cam: Float[np.ndarray, "4 4"]) -> PinholeParameters:
+    intr: Intrinsics = _make_intrinsics(oak_i)
+    dist: BrownConradyDistortion = _make_distortion(oak_i)
+    extr: Extrinsics = _make_extrinsics(H_left_to_cam)
+    pinhole: PinholeParameters = PinholeParameters(name=name, intrinsics=intr, extrinsics=extr, distortion=dist)
+    return pinhole
+
+
+def oak_calib_to_pinhole(oak_calib: OakCalibration) -> list[PinholeParameters]:
+    """Convert an OAK calibration payload into a list of SimpleCV PinholeParameters (DRY)."""
+    pinholes: list[PinholeParameters] = []
+
+    # Left is the world frame (identity 4×4)
+    I_left: Float[np.ndarray, "4 4"] = np.eye(4, dtype=np.float32)
+    pinholes.append(_build_pinhole("left", oak_calib.left, I_left))
+
+    # Right (requires left->right 4×4)
+    H_lr: Float[np.ndarray, "4 4"] = oak_calib.extrinsics_left_to_right.matrix_4x4.astype(np.float32)
+    pinholes.append(_build_pinhole("right", oak_calib.right, H_lr))
+
+    # RGB if present (requires both rgb intrinsics and left->rgb 4×4)
+    if oak_calib.rgb is not None and oak_calib.extrinsics_left_to_rgb is not None:
+        H_lrgb: Float[np.ndarray, "4 4"] = oak_calib.extrinsics_left_to_rgb.matrix_4x4.astype(np.float32)
+        pinholes.append(_build_pinhole("rgb", oak_calib.rgb, H_lrgb))
+
+    return pinholes
+
+
+# ---- minimal SO(3) utilities ----
+
+
+def _skew(v: Float[ndarray, "3"]) -> Float[ndarray, "3 3"]:
+    K: Float[ndarray, "3 3"] = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]], dtype=np.float32)
+    return K
+
+
+def _so3_exp(omega: Float[ndarray, "3"]) -> Float[ndarray, "3 3"]:
+    theta: float = float(np.linalg.norm(omega))
+    I3: Float[ndarray, "3 3"] = np.eye(3, dtype=np.float32)
+    if theta < 1e-9:
+        R: Float[ndarray, "3 3"] = I3.copy()
+        return R
+    k: Float[ndarray, "3"] = (omega / theta).astype(np.float32)
+    K: Float[ndarray, "3 3"] = _skew(k)
+    s: float = float(np.sin(theta))
+    c: float = float(np.cos(theta))
+    R: Float[ndarray, "3 3"] = (I3 + s * K + (1.0 - c) * (K @ K)).astype(np.float32)
+    return R
+
+
+def _so3_log(R: Float[ndarray, "3 3"]) -> Float[ndarray, "3"]:
+    tr: float = float(np.trace(R))
+    cos_theta: float = max(min((tr - 1.0) * 0.5, 1.0), -1.0)
+    theta: float = float(np.arccos(cos_theta))
+    if theta < 1e-9:
+        zero3: Float[ndarray, "3"] = np.zeros(3, dtype=np.float32)
+        return zero3
+    denom: float = 2.0 * float(np.sin(theta))
+    W: Float[ndarray, "3 3"] = ((R - R.T) / denom).astype(np.float32)
+    # vee(W) gives the rotation axis; multiply by theta to get omega
+    omega: Float[ndarray, "3"] = np.array([W[2, 1], W[0, 2], W[1, 0]], dtype=np.float32) * theta
+    return omega
+
+
+def _fov_from_fx(width: int, fx: float) -> float:
+    half: float = float(np.arctan((0.5 * width) / fx))
+    fov: float = float(np.degrees(2.0 * half))
+    return fov
+
+
+# ---- main helper (2-cam only, no magic scale) ----
+
+
+def fill_missing_rgb(cal: OakCalibration) -> OakCalibration:
+    """
+    Populate `cal.rgb` and `cal.extrinsics_left_to_rgb` using only the 2-cam JSON.
+    Intrinsics prior: clone mono focal (mean of left/right), center principal point, zero distortion.
+    Extrinsics: SE(3) square-root of left->right, i.e., (I + R_h) T_h = T_lr and R_h = exp(0.5 * log R_lr).
+    """
+
+    # --- Intrinsics (RGB) -------------------------------------------------------
+    if cal.rgb is None:
+        K_l: Float[ndarray, "3 3"] = np.asarray(cal.left.intrinsics, dtype=np.float64)
+        K_r: Float[ndarray, "3 3"] = np.asarray(cal.right.intrinsics, dtype=np.float64)
+        w: int = int(cal.left.width)
+        h: int = int(cal.left.height)
+
+        fx: float = float(0.5 * (K_l[0, 0] + K_r[0, 0]))  # clone mono focal (no external scale)
+        fy: float = float(0.5 * (K_l[1, 1] + K_r[1, 1]))
+        cx: float = float(w * 0.5)  # center PP to avoid carrying mono offsets
+        cy: float = float(h * 0.5)
+
+        K_rgb64: Float[ndarray, "3 3"] = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
+        d_rgb64: Float[ndarray, "14"] = np.zeros(14, dtype=np.float64)
+        fov_deg: float = _fov_from_fx(w, fx)
+
+        K_rgb: Float[ndarray, "3 3"] = K_rgb64.astype(np.float32)
+        d_rgb: Float[ndarray, "14"] = d_rgb64.astype(np.float32)
+
+        cal.rgb = OakIntrinsics(
+            socket="CAM_A",
+            width=w,
+            height=h,
+            intrinsics=K_rgb,
+            distortion=d_rgb,
+            fov_deg=fov_deg,  # reported for completeness; derived from fx
+        )
+
+    # --- Extrinsics (left -> rgb) ----------------------------------------------
+    if cal.extrinsics_left_to_rgb is None:
+        R_lr64: Float[ndarray, "3 3"] = np.asarray(cal.extrinsics_left_to_right.R, dtype=np.float64)
+        T_lr64: Float[ndarray, "3"] = np.asarray(cal.extrinsics_left_to_right.T, dtype=np.float64)
+
+        w_lr: Float[ndarray, "3"] = _so3_log(R_lr64)
+        R_h64: Float[ndarray, "3 3"] = _so3_exp(0.5 * w_lr)
+
+        I3: Float[ndarray, "3 3"] = np.eye(3, dtype=np.float64)
+        A: Float[ndarray, "3 3"] = I3 + R_h64
+        # Guard against near-singularity only if rotations were ~pi (not your case)
+        T_h64: Float[ndarray, "3"] = np.linalg.solve(A, T_lr64)
+
+        H64: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+        H64[:3, :3] = R_h64
+        H64[:3, 3] = T_h64
+
+        cal.extrinsics_left_to_rgb = OakExtrinsics(
+            R=R_h64.astype(np.float32),
+            T=T_h64.astype(np.float32),
+            matrix_4x4=H64.astype(np.float32),
+        )
+
+    return cal
 
 
 def probe_video_stream(video_path: Path) -> VideoProbeResult:
@@ -282,13 +533,55 @@ def ingest_video_directory(
 
     assert video_entries, "No video entries provided for ingestion."
 
+    # 1. Start by loading the calibration file from the first video's parent directory and logging it ONLY if ego
+    perspective: str = video_entries[0].source_path.parent.name
+    assert perspective in {"exo", "ego"}, f"Unexpected perspective directory name: {perspective}"
+
+    if perspective == "ego":
+        calibration_json_path: Path = video_entries[0].source_path.parent / "calibration.json"
+        assert calibration_json_path.exists(), f"Calibration file not found at {calibration_json_path}"
+        calib_json: str = calibration_json_path.read_text()
+        calibration: OakCalibration = from_json(OakCalibration, calib_json)
+        calibration: OakCalibration = fill_missing_rgb(
+            calibration,
+        )
+
+        # convert from OakCalibration -> simplecv PinholeCamera
+        pinhole_param_list: list[PinholeParameters] = oak_calib_to_pinhole(calibration)
+        # sort pinholes to match the video entries order
+        pinhole_param_list = sorted(
+            pinhole_param_list,
+            key=lambda param: (
+                next(
+                    (
+                        idx
+                        for idx, entry in enumerate(video_entries)
+                        if param.name.lower() in entry.camera_log_path.name.lower()
+                    ),
+                    len(video_entries),
+                ),
+                param.name.lower(),
+            ),
+        )
+    else:
+        pinhole_param_list = []
     expected_resolution: tuple[int, int] | None = None
     logged_video_entities: list[Path] = []
     iterable_entries: Iterable[VideoIngestEntry] = cast(
         Iterable[VideoIngestEntry],
         tqdm(video_entries, desc=progress_label, leave=False),
     )
-    for entry in iterable_entries:
+    for idx, entry in enumerate(iterable_entries):
+        if video_entries[0].source_path.parent.name == "ego":
+            pinhole: PinholeParameters = pinhole_param_list[idx]
+            assert pinhole.name.lower() in entry.camera_log_path.name.lower(), (
+                f"Camera name mismatch: pinhole '{pinhole.name}' vs. entry '{entry.camera_log_path.name}'"
+            )
+            log_pinhole(
+                camera=pinhole,
+                cam_log_path=entry.camera_log_path,
+                static=True,
+            )
         prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
             video_path=entry.source_path,
             verbose=verbose,
@@ -376,6 +669,10 @@ def main(config: IngestConfig) -> None:
 
     parent_log_path: Path = Path("/world")
     timeline: str = "video_time"
+    # set the coordinate system for the entire world
+    rr.log("/", rr.ViewCoordinates.RDF, static=True)
+    # set time to 0 at the start of the timeline
+    rr.set_time(timeline=timeline, duration=0)
     dir_tuple: tuple[Path | None, Path | None] = validate_exoego_dir(config.exoego_dir)
     exo_dir: Path | None = dir_tuple[0]
     ego_dir: Path | None = dir_tuple[1]
@@ -413,6 +710,7 @@ def main(config: IngestConfig) -> None:
         )
 
     if ego_entries:
+        # TODO make sure that the ego calibration is in meters not millimeters
         ingest_video_directory(
             video_entries=ego_entries,
             timeline=timeline,
