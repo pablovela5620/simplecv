@@ -691,8 +691,11 @@ class SceneSetupResult(NamedTuple):
 
 def setup_scene(
     exoego_sequence: BaseExoEgoSequence,
+    *,
     parent_log_path: Path,
     timeline: str,
+    log_ego: bool,
+    log_exo: bool,
     recording: rr.RecordingStream | None = None,
 ) -> SceneSetupResult:
     """Log static assets, videos, and transforms; derive the shared timeline.
@@ -713,7 +716,7 @@ def setup_scene(
 
     exo_timestamp_list: list[Int[ndarray, "n_frames"]] = []
     exo_video_log_paths: list[Path] | None = None
-    if exo_sequence is not None:
+    if exo_sequence is not None and log_exo:
         exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
         exo_video_files: list[Path] = exo_video_readers.video_paths
         exo_video_names: list[str] = exo_sequence.exo_video_names
@@ -748,7 +751,7 @@ def setup_scene(
 
     ego_timestamp_list: list[Int[ndarray, "n_frames"]] = []
     ego_video_log_paths: list[Path] | None = None
-    if ego_sequence is not None:
+    if ego_sequence is not None and log_ego:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
         ego_video_names: list[str] = ego_sequence.ego_video_names
@@ -849,7 +852,13 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
-    scene_setup_result: SceneSetupResult = setup_scene(exoego_sequence, parent_log_path, timeline)
+    scene_setup_result: SceneSetupResult = setup_scene(
+        exoego_sequence,
+        parent_log_path=parent_log_path,
+        timeline=timeline,
+        log_ego=config.log_ego,
+        log_exo=config.log_exo,
+    )
     log_paths: LogPaths = scene_setup_result.log_paths
     shortest_timestamp: Int[ndarray, "n_frames"] = scene_setup_result.shortest_timestamp
 
