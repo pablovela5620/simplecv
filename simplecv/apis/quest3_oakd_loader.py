@@ -7,17 +7,20 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Bool, Float32, Float64, Int64, UInt16
+from jaxtyping import Bool, Float32, Float64, Int, Int64
 from numpy import ndarray
 from rerun import AnnotationInfo, ClassDescription
 from serde import coerce, from_dict, serde
 from serde import field as serde_field
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
 from simplecv.ops import conventions
 from simplecv.ops.triangulate import proj_3d_vectorized
+from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
-from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK, UME_HAND_CONNECTIONS
+from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK
 
 
 class QuestHandLandmark(IntEnum):
@@ -124,15 +127,6 @@ LANDMARK_TO_QUEST_INDEX: Int64[ndarray, "n_ume_kpts"] = np.array(
     ],
     dtype=np.int64,
 )
-
-UME_HAND_KEYPOINT_IDS: UInt16[ndarray, "n_ume_kpts"] = np.array(
-    [landmark.value for landmark in LANDMARK],
-    dtype=np.uint16,
-)
-
-QUEST_HAND_CLASS_IDS_BY_SIDE: dict[QuestHandSide, UInt16[ndarray, "n_ume_kpts"]] = {
-    side: np.full(UME_HAND_LANDMARK_COUNT, int(side), dtype=np.uint16) for side in QuestHandSide
-}
 
 
 @serde(type_check=coerce)
@@ -357,7 +351,7 @@ class QuestHandPoseSequence:
 
 
 @dataclass
-class Quest3OakDVisualizeConfig:
+class Quest3VisualizeConfig:
     """Structured configuration for running the Quest3/Oak-D visualization CLI."""
 
     rr_config: RerunTyroConfig
@@ -412,19 +406,6 @@ def load_hand_sequence(csv_path: Path) -> QuestHandPoseSequence:
     return sequence
 
 
-def _log_annotation_context(log_path: str, *, sides: Sequence[QuestHandSide]) -> None:
-    rr.log(log_path, rr.ViewCoordinates.RUB, static=True)
-    class_descriptions = [
-        ClassDescription(
-            info=AnnotationInfo(label=f"Quest3 {side.label} hand", id=int(side)),
-            keypoint_annotations=[AnnotationInfo(id=landmark.value) for landmark in LANDMARK],
-            keypoint_connections=list(UME_HAND_CONNECTIONS),
-        )
-        for side in sides
-    ]
-    rr.log(log_path, rr.AnnotationContext(class_descriptions), static=True)
-
-
 @dataclass(slots=True)
 class QuestHeadExtrinsicsSample:
     """Quest head pose extrinsics accompanied by capture timestamp."""
@@ -437,85 +418,144 @@ class QuestHeadExtrinsicsSample:
     """Camera-to-world pose describing the right-eye tracking camera."""
 
 
-def log_hand_sequence(
-    sequence: QuestHandPoseSequence,
-    head_extrinsics: list[QuestHeadExtrinsicsSample],
+def _log_coco_annotation_context() -> None:
+    rr.log(
+        "/",
+        rr.AnnotationContext(
+            [
+                ClassDescription(
+                    info=AnnotationInfo(id=0, label="COCO Wholebody", color=(0, 0, 255)),
+                    keypoint_annotations=[
+                        AnnotationInfo(id=kpt_id, label=COCO_133_ID2NAME[kpt_id]) for kpt_id in COCO_133_IDS
+                    ],
+                    keypoint_connections=COCO_133_LINKS,
+                )
+            ]
+        ),
+        static=True,
+    )
+
+
+def _log_coco133_annotations(
+    *,
+    left_sequence: QuestHandPoseSequence,
+    right_sequence: QuestHandPoseSequence,
+    head_extrinsics: Sequence[QuestHeadExtrinsicsSample],
     left_intrinsics: Intrinsics,
     right_intrinsics: Intrinsics,
-    *,
-    side: QuestHandSide,
-    log_path: str,
-    timeline: str = "video_time",
+    quest_left_cam_path: Path,
+    quest_right_cam_path: Path,
+    timeline: str,
 ) -> None:
-    """Log a Quest hand sequence into the active Rerun recording."""
-    entity_path: str = f"{log_path}/{side.entity_suffix}"
-    class_ids: UInt16[ndarray, "n_ume_kpts=21"] = QUEST_HAND_CLASS_IDS_BY_SIDE[side]
-    head_extrinsic: QuestHeadExtrinsicsSample
-    for sample, head_extrinsic in zip(sequence, head_extrinsics, strict=False):
-        rr.set_time(timeline, duration=np.timedelta64(sample.timestamp_ns, "ns"))
-        mapped_keypoints: Float32[ndarray, "n_ume_kpts=21 3"] = sample.keypoints_m[LANDMARK_TO_QUEST_INDEX]
+    left_keypoints: Float32[ndarray, "n_frames_left 21 3"] = left_sequence.keypoints_m[:, LANDMARK_TO_QUEST_INDEX]
+    right_keypoints: Float32[ndarray, "n_frames_right 21 3"] = right_sequence.keypoints_m[:, LANDMARK_TO_QUEST_INDEX]
+    frame_count: int = min(len(head_extrinsics), left_keypoints.shape[0], right_keypoints.shape[0])
+    if frame_count == 0:
+        return
+
+    coco_entity_path: Path = Path("/world/gt/coco133_xyz")
+    for frame_idx in range(frame_count):
+        timestamp_ns: int = int(head_extrinsics[frame_idx].timestamp_ns)
+
+        kpts_lr: Float32[ndarray, "2 21 3"] = np.stack(
+            (
+                left_keypoints[frame_idx].astype(np.float32, copy=False),
+                right_keypoints[frame_idx].astype(np.float32, copy=False),
+            ),
+            axis=0,
+        )
+        coco_frame: Float32[ndarray, "133 4"] = assembly21_to_coco133(kpts_lr)
+        positions: Float32[ndarray, "133 3"] = coco_frame[:, :3]
+        confidences: Float32[ndarray, "133"] = np.nan_to_num(coco_frame[:, 3], nan=0.0).astype(np.float32, copy=False)
+        invalid_mask: Bool[ndarray, "133"] = np.isnan(positions).any(axis=1)
+        confidences[invalid_mask] = np.float32(0.0)
+
+        rr.set_time(timeline, duration=np.timedelta64(timestamp_ns, "ns"))
         rr.log(
-            f"{entity_path}/landmarks",
-            rr.Points3D(
-                mapped_keypoints,
-                keypoint_ids=UME_HAND_KEYPOINT_IDS,
-                class_ids=class_ids,
+            str(coco_entity_path),
+            Points3DWithConfidence(
+                positions=positions,
+                confidences=confidences,
+                class_ids=0,
+                keypoint_ids=COCO_133_IDS,
                 show_labels=False,
             ),
         )
 
+        head_sample: QuestHeadExtrinsicsSample = head_extrinsics[frame_idx]
         left_pinhole: PinholeParameters = PinholeParameters(
             name="quest_left_eye",
-            extrinsics=head_extrinsic.left_extrinsics,
+            extrinsics=head_sample.left_extrinsics,
             intrinsics=left_intrinsics,
         )
         right_pinhole: PinholeParameters = PinholeParameters(
             name="quest_right_eye",
-            extrinsics=head_extrinsic.right_extrinsics,
+            extrinsics=head_sample.right_extrinsics,
             intrinsics=right_intrinsics,
         )
-        # project into each eye camera
-        for camera_name, pinhole_param in [
-            ("quest3_left", left_pinhole),
-            ("quest3_right", right_pinhole),
-        ]:
-            xyz_hom_stack: Float32[ndarray, "n_frames=1 n_ume_kpts=21 4"] = np.concatenate(
-                [mapped_keypoints, np.ones_like(mapped_keypoints[..., :1])], axis=-1
-            )[np.newaxis, ...]
-            Pall_exo: Float64[ndarray, "n_frames=1 3 4"] = pinhole_param.projection_matrix[np.newaxis, ...]
-            uv_raw_stack: Float64[ndarray, "n_frames=1 n_views n_ume_kpts=21 2"] = proj_3d_vectorized(
-                xyz_hom=xyz_hom_stack, P=Pall_exo
-            )
-            uv_frame: Float32[ndarray, "n_ume_kpts=21 2"] = uv_raw_stack[0, 0].astype(np.float32)
 
-            xyz_world_hom: Float32[ndarray, "n_ume_kpts=21 4"] = xyz_hom_stack[0]
-            world_T_cam: Float32[ndarray, "4 4"] = pinhole_param.extrinsics.world_T_cam.astype(np.float32)
-            xyz_cam: Float32[ndarray, "n_ume_kpts=21 4"] = (world_T_cam @ xyz_world_hom.T).T
-            depth_cam: Float32[ndarray, "n_ume_kpts=21"] = xyz_cam[:, 2]
-            depth_mask: Bool[ndarray, "n_ume_kpts=21"] = depth_cam > 0.0
-
-            intrinsics = pinhole_param.intrinsics
-            width: float = float(intrinsics.width if intrinsics.width is not None else 2.0 * intrinsics.cx)
-            height: float = float(intrinsics.height if intrinsics.height is not None else 2.0 * intrinsics.cy)
-            bounds_mask: Bool[ndarray, "n_ume_kpts=21"] = (
-                (uv_frame[:, 0] >= 0.0)
-                & (uv_frame[:, 0] <= width)
-                & (uv_frame[:, 1] >= 0.0)
-                & (uv_frame[:, 1] <= height)
+        for cam_path, pinhole_param in (
+            (quest_left_cam_path, left_pinhole),
+            (quest_right_cam_path, right_pinhole),
+        ):
+            _log_coco133_uv(
+                camera_path=cam_path,
+                pinhole_param=pinhole_param,
+                positions=positions,
+                confidences=confidences,
             )
 
-            valid_mask: Bool[ndarray, "n_ume_kpts=21"] = depth_mask & bounds_mask
-            uv_frame = np.where(valid_mask[:, None], uv_frame, np.nan)
 
-            rr.log(
-                f"/world/ego/{camera_name}/pinhole/video/uv_{side.label}",
-                rr.Points2D(
-                    uv_frame,
-                    keypoint_ids=UME_HAND_KEYPOINT_IDS,
-                    class_ids=class_ids,
-                    show_labels=False,
-                ),
-            )
+def _log_coco133_uv(
+    *,
+    camera_path: Path,
+    pinhole_param: PinholeParameters,
+    positions: Float32[ndarray, "133 3"],
+    confidences: Float32[ndarray, "133"],
+) -> None:
+    uv_positions: Float32[ndarray, "133 2"] = np.full((positions.shape[0], 2), np.nan, dtype=np.float32)
+    uv_confidences: Float32[ndarray, "133"] = np.zeros_like(confidences, dtype=np.float32)
+    valid_mask: Bool[ndarray, "133"] = (~np.isnan(positions).any(axis=1)) & (confidences > 0.0)
+    valid_indices_all: Int[ndarray, "n_valid"] = np.flatnonzero(valid_mask)
+    if valid_indices_all.size > 0:
+        xyz_hom_valid: Float32[ndarray, "n_valid 4"] = np.concatenate(
+            [positions[valid_indices_all], np.ones((valid_indices_all.size, 1), dtype=np.float32)],
+            axis=1,
+        )
+        xyz_hom_stack: Float32[ndarray, "1 n_valid 4"] = xyz_hom_valid[np.newaxis, ...]
+        Pall: Float64[ndarray, "1 3 4"] = pinhole_param.projection_matrix[np.newaxis, ...].astype(np.float64)
+        uv_raw: Float32[ndarray, "n_valid 2"] = proj_3d_vectorized(xyz_hom=xyz_hom_stack, P=Pall)[0, 0].astype(
+            np.float32,
+            copy=False,
+        )
+
+        cam_T_world: Float32[ndarray, "4 4"] = pinhole_param.extrinsics.cam_T_world.astype(np.float32)
+        xyz_cam: Float32[ndarray, "n_valid 4"] = (cam_T_world @ xyz_hom_valid.T).T
+        depth: Float32[ndarray, "n_valid"] = xyz_cam[:, 2]
+
+        intrinsics = pinhole_param.intrinsics
+        width: float = float(intrinsics.width if intrinsics.width is not None else 2.0 * intrinsics.cx)
+        height: float = float(intrinsics.height if intrinsics.height is not None else 2.0 * intrinsics.cy)
+        bounds_mask: Bool[ndarray, "n_valid"] = (
+            (uv_raw[:, 0] >= 0.0) & (uv_raw[:, 0] <= width) & (uv_raw[:, 1] >= 0.0) & (uv_raw[:, 1] <= height)
+        )
+        positive_depth: Bool[ndarray, "n_valid"] = depth > 0.0
+        final_mask: Bool[ndarray, "n_valid"] = bounds_mask & positive_depth
+        if np.any(final_mask):
+            final_indices: Int[ndarray, "k"] = valid_indices_all[final_mask]
+            uv_positions[final_indices] = uv_raw[final_mask]
+            uv_confidences[final_indices] = confidences[final_indices]
+
+    rr.log(
+        str(camera_path / "pinhole" / "coco133_uv"),
+        Points2DWithConfidence(
+            positions=uv_positions,
+            confidences=uv_confidences,
+            class_ids=0,
+            keypoint_ids=COCO_133_IDS,
+            show_labels=False,
+        ),
+    )
 
 
 @serde(type_check=coerce)
@@ -797,7 +837,7 @@ def _log_head_cameras(
         )
 
 
-def load_and_log_quest_data(config: Quest3OakDVisualizeConfig, *, timeline: str = "video_time") -> list[Path]:
+def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "video_time") -> list[Path]:
     data_root: Path = config.data_dir
     if not data_root.exists():
         raise FileNotFoundError(data_root)
@@ -828,6 +868,8 @@ def load_and_log_quest_data(config: Quest3OakDVisualizeConfig, *, timeline: str 
     quest_left_cam_path: Path = Path("/world/ego/quest3_left")
     quest_right_cam_path: Path = Path("/world/ego/quest3_right")
 
+    _log_coco_annotation_context()
+
     _log_head_cameras(
         head_extrinsics,
         left_intrinsics=left_intrinsics,
@@ -837,40 +879,37 @@ def load_and_log_quest_data(config: Quest3OakDVisualizeConfig, *, timeline: str 
         timeline=timeline,
     )
 
-    for quest_cam_path in (quest_left_cam_path, quest_right_cam_path):
-        _log_annotation_context(
-            str(quest_cam_path),
-            sides=[QuestHandSide.LEFT, QuestHandSide.RIGHT],
-        )
-
-    _left_video_timestamps_ns = log_video(
+    _left_video_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
         video_path=left_video_path,
         video_log_path=quest_left_cam_path / "pinhole" / "video",
         timeline=timeline,
     )
-    _right_video_timestamps_ns = log_video(
+    _right_video_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
         video_path=right_video_path,
         video_log_path=quest_right_cam_path / "pinhole" / "video",
         timeline=timeline,
     )
 
-    sequences: list[tuple[QuestHandSide, QuestHandPoseSequence]] = [
-        (QuestHandSide.LEFT, load_hand_sequence(left_csv)),
-        (QuestHandSide.RIGHT, load_hand_sequence(right_csv)),
-    ]
-
-    log_path = "quest3_oakd"
-    _log_annotation_context("/", sides=[side for side, _ in sequences])
-    for side, sequence in sequences:
-        log_hand_sequence(
-            sequence,
-            head_extrinsics,
-            left_intrinsics=left_intrinsics,
-            right_intrinsics=right_intrinsics,
-            side=side,
-            log_path=log_path,
-            timeline=timeline,
+    sequence_map: dict[QuestHandSide, QuestHandPoseSequence] = {
+        side: load_hand_sequence(csv_path)
+        for side, csv_path in (
+            (QuestHandSide.LEFT, left_csv),
+            (QuestHandSide.RIGHT, right_csv),
         )
+    }
+    if QuestHandSide.LEFT not in sequence_map or QuestHandSide.RIGHT not in sequence_map:
+        raise ValueError("Both left and right hand pose sequences are required for COCO-133 logging.")
+
+    _log_coco133_annotations(
+        left_sequence=sequence_map[QuestHandSide.LEFT],
+        right_sequence=sequence_map[QuestHandSide.RIGHT],
+        head_extrinsics=head_extrinsics,
+        left_intrinsics=left_intrinsics,
+        right_intrinsics=right_intrinsics,
+        quest_left_cam_path=quest_left_cam_path,
+        quest_right_cam_path=quest_right_cam_path,
+        timeline=timeline,
+    )
 
     quest_pinhole_paths: list[Path] = [
         quest_left_cam_path / "pinhole",
@@ -879,5 +918,5 @@ def load_and_log_quest_data(config: Quest3OakDVisualizeConfig, *, timeline: str 
     return quest_pinhole_paths
 
 
-def main(config: Quest3OakDVisualizeConfig) -> None:
+def main(config: Quest3VisualizeConfig) -> None:
     load_and_log_quest_data(config)

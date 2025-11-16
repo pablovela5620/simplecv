@@ -20,7 +20,7 @@ from serde.compat import SerdeError
 from serde.json import from_json
 from tqdm.auto import tqdm
 
-from simplecv.apis.quest3_oakd_loader import Quest3OakDVisualizeConfig, load_and_log_quest_data
+from simplecv.apis.quest3_oakd_loader import Quest3VisualizeConfig, load_and_log_quest_data
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_utils import Resolution, reencode_video_optimal
@@ -840,11 +840,7 @@ def ingest_video_directory(
             assert pinhole.name.lower() in entry.camera_log_path.name.lower(), (
                 f"Camera name mismatch: pinhole '{pinhole.name}' vs. entry '{entry.camera_log_path.name}'"
             )
-            log_pinhole(
-                camera=pinhole,
-                cam_log_path=entry.camera_log_path,
-                static=True,
-            )
+            log_pinhole(camera=pinhole, cam_log_path=entry.camera_log_path, static=True, image_plane_distance=0.05)
         prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
             video_path=entry.source_path,
             verbose=verbose,
@@ -967,7 +963,7 @@ def main(config: IngestConfig) -> None:
     quest_pinhole_paths: list[Path] | None = None
     quest_dir: Path = config.exoego_dir / "quest"
     if quest_dir.exists():
-        quest_config = Quest3OakDVisualizeConfig(rr_config=config.rr_config, data_dir=config.exoego_dir)
+        quest_config = Quest3VisualizeConfig(rr_config=config.rr_config, data_dir=config.exoego_dir)
         quest_pinhole_paths = load_and_log_quest_data(quest_config, timeline=timeline)
 
     ingest_view: ContainerLike = create_ingest_view(

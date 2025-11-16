@@ -240,10 +240,11 @@ class MultiVideoReader:
         self.video_paths: list[Path] = video_paths
         self.video_readers: list[VideoReader] = [VideoReader(video_path) for video_path in video_paths]
 
-        assert all(
-            reader.height == self.video_readers[0].height and reader.width == self.video_readers[0].width
-            for reader in self.video_readers
-        )
+        # TODO: confirm that we actually want this assertion
+        # assert all(
+        #     reader.height == self.video_readers[0].height and reader.width == self.video_readers[0].width
+        #     for reader in self.video_readers
+        # )
 
     @property
     def height(self) -> int:
