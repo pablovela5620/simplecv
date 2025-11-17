@@ -5,6 +5,18 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "RRD View",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/view_exoego.py",
+            "console": "integratedTerminal",
+            "args": [
+                "rrd",
+                "--rrd-path",
+                "/mnt/8tb/data/exoego-self-collected/quest+oak+exo/0493bdcf-f3ae-485d-91a7-805225d71ed5-correct/quest+oak+exo.rrd",
+            ]
+        },
+        {
             "name": "HOCAP view",
             "type": "debugpy",
             "request": "launch",

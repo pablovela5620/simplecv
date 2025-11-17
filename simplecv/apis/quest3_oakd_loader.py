@@ -1,4 +1,5 @@
 import json
+import warnings
 from collections.abc import Iterator, Sequence
 from csv import DictReader
 from dataclasses import dataclass
@@ -360,6 +361,132 @@ class Quest3VisualizeConfig:
     """Path to the root directory of the Quest3 Oak-D dataset."""
 
 
+def _select_common_video_timestamps(
+    *,
+    left_timestamps: Int[ndarray, "n_left"],
+    right_timestamps: Int[ndarray, "n_right"],
+) -> Int64[ndarray, "n_common"]:
+    """Intersect two per-frame timestamp arrays and keep the shared prefix.
+
+    The Quest left/right eye MP4s occasionally disagree by a handful of frames.
+    Because we currently downsample all tracker data to the video cadence, we
+    trim to the overlapping prefix and warn the caller so the data loss is
+    explicit.
+
+    Args:
+        left_timestamps: Nanosecond timestamps emitted by the left-eye MP4.
+        right_timestamps: Nanosecond timestamps emitted by the right-eye MP4.
+
+    Returns:
+        Int64[np.ndarray, "n_common"]: Prefix of ``left_timestamps`` that
+        overlaps with ``right_timestamps``. The length equals the minimum frame
+        count among both streams.
+    """
+    left_ts: Int64[ndarray, "n_left"] = np.asarray(left_timestamps, dtype=np.int64)
+    right_ts: Int64[ndarray, "n_right"] = np.asarray(right_timestamps, dtype=np.int64)
+    if left_ts.size == 0 or right_ts.size == 0:
+        raise ValueError("Quest eye videos must contain at least one frame to drive logging.")
+    n_common: int = int(min(left_ts.size, right_ts.size))
+    if left_ts.size != right_ts.size or not np.array_equal(left_ts[:n_common], right_ts[:n_common]):
+        warnings.warn(
+            "Quest eye videos have mismatched timestamps; trimming to the overlapping prefix.",
+            stacklevel=2,
+        )
+    return left_ts[:n_common]
+
+
+def _nearest_sample_indices(
+    *,
+    source_timestamps_ns: Int64[ndarray, "n_source"],
+    target_timestamps_ns: Int64[ndarray, "n_target"],
+) -> Int64[ndarray, "n_target"]:
+    """Map each ``target`` timestamp to the closest source sample index.
+
+    Args:
+        source_timestamps_ns: Monotonic nanosecond timestamps belonging to the
+            high-rate tracker stream.
+        target_timestamps_ns: Desired nanosecond timestamps, typically the
+            MP4-derived ``video_time`` array.
+
+    Returns:
+        Int64[np.ndarray, "n_target"]: Index per target timestamp referencing
+        the most recent source sample (nearest neighbor to the left).
+    """
+    if source_timestamps_ns.size == 0:
+        raise ValueError("Cannot resample an empty timeline.")
+    insertion_points: Int64[ndarray, "n_target"] = (
+        np.searchsorted(source_timestamps_ns, target_timestamps_ns, side="right") - 1
+    ).astype(np.int64)
+    insertion_points[insertion_points < 0] = 0
+    insertion_points[insertion_points >= source_timestamps_ns.size] = source_timestamps_ns.size - 1
+    return insertion_points
+
+
+def _resample_head_extrinsics(
+    *,
+    samples: Sequence[QuestHeadExtrinsicsSample],
+    target_timestamps_ns: Int64[ndarray, "n_target"],
+) -> list[QuestHeadExtrinsicsSample]:
+    """Subsample head extrinsics to match the MP4 frame cadence.
+
+    Args:
+        samples: Original tracker samples emitted by Quest at a higher rate.
+        target_timestamps_ns: Target nanosecond timestamps (one per video
+            frame) that should drive logging.
+
+    Returns:
+        list[QuestHeadExtrinsicsSample]: Downsampled extrinsics sharing the
+        ``target_timestamps_ns`` cadence so they stay in sync with video logs.
+    """
+    source_timestamps_ns: Int64[ndarray, "n_source"] = np.asarray(
+        [sample.timestamp_ns for sample in samples],
+        dtype=np.int64,
+    )
+    indices: Int64[ndarray, "n_target"] = _nearest_sample_indices(
+        source_timestamps_ns=source_timestamps_ns,
+        target_timestamps_ns=target_timestamps_ns,
+    )
+    resampled: list[QuestHeadExtrinsicsSample] = []
+    for idx, target_timestamp_ns in zip(indices, target_timestamps_ns, strict=True):
+        source_sample: QuestHeadExtrinsicsSample = samples[int(idx)]
+        resampled.append(
+            QuestHeadExtrinsicsSample(
+                timestamp_ns=int(target_timestamp_ns),
+                left_extrinsics=source_sample.left_extrinsics,
+                right_extrinsics=source_sample.right_extrinsics,
+            )
+        )
+    return resampled
+
+
+def _resample_hand_sequence(
+    *,
+    sequence: QuestHandPoseSequence,
+    target_timestamps_ns: Int64[ndarray, "n_target"],
+) -> QuestHandPoseSequence:
+    """Return a new hand sequence with one sample per ``target_timestamps_ns``.
+
+    Args:
+        sequence: Raw Quest hand pose sequence containing the original cadence.
+        target_timestamps_ns: Target timeline shared with the MP4 logs.
+
+    Returns:
+        QuestHandPoseSequence: Copy of ``sequence`` trimmed/resampled to the
+        requested timestamps.
+    """
+    source_timestamps_ns: Int64[ndarray, "n_source"] = sequence.timestamps_ns.astype(np.int64, copy=False)
+    indices: Int64[ndarray, "n_target"] = _nearest_sample_indices(
+        source_timestamps_ns=source_timestamps_ns,
+        target_timestamps_ns=target_timestamps_ns,
+    )
+    keypoints_resampled: Float32[ndarray, "n_target n_quest_kpts=26 3"] = sequence.keypoints_m[indices]
+    resampled_sequence = QuestHandPoseSequence(
+        timestamps_ns=target_timestamps_ns.astype(np.int64, copy=False),
+        keypoints_m=keypoints_resampled.astype(np.float32, copy=False),
+    )
+    return resampled_sequence
+
+
 def load_hand_sequence(csv_path: Path) -> QuestHandPoseSequence:
     """Load Quest 3 hand landmarks from the CSV export."""
     if not csv_path.exists():
@@ -513,6 +640,15 @@ def _log_coco133_uv(
     positions: Float32[ndarray, "133 3"],
     confidences: Float32[ndarray, "133"],
 ) -> None:
+    """Project COCO-133 joints into a camera view and stream them to Rerun.
+
+    Args:
+        camera_path: Entity root (e.g., ``/world/ego/quest3_left``) receiving
+            the 2D annotations.
+        pinhole_param: Camera model used for projection.
+        positions: 3D keypoints expressed in the world frame.
+        confidences: Per-joint confidence vector used for coloring/filtering.
+    """
     uv_positions: Float32[ndarray, "133 2"] = np.full((positions.shape[0], 2), np.nan, dtype=np.float32)
     uv_confidences: Float32[ndarray, "133"] = np.zeros_like(confidences, dtype=np.float32)
     valid_mask: Bool[ndarray, "133"] = (~np.isnan(positions).any(axis=1)) & (confidences > 0.0)
@@ -838,6 +974,18 @@ def _log_head_cameras(
 
 
 def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "video_time") -> list[Path]:
+    """Ingest Quest3+OAK data, log resampled tracks, and return pinhole roots.
+
+    Args:
+        config: Filesystem + viewer configuration describing where Quest data
+            lives and how to initialize Rerun.
+        timeline: Logical timeline used for all emitted logs. Defaults to
+            ``"video_time"`` which matches our MP4 timestamps.
+
+    Returns:
+        list[Path]: ``/world/ego/quest3_left/right`` pinhole entity roots so
+        callers can embed them inside a blueprint.
+    """
     data_root: Path = config.data_dir
     if not data_root.exists():
         raise FileNotFoundError(data_root)
@@ -870,15 +1018,6 @@ def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "v
 
     _log_coco_annotation_context()
 
-    _log_head_cameras(
-        head_extrinsics,
-        left_intrinsics=left_intrinsics,
-        right_intrinsics=right_intrinsics,
-        left_cam_path=quest_left_cam_path,
-        right_cam_path=quest_right_cam_path,
-        timeline=timeline,
-    )
-
     _left_video_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
         video_path=left_video_path,
         video_log_path=quest_left_cam_path / "pinhole" / "video",
@@ -888,6 +1027,19 @@ def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "v
         video_path=right_video_path,
         video_log_path=quest_right_cam_path / "pinhole" / "video",
         timeline=timeline,
+    )
+
+    quest_video_timestamps_ns: Int64[ndarray, "n_frames"] = _select_common_video_timestamps(
+        left_timestamps=_left_video_timestamps_ns,
+        right_timestamps=_right_video_timestamps_ns,
+    )
+
+    # TODO(#exoego-timelines): revisit once we support multi-rate logging instead of
+    # clamping everything to video_time. For now we intentionally drop the Quest
+    # tracker samples to guarantee one keypoint/extrinsic per video frame.
+    resampled_head_extrinsics: list[QuestHeadExtrinsicsSample] = _resample_head_extrinsics(
+        samples=head_extrinsics,
+        target_timestamps_ns=quest_video_timestamps_ns,
     )
 
     sequence_map: dict[QuestHandSide, QuestHandPoseSequence] = {
@@ -900,10 +1052,28 @@ def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "v
     if QuestHandSide.LEFT not in sequence_map or QuestHandSide.RIGHT not in sequence_map:
         raise ValueError("Both left and right hand pose sequences are required for COCO-133 logging.")
 
+    sequence_map[QuestHandSide.LEFT] = _resample_hand_sequence(
+        sequence=sequence_map[QuestHandSide.LEFT],
+        target_timestamps_ns=quest_video_timestamps_ns,
+    )
+    sequence_map[QuestHandSide.RIGHT] = _resample_hand_sequence(
+        sequence=sequence_map[QuestHandSide.RIGHT],
+        target_timestamps_ns=quest_video_timestamps_ns,
+    )
+
+    _log_head_cameras(
+        resampled_head_extrinsics,
+        left_intrinsics=left_intrinsics,
+        right_intrinsics=right_intrinsics,
+        left_cam_path=quest_left_cam_path,
+        right_cam_path=quest_right_cam_path,
+        timeline=timeline,
+    )
+
     _log_coco133_annotations(
         left_sequence=sequence_map[QuestHandSide.LEFT],
         right_sequence=sequence_map[QuestHandSide.RIGHT],
-        head_extrinsics=head_extrinsics,
+        head_extrinsics=resampled_head_extrinsics,
         left_intrinsics=left_intrinsics,
         right_intrinsics=right_intrinsics,
         quest_left_cam_path=quest_left_cam_path,
