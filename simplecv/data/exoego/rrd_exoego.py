@@ -309,7 +309,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
         """Get mapping from joint ID to joint name."""
-        return rr.ViewCoordinates.RFU
+        return rr.ViewCoordinates.RUF
 
     @property
     def image_plane_distance(self) -> int | float:

@@ -146,6 +146,10 @@ def create_container(
     """
     main_view = rrb.Spatial3DView(
         origin="/",
+        name="3D View",
+        spatial_information=rrb.SpatialInformation(
+            show_axes=True,
+        ),
     )
 
     if ego_video_log_paths is not None:
