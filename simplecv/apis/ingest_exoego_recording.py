@@ -773,10 +773,16 @@ def collect_video_entries(
 ) -> list[VideoIngestEntry]:
     """Gather source/log path pairs for every MP4/MOV inside ``video_dir``."""
 
-    all_candidates: list[Path] = natsorted([*video_dir.glob("*.mp4"), *video_dir.glob("*.mov")])
-    assert all_candidates, f"No .mp4 or .mov files found in directory: {video_dir}"
+    all_candidates: list[Path] = natsorted(
+        [
+            candidate
+            for candidate in video_dir.rglob("*")
+            if candidate.is_file() and candidate.suffix.lower() in {".mp4", ".mov"}
+        ]
+    )
+    assert all_candidates, f"No .mp4 or .mov files found in directory (searched recursively): {video_dir}"
 
-    # Deduplicate by stem while preferring .mov when both exist.
+    # Deduplicate by stem while preferring .mp4 when both exist.
     selected_by_stem: dict[str, Path] = {}
     for path in all_candidates:
         stem: str = path.stem
@@ -814,8 +820,13 @@ def ingest_video_directory(
     assert video_entries, "No video entries provided for ingestion."
 
     # 1. Start by loading the calibration file from the first video's parent directory and logging it ONLY if ego
-    perspective: str = video_entries[0].source_path.parent.name
-    assert perspective in {"exo", "ego"}, f"Unexpected perspective directory name: {perspective}"
+    source_path: Path = video_entries[0].source_path
+    perspective: str | None = next(
+        (parent.name for parent in source_path.parents if parent.name in {"exo", "ego"}),
+        None,
+    )
+    assert perspective is not None, f"Expected 'exo' or 'ego' in parent directories for source video: {source_path}"
+    perspective = cast(str, perspective)
 
     if perspective == "ego":
         calibration_json_path: Path = video_entries[0].source_path.parent / "calibration.json"
@@ -851,7 +862,7 @@ def ingest_video_directory(
         tqdm(video_entries, desc=progress_label, leave=False),
     )
     for idx, entry in enumerate(iterable_entries):
-        if video_entries[0].source_path.parent.name == "ego":
+        if perspective == "ego":
             pinhole: PinholeParameters = pinhole_param_list[idx]
             assert pinhole.name.lower() in entry.camera_log_path.name.lower(), (
                 f"Camera name mismatch: pinhole '{pinhole.name}' vs. entry '{entry.camera_log_path.name}'"
@@ -989,7 +1000,7 @@ def align_oak_to_quest(
             oak_ref_T_cam: Float[ndarray, "4 4"] = oak_ref_T_world @ world_T_cam_raw
             # add a translation offset between the quest and oak rigs
             offset_T_cam: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
-            offset_T_cam[:3, 3] = np.array([0.0, -0.3, 0.0], dtype=np.float32)
+            offset_T_cam[:3, 3] = np.array([0.0, -0.03, 0.0], dtype=np.float32)
             cam_T_offset: Float[ndarray, "4 4"] = np.linalg.inv(offset_T_cam)
             oak_ref_T_cam = oak_ref_T_cam @ cam_T_offset
             # world_T_cam_aligned: replace the oak reference origin with quest reference pose
