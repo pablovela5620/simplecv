@@ -25,6 +25,106 @@ from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.umetrack_temp.generic_hand_model_numpy import LANDMARK
 
 
+# ---- Quest body skeleton metadata ----
+
+_QUEST_BODY_JOINT_NAMES: tuple[str, ...] = (
+    "root",
+    "hips",
+    "spine_lower",
+    "spine_middle",
+    "spine_upper",
+    "chest",
+    "neck",
+    "head",
+    "left_shoulder",
+    "left_scapula",
+    "left_arm_upper",
+    "left_arm_lower",
+    "left_hand_wrist_twist",
+    "right_shoulder",
+    "right_scapula",
+    "right_arm_upper",
+    "right_arm_lower",
+    "right_hand_wrist_twist",
+    "left_upper_leg",
+    "left_lower_leg",
+    "left_foot_ankle_twist",
+    "left_foot_ankle",
+    "left_foot_subtalar",
+    "left_foot_transverse",
+    "left_foot_ball",
+    "right_upper_leg",
+    "right_lower_leg",
+    "right_foot_ankle_twist",
+    "right_foot_ankle",
+    "right_foot_subtalar",
+    "right_foot_transverse",
+    "right_foot_ball",
+)
+
+_QUEST_BODY_NAME_TO_IDX: dict[str, int] = {name: idx for idx, name in enumerate(_QUEST_BODY_JOINT_NAMES)}
+
+_QUEST_BODY_LINK_NAMES: tuple[tuple[str, str], ...] = (
+    ("root", "hips"),
+    ("hips", "spine_lower"),
+    ("spine_lower", "spine_middle"),
+    ("spine_middle", "spine_upper"),
+    ("spine_upper", "chest"),
+    ("chest", "neck"),
+    ("neck", "head"),
+    ("chest", "left_shoulder"),
+    ("left_shoulder", "left_scapula"),
+    ("left_scapula", "left_arm_upper"),
+    ("left_arm_upper", "left_arm_lower"),
+    ("left_arm_lower", "left_hand_wrist_twist"),
+    ("chest", "right_shoulder"),
+    ("right_shoulder", "right_scapula"),
+    ("right_scapula", "right_arm_upper"),
+    ("right_arm_upper", "right_arm_lower"),
+    ("right_arm_lower", "right_hand_wrist_twist"),
+    ("hips", "left_upper_leg"),
+    ("left_upper_leg", "left_lower_leg"),
+    ("left_lower_leg", "left_foot_ankle_twist"),
+    ("left_foot_ankle_twist", "left_foot_ankle"),
+    ("left_foot_ankle", "left_foot_subtalar"),
+    ("left_foot_subtalar", "left_foot_transverse"),
+    ("left_foot_transverse", "left_foot_ball"),
+    ("hips", "right_upper_leg"),
+    ("right_upper_leg", "right_lower_leg"),
+    ("right_lower_leg", "right_foot_ankle_twist"),
+    ("right_foot_ankle_twist", "right_foot_ankle"),
+    ("right_foot_ankle", "right_foot_subtalar"),
+    ("right_foot_subtalar", "right_foot_transverse"),
+    ("right_foot_transverse", "right_foot_ball"),
+)
+
+_QUEST_BODY_LINKS: tuple[tuple[int, int], ...] = tuple(
+    (_QUEST_BODY_NAME_TO_IDX[src], _QUEST_BODY_NAME_TO_IDX[dst]) for src, dst in _QUEST_BODY_LINK_NAMES
+)
+
+_QUEST_BODY_KEYPOINT_IDS: list[int] = list(range(len(_QUEST_BODY_JOINT_NAMES)))
+_QUEST_BODY_CLASS_ID: int = 1
+
+# Map a subset of Quest body joints into COCO-133 IDs so body logging can share the same stream
+_QUEST_BODY_TO_COCO_ID: dict[str, int] = {
+    # Torso/shoulders: use scapula joints for proper lateral spread
+    "left_scapula": 5,
+    "right_scapula": 6,
+    # Arms
+    "left_arm_lower": 7,  # elbow
+    "right_arm_lower": 8,  # elbow
+    "left_hand_wrist_twist": 9,  # wrist
+    "right_hand_wrist_twist": 10,  # wrist
+    # Legs
+    "left_upper_leg": 11,  # hip
+    "right_upper_leg": 12,  # hip
+    "left_lower_leg": 13,  # knee
+    "right_lower_leg": 14,  # knee
+    "left_foot_ankle": 15,  # ankle
+    "right_foot_ankle": 16,  # ankle
+}
+
+
 class QuestHandLandmark(IntEnum):
     """Quest 3 + Oak-D hand keypoint indices following the CSV column ordering."""
 
@@ -321,6 +421,274 @@ class QuestHandDictRow:
     """Little fingertip Z coordinate in meters."""
 
 
+@serde(type_check=coerce)
+class QuestBodyDictRow:
+    """Raw CSV row for Quest 3 + Oak-D full-body poses (32 joints)."""
+
+    ts_ns: int = serde_field(rename="ts_ns")
+    """Capture timestamp measured in nanoseconds from recording start."""
+
+    # Spine / torso
+    root_x: float
+    root_y: float
+    root_z: float
+    root_qx: float
+    root_qy: float
+    root_qz: float
+    root_qw: float
+
+    hips_x: float
+    hips_y: float
+    hips_z: float
+    hips_qx: float
+    hips_qy: float
+    hips_qz: float
+    hips_qw: float
+
+    spine_lower_x: float
+    spine_lower_y: float
+    spine_lower_z: float
+    spine_lower_qx: float
+    spine_lower_qy: float
+    spine_lower_qz: float
+    spine_lower_qw: float
+
+    spine_middle_x: float
+    spine_middle_y: float
+    spine_middle_z: float
+    spine_middle_qx: float
+    spine_middle_qy: float
+    spine_middle_qz: float
+    spine_middle_qw: float
+
+    spine_upper_x: float
+    spine_upper_y: float
+    spine_upper_z: float
+    spine_upper_qx: float
+    spine_upper_qy: float
+    spine_upper_qz: float
+    spine_upper_qw: float
+
+    chest_x: float
+    chest_y: float
+    chest_z: float
+    chest_qx: float
+    chest_qy: float
+    chest_qz: float
+    chest_qw: float
+
+    neck_x: float
+    neck_y: float
+    neck_z: float
+    neck_qx: float
+    neck_qy: float
+    neck_qz: float
+    neck_qw: float
+
+    head_x: float
+    head_y: float
+    head_z: float
+    head_qx: float
+    head_qy: float
+    head_qz: float
+    head_qw: float
+
+    # Left arm chain
+    left_shoulder_x: float
+    left_shoulder_y: float
+    left_shoulder_z: float
+    left_shoulder_qx: float
+    left_shoulder_qy: float
+    left_shoulder_qz: float
+    left_shoulder_qw: float
+
+    left_scapula_x: float
+    left_scapula_y: float
+    left_scapula_z: float
+    left_scapula_qx: float
+    left_scapula_qy: float
+    left_scapula_qz: float
+    left_scapula_qw: float
+
+    left_arm_upper_x: float
+    left_arm_upper_y: float
+    left_arm_upper_z: float
+    left_arm_upper_qx: float
+    left_arm_upper_qy: float
+    left_arm_upper_qz: float
+    left_arm_upper_qw: float
+
+    left_arm_lower_x: float
+    left_arm_lower_y: float
+    left_arm_lower_z: float
+    left_arm_lower_qx: float
+    left_arm_lower_qy: float
+    left_arm_lower_qz: float
+    left_arm_lower_qw: float
+
+    left_hand_wrist_twist_x: float
+    left_hand_wrist_twist_y: float
+    left_hand_wrist_twist_z: float
+    left_hand_wrist_twist_qx: float
+    left_hand_wrist_twist_qy: float
+    left_hand_wrist_twist_qz: float
+    left_hand_wrist_twist_qw: float
+
+    # Right arm chain
+    right_shoulder_x: float
+    right_shoulder_y: float
+    right_shoulder_z: float
+    right_shoulder_qx: float
+    right_shoulder_qy: float
+    right_shoulder_qz: float
+    right_shoulder_qw: float
+
+    right_scapula_x: float
+    right_scapula_y: float
+    right_scapula_z: float
+    right_scapula_qx: float
+    right_scapula_qy: float
+    right_scapula_qz: float
+    right_scapula_qw: float
+
+    right_arm_upper_x: float
+    right_arm_upper_y: float
+    right_arm_upper_z: float
+    right_arm_upper_qx: float
+    right_arm_upper_qy: float
+    right_arm_upper_qz: float
+    right_arm_upper_qw: float
+
+    right_arm_lower_x: float
+    right_arm_lower_y: float
+    right_arm_lower_z: float
+    right_arm_lower_qx: float
+    right_arm_lower_qy: float
+    right_arm_lower_qz: float
+    right_arm_lower_qw: float
+
+    right_hand_wrist_twist_x: float
+    right_hand_wrist_twist_y: float
+    right_hand_wrist_twist_z: float
+    right_hand_wrist_twist_qx: float
+    right_hand_wrist_twist_qy: float
+    right_hand_wrist_twist_qz: float
+    right_hand_wrist_twist_qw: float
+
+    # Left leg chain
+    left_upper_leg_x: float
+    left_upper_leg_y: float
+    left_upper_leg_z: float
+    left_upper_leg_qx: float
+    left_upper_leg_qy: float
+    left_upper_leg_qz: float
+    left_upper_leg_qw: float
+
+    left_lower_leg_x: float
+    left_lower_leg_y: float
+    left_lower_leg_z: float
+    left_lower_leg_qx: float
+    left_lower_leg_qy: float
+    left_lower_leg_qz: float
+    left_lower_leg_qw: float
+
+    left_foot_ankle_twist_x: float
+    left_foot_ankle_twist_y: float
+    left_foot_ankle_twist_z: float
+    left_foot_ankle_twist_qx: float
+    left_foot_ankle_twist_qy: float
+    left_foot_ankle_twist_qz: float
+    left_foot_ankle_twist_qw: float
+
+    left_foot_ankle_x: float
+    left_foot_ankle_y: float
+    left_foot_ankle_z: float
+    left_foot_ankle_qx: float
+    left_foot_ankle_qy: float
+    left_foot_ankle_qz: float
+    left_foot_ankle_qw: float
+
+    left_foot_subtalar_x: float
+    left_foot_subtalar_y: float
+    left_foot_subtalar_z: float
+    left_foot_subtalar_qx: float
+    left_foot_subtalar_qy: float
+    left_foot_subtalar_qz: float
+    left_foot_subtalar_qw: float
+
+    left_foot_transverse_x: float
+    left_foot_transverse_y: float
+    left_foot_transverse_z: float
+    left_foot_transverse_qx: float
+    left_foot_transverse_qy: float
+    left_foot_transverse_qz: float
+    left_foot_transverse_qw: float
+
+    left_foot_ball_x: float
+    left_foot_ball_y: float
+    left_foot_ball_z: float
+    left_foot_ball_qx: float
+    left_foot_ball_qy: float
+    left_foot_ball_qz: float
+    left_foot_ball_qw: float
+
+    # Right leg chain
+    right_upper_leg_x: float
+    right_upper_leg_y: float
+    right_upper_leg_z: float
+    right_upper_leg_qx: float
+    right_upper_leg_qy: float
+    right_upper_leg_qz: float
+    right_upper_leg_qw: float
+
+    right_lower_leg_x: float
+    right_lower_leg_y: float
+    right_lower_leg_z: float
+    right_lower_leg_qx: float
+    right_lower_leg_qy: float
+    right_lower_leg_qz: float
+    right_lower_leg_qw: float
+
+    right_foot_ankle_twist_x: float
+    right_foot_ankle_twist_y: float
+    right_foot_ankle_twist_z: float
+    right_foot_ankle_twist_qx: float
+    right_foot_ankle_twist_qy: float
+    right_foot_ankle_twist_qz: float
+    right_foot_ankle_twist_qw: float
+
+    right_foot_ankle_x: float
+    right_foot_ankle_y: float
+    right_foot_ankle_z: float
+    right_foot_ankle_qx: float
+    right_foot_ankle_qy: float
+    right_foot_ankle_qz: float
+    right_foot_ankle_qw: float
+
+    right_foot_subtalar_x: float
+    right_foot_subtalar_y: float
+    right_foot_subtalar_z: float
+    right_foot_subtalar_qx: float
+    right_foot_subtalar_qy: float
+    right_foot_subtalar_qz: float
+    right_foot_subtalar_qw: float
+
+    right_foot_transverse_x: float
+    right_foot_transverse_y: float
+    right_foot_transverse_z: float
+    right_foot_transverse_qx: float
+    right_foot_transverse_qy: float
+    right_foot_transverse_qz: float
+    right_foot_transverse_qw: float
+
+    right_foot_ball_x: float
+    right_foot_ball_y: float
+    right_foot_ball_z: float
+    right_foot_ball_qx: float
+    right_foot_ball_qy: float
+    right_foot_ball_qz: float
+    right_foot_ball_qw: float
+
 @dataclass
 class QuestHandPoseSample:
     """Single Quest hand pose sample containing timestamp and 3D landmarks."""
@@ -349,6 +717,41 @@ class QuestHandPoseSequence:
             yield QuestHandPoseSample(
                 timestamp_ns=int(self.timestamps_ns[frame_idx]),
                 keypoints_m=keypoints_frame,
+            )
+
+
+@dataclass
+class QuestBodyPoseSample:
+    """Single Quest full-body pose sample containing timestamped joint data."""
+
+    timestamp_ns: int
+    """Relative timestamp, in nanoseconds from the recording start."""
+    joint_positions_m: Float32[ndarray, "n_body_joints=32 3"]
+    """Per-joint world-space positions expressed in meters."""
+    joint_rotations_xyzw: Float32[ndarray, "n_body_joints=32 4"]
+    """Per-joint world-space orientations as ``(x, y, z, w)`` quaternions."""
+
+
+@dataclass
+class QuestBodyPoseSequence:
+    """Sequence of Quest full-body poses parsed from the Quest CSV export."""
+
+    timestamps_ns: Int64[ndarray, "n_frames"]
+    """Monotonic capture timestamps for each frame, measured in nanoseconds."""
+    joint_positions_m: Float32[ndarray, "n_frames n_body_joints=32 3"]
+    """Stack of joint positions per frame, measured in meters."""
+    joint_rotations_xyzw: Float32[ndarray, "n_frames n_body_joints=32 4"]
+    """Stack of joint quaternions per frame, stored as ``(x, y, z, w)``."""
+
+    def __len__(self) -> int:
+        return int(self.timestamps_ns.shape[0])
+
+    def __iter__(self) -> Iterator[QuestBodyPoseSample]:
+        for frame_idx in range(len(self)):
+            yield QuestBodyPoseSample(
+                timestamp_ns=int(self.timestamps_ns[frame_idx]),
+                joint_positions_m=self.joint_positions_m[frame_idx],
+                joint_rotations_xyzw=self.joint_rotations_xyzw[frame_idx],
             )
 
 
@@ -534,6 +937,104 @@ def load_hand_sequence(csv_path: Path) -> QuestHandPoseSequence:
     return sequence
 
 
+def load_body_sequence(csv_path: Path) -> QuestBodyPoseSequence:
+    """Load Quest 3 full-body joints from the CSV export."""
+
+    if not csv_path.exists():
+        raise FileNotFoundError(csv_path)
+
+    with csv_path.open(encoding="utf-8", newline="") as file:
+        reader: DictReader[str] = DictReader(file)
+        samples: list[QuestBodyPoseSample] = []
+        for row_dict in reader:
+            if not row_dict or all(value == "" for value in row_dict.values()):
+                continue
+
+            sample_row: QuestBodyDictRow = from_dict(QuestBodyDictRow, row_dict)
+            timestamp_ns: int = int(sample_row.ts_ns)
+
+            positions_list: list[tuple[float, float, float]] = []
+            rotations_list: list[tuple[float, float, float, float]] = []
+            for joint_name in _QUEST_BODY_JOINT_NAMES:
+                pos: tuple[float, float, float] = (
+                    getattr(sample_row, f"{joint_name}_x"),
+                    getattr(sample_row, f"{joint_name}_y"),
+                    getattr(sample_row, f"{joint_name}_z"),
+                )
+                rot: tuple[float, float, float, float] = (
+                    getattr(sample_row, f"{joint_name}_qx"),
+                    getattr(sample_row, f"{joint_name}_qy"),
+                    getattr(sample_row, f"{joint_name}_qz"),
+                    getattr(sample_row, f"{joint_name}_qw"),
+                )
+                positions_list.append(pos)
+                rotations_list.append(rot)
+
+            joint_positions_m: Float32[ndarray, "n_body_joints=32 3"] = np.array(positions_list, dtype=np.float32)
+            joint_rotations_xyzw: Float32[ndarray, "n_body_joints=32 4"] = np.array(
+                rotations_list,
+                dtype=np.float32,
+            )
+            samples.append(
+                QuestBodyPoseSample(
+                    timestamp_ns=timestamp_ns,
+                    joint_positions_m=joint_positions_m,
+                    joint_rotations_xyzw=joint_rotations_xyzw,
+                )
+            )
+
+    if not samples:
+        raise ValueError(f"CSV file {csv_path} does not contain any pose rows.")
+
+    timestamps_ns: Int64[ndarray, "n_frames"] = np.asarray(
+        [sample.timestamp_ns for sample in samples],
+        dtype=np.int64,
+    )
+    joint_positions_stack: Float32[ndarray, "n_frames n_body_joints=32 3"] = np.stack(
+        [sample.joint_positions_m for sample in samples],
+        axis=0,
+    )
+    joint_rotations_stack: Float32[ndarray, "n_frames n_body_joints=32 4"] = np.stack(
+        [sample.joint_rotations_xyzw for sample in samples],
+        axis=0,
+    )
+
+    timestamps_ns = timestamps_ns - int(timestamps_ns[0])
+
+    zero_mask_body: Bool[ndarray, "n_frames n_body_joints=32"] = np.asarray(
+        np.isclose(joint_positions_stack, 0.0, atol=1e-6).all(axis=-1),
+        dtype=bool,
+    )
+    joint_positions_stack[zero_mask_body] = np.nan
+
+    return QuestBodyPoseSequence(
+        timestamps_ns=timestamps_ns,
+        joint_positions_m=joint_positions_stack,
+        joint_rotations_xyzw=joint_rotations_stack,
+    )
+
+
+def _resample_body_sequence(
+    *,
+    sequence: QuestBodyPoseSequence,
+    target_timestamps_ns: Int64[ndarray, "n_target"],
+) -> QuestBodyPoseSequence:
+    source_timestamps_ns: Int64[ndarray, "n_source"] = sequence.timestamps_ns.astype(np.int64, copy=False)
+    indices: Int64[ndarray, "n_target"] = _nearest_sample_indices(
+        source_timestamps_ns=source_timestamps_ns,
+        target_timestamps_ns=target_timestamps_ns,
+    )
+
+    positions_resampled: Float32[ndarray, "n_target n_body_joints=32 3"] = sequence.joint_positions_m[indices]
+    rotations_resampled: Float32[ndarray, "n_target n_body_joints=32 4"] = sequence.joint_rotations_xyzw[indices]
+
+    return QuestBodyPoseSequence(
+        timestamps_ns=target_timestamps_ns.astype(np.int64, copy=False),
+        joint_positions_m=positions_resampled.astype(np.float32, copy=False),
+        joint_rotations_xyzw=rotations_resampled.astype(np.float32, copy=False),
+    )
+
+
 @dataclass(slots=True)
 class QuestHeadExtrinsicsSample:
     """Quest head pose extrinsics accompanied by capture timestamp."""
@@ -546,18 +1047,18 @@ class QuestHeadExtrinsicsSample:
     """Camera-to-world pose describing the right-eye tracking camera."""
 
 
-def _log_coco_annotation_context() -> None:
+def _log_annotation_context() -> None:
+    coco_description: ClassDescription = ClassDescription(
+        info=AnnotationInfo(id=0, label="COCO Wholebody", color=(0, 0, 255)),
+        keypoint_annotations=[AnnotationInfo(id=kpt_id, label=COCO_133_ID2NAME[kpt_id]) for kpt_id in COCO_133_IDS],
+        keypoint_connections=COCO_133_LINKS,
+    )
+
     rr.log(
         "/",
         rr.AnnotationContext(
             [
-                ClassDescription(
-                    info=AnnotationInfo(id=0, label="COCO Wholebody", color=(0, 0, 255)),
-                    keypoint_annotations=[
-                        AnnotationInfo(id=kpt_id, label=COCO_133_ID2NAME[kpt_id]) for kpt_id in COCO_133_IDS
-                    ],
-                    keypoint_connections=COCO_133_LINKS,
-                )
+                coco_description,
             ]
         ),
         static=True,
@@ -568,6 +1069,7 @@ def _log_coco133_annotations(
     *,
     left_sequence: QuestHandPoseSequence,
     right_sequence: QuestHandPoseSequence,
+    body_sequence: QuestBodyPoseSequence,
     head_extrinsics: Sequence[QuestHeadExtrinsicsSample],
     left_intrinsics: Intrinsics,
     right_intrinsics: Intrinsics,
@@ -577,7 +1079,7 @@ def _log_coco133_annotations(
 ) -> None:
     left_keypoints: Float32[ndarray, "n_frames_left 21 3"] = left_sequence.keypoints_m[:, LANDMARK_TO_QUEST_INDEX]
     right_keypoints: Float32[ndarray, "n_frames_right 21 3"] = right_sequence.keypoints_m[:, LANDMARK_TO_QUEST_INDEX]
-    frame_count: int = min(len(head_extrinsics), left_keypoints.shape[0], right_keypoints.shape[0])
+    frame_count: int = min(len(head_extrinsics), left_keypoints.shape[0], right_keypoints.shape[0], len(body_sequence))
     if frame_count == 0:
         return
 
@@ -592,7 +1094,21 @@ def _log_coco133_annotations(
             ),
             axis=0,
         )
+        # Start with hands mapped into COCO-133
         coco_frame: Float32[ndarray, "133 4"] = assembly21_to_coco133(kpts_lr)
+
+        # Overlay body joints into the same COCO frame (only if missing)
+        body_positions: Float32[ndarray, "n_body_joints=32 3"] = body_sequence.joint_positions_m[frame_idx]
+        for joint_name, coco_id in _QUEST_BODY_TO_COCO_ID.items():
+            joint_idx: int = _QUEST_BODY_NAME_TO_IDX[joint_name]
+            xyz: Float32[ndarray, "3"] = body_positions[joint_idx]
+            if np.isnan(xyz).any():
+                continue
+            current_conf: float = float(coco_frame[coco_id, 3])
+            if current_conf == 0.0 or np.isnan(current_conf):
+                coco_frame[coco_id, :3] = xyz
+                coco_frame[coco_id, 3] = np.float32(1.0)
+
         positions: Float32[ndarray, "133 3"] = coco_frame[:, :3]
         confidences: Float32[ndarray, "133"] = np.nan_to_num(coco_frame[:, 3], nan=0.0).astype(np.float32, copy=False)
         invalid_mask: Bool[ndarray, "133"] = np.asarray(np.isnan(positions).any(axis=1), dtype=bool)
@@ -608,7 +1124,7 @@ def _log_coco133_annotations(
                 keypoint_ids=COCO_133_IDS,
                 show_labels=False,
             ),
-        )
+            )
 
         head_sample: QuestHeadExtrinsicsSample = head_extrinsics[frame_idx]
         left_pinhole: PinholeParameters = PinholeParameters(
@@ -626,33 +1142,35 @@ def _log_coco133_annotations(
             (quest_left_cam_path, left_pinhole),
             (quest_right_cam_path, right_pinhole),
         ):
-            _log_coco133_uv(
+            _log_projected_keypoints(
                 camera_path=cam_path,
                 pinhole_param=pinhole_param,
                 positions=positions,
                 confidences=confidences,
+                keypoint_ids=COCO_133_IDS,
+                class_id=0,
+                entity_suffix="coco133_uv",
             )
 
 
-def _log_coco133_uv(
+def _log_projected_keypoints(
     *,
     camera_path: Path,
     pinhole_param: PinholeParameters,
-    positions: Float32[ndarray, "133 3"],
-    confidences: Float32[ndarray, "133"],
+    positions: Float32[ndarray, "n_kpts 3"],
+    confidences: Float32[ndarray, "n_kpts"],
+    keypoint_ids: Sequence[int],
+    class_id: int,
+    entity_suffix: str,
 ) -> None:
-    """Project COCO-133 joints into a camera view and stream them to Rerun.
+    """Project 3D joints into a camera view and stream them to Rerun."""
 
-    Args:
-        camera_path: Entity root (e.g., ``/world/ego/quest3_left``) receiving
-            the 2D annotations.
-        pinhole_param: Camera model used for projection.
-        positions: 3D keypoints expressed in the world frame.
-        confidences: Per-joint confidence vector used for coloring/filtering.
-    """
-    uv_positions: Float32[ndarray, "133 2"] = np.full((positions.shape[0], 2), np.nan, dtype=np.float32)
-    uv_confidences: Float32[ndarray, "133"] = np.zeros_like(confidences, dtype=np.float32)
-    valid_mask: Bool[ndarray, "133"] = (~np.isnan(positions).any(axis=1)) & (confidences > 0.0)
+    if len(keypoint_ids) != positions.shape[0]:
+        raise ValueError("Keypoint ID list must match number of positions provided.")
+
+    uv_positions: Float32[ndarray, "n_kpts 2"] = np.full((positions.shape[0], 2), np.nan, dtype=np.float32)
+    uv_confidences: Float32[ndarray, "n_kpts"] = np.zeros_like(confidences, dtype=np.float32)
+    valid_mask: Bool[ndarray, "n_kpts"] = (~np.isnan(positions).any(axis=1)) & (confidences > 0.0)
     valid_indices_all: Int[ndarray, "n_valid"] = np.flatnonzero(valid_mask)
     if valid_indices_all.size > 0:
         xyz_hom_valid: Float32[ndarray, "n_valid 4"] = np.concatenate(
@@ -684,15 +1202,16 @@ def _log_coco133_uv(
             uv_confidences[final_indices] = confidences[final_indices]
 
     rr.log(
-        str(camera_path / "pinhole" / "coco133_uv"),
+        str(camera_path / "pinhole" / entity_suffix),
         Points2DWithConfidence(
             positions=uv_positions,
             confidences=uv_confidences,
-            class_ids=0,
-            keypoint_ids=COCO_133_IDS,
+            class_ids=class_id,
+            keypoint_ids=list(keypoint_ids),
             show_labels=False,
         ),
     )
+
 
 
 @serde(type_check=coerce)
@@ -978,6 +1497,7 @@ def load_and_log_quest_data(
     left_csv: Path = data_root / "quest" / "left_hand_poses.csv"
     right_csv: Path = data_root / "quest" / "right_hand_poses.csv"
     head_csv: Path = data_root / "quest" / "head_pose.csv"
+    body_csv: Path = data_root / "quest" / "body_poses.csv"
     calibration_json: Path = data_root / "quest" / "calibration.json"
     left_video_path: Path = data_root / "quest" / "left.mp4"
     right_video_path: Path = data_root / "quest" / "right.mp4"
@@ -989,19 +1509,22 @@ def load_and_log_quest_data(
         raise FileNotFoundError(head_csv)
     if not calibration_json.exists():
         raise FileNotFoundError(calibration_json)
+    if not body_csv.exists():
+        raise FileNotFoundError(body_csv)
     if not left_video_path.exists():
         raise FileNotFoundError(left_video_path)
     if not right_video_path.exists():
         raise FileNotFoundError(right_video_path)
 
     head_extrinsics: list[QuestHeadExtrinsicsSample] = load_head_sequence(head_csv)
+    body_sequence_raw: QuestBodyPoseSequence = load_body_sequence(body_csv)
     left_intrinsics: Intrinsics = load_camera_intrinsics(calibration_json, positional_layout="left")
     right_intrinsics: Intrinsics = load_camera_intrinsics(calibration_json, positional_layout="right")
 
     quest_left_cam_path: Path = Path("/world/ego/quest3_left")
     quest_right_cam_path: Path = Path("/world/ego/quest3_right")
 
-    _log_coco_annotation_context()
+    _log_annotation_context()
 
     _left_video_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
         video_path=left_video_path,
@@ -1024,6 +1547,11 @@ def load_and_log_quest_data(
     # tracker samples to guarantee one keypoint/extrinsic per video frame.
     resampled_head_extrinsics: list[QuestHeadExtrinsicsSample] = _resample_head_extrinsics(
         samples=head_extrinsics,
+        target_timestamps_ns=quest_video_timestamps_ns,
+    )
+
+    body_sequence: QuestBodyPoseSequence = _resample_body_sequence(
+        sequence=body_sequence_raw,
         target_timestamps_ns=quest_video_timestamps_ns,
     )
 
@@ -1058,6 +1586,7 @@ def load_and_log_quest_data(
     _log_coco133_annotations(
         left_sequence=sequence_map[QuestHandSide.LEFT],
         right_sequence=sequence_map[QuestHandSide.RIGHT],
+        body_sequence=body_sequence,
         head_extrinsics=resampled_head_extrinsics,
         left_intrinsics=left_intrinsics,
         right_intrinsics=right_intrinsics,
