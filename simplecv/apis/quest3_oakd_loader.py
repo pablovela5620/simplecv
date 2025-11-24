@@ -595,7 +595,7 @@ def _log_coco133_annotations(
         coco_frame: Float32[ndarray, "133 4"] = assembly21_to_coco133(kpts_lr)
         positions: Float32[ndarray, "133 3"] = coco_frame[:, :3]
         confidences: Float32[ndarray, "133"] = np.nan_to_num(coco_frame[:, 3], nan=0.0).astype(np.float32, copy=False)
-        invalid_mask: Bool[ndarray, "133"] = np.isnan(positions).any(axis=1)
+        invalid_mask: Bool[ndarray, "133"] = np.asarray(np.isnan(positions).any(axis=1), dtype=bool)
         confidences[invalid_mask] = np.float32(0.0)
 
         rr.set_time(timeline, duration=np.timedelta64(timestamp_ns, "ns"))
@@ -916,9 +916,10 @@ def _log_head_cameras(
     left_cam_path: Path,
     right_cam_path: Path,
     timeline: str = "video_time",
-) -> None:
+) -> list[PinholeParameters]:
     """Log Quest head cameras over time using the provided intrinsics and extrinsics."""
 
+    left_pinhole_list: list[PinholeParameters] = []
     for sample in samples:
         rr.set_time(timeline, duration=np.timedelta64(sample.timestamp_ns, "ns"))
 
@@ -934,6 +935,7 @@ def _log_head_cameras(
             static=False,
             image_plane_distance=0.05,
         )
+        left_pinhole_list.append(left_camera_params)
 
         # Right eye camera
         right_camera_params: PinholeParameters = PinholeParameters(
@@ -947,9 +949,12 @@ def _log_head_cameras(
             static=False,
             image_plane_distance=0.05,
         )
+    return left_pinhole_list
 
 
-def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "video_time") -> list[Path]:
+def load_and_log_quest_data(
+    config: Quest3VisualizeConfig, *, timeline: str = "video_time"
+) -> tuple[list[Path], list[PinholeParameters], Int64[ndarray, "n_frames"]]:
     """Ingest Quest3+OAK data, log resampled tracks, and return pinhole roots.
 
     Args:
@@ -961,6 +966,8 @@ def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "v
     Returns:
         list[Path]: ``/world/ego/quest3_left/right`` pinhole entity roots so
         callers can embed them inside a blueprint.
+        list[PinholeParameters]: Logged pinhole parameters for the left head cameras.
+        Int64[ndarray, "n_frames"]: Timestamps for each video frame in nanoseconds.
     """
     data_root: Path = config.data_dir
     if not data_root.exists():
@@ -1037,7 +1044,7 @@ def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "v
         target_timestamps_ns=quest_video_timestamps_ns,
     )
 
-    _log_head_cameras(
+    left_pinhole_list: list[PinholeParameters] = _log_head_cameras(
         resampled_head_extrinsics,
         left_intrinsics=left_intrinsics,
         right_intrinsics=right_intrinsics,
@@ -1061,7 +1068,7 @@ def load_and_log_quest_data(config: Quest3VisualizeConfig, *, timeline: str = "v
         quest_left_cam_path / "pinhole",
         quest_right_cam_path / "pinhole",
     ]
-    return quest_pinhole_paths
+    return quest_pinhole_paths, left_pinhole_list, quest_video_timestamps_ns
 
 
 def main(config: Quest3VisualizeConfig) -> None:

@@ -10,7 +10,7 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import tyro
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from natsort import natsorted
 from numpy import ndarray
 from rerun.blueprint import ContainerLike
@@ -767,9 +767,7 @@ def collect_video_entries(
 ) -> list[VideoIngestEntry]:
     """Gather source/log path pairs for every MP4/MOV inside ``video_dir``."""
 
-    all_candidates: list[Path] = natsorted(
-        [*video_dir.glob("*.mp4"), *video_dir.glob("*.mov")]
-    )
+    all_candidates: list[Path] = natsorted([*video_dir.glob("*.mp4"), *video_dir.glob("*.mov")])
     assert all_candidates, f"No .mp4 or .mov files found in directory: {video_dir}"
 
     # Deduplicate by stem while preferring .mov when both exist.
@@ -800,11 +798,11 @@ def ingest_video_directory(
     verbose: bool,
     progress_label: str,
     reencode_to_av1: bool,
-) -> list[Path]:
+) -> tuple[list[Path], list[PinholeParameters]]:
     """Ingest the provided videos ensuring uniform encoding and resolution constraints.
 
     Returns:
-        list[Path]: Entity paths where the prepared videos were logged.
+        tuple[list[Path], list[PinholeParameters]]: Entity paths where the prepared videos were logged and the pinhole parameters.
     """
 
     assert video_entries, "No video entries provided for ingestion."
@@ -852,7 +850,7 @@ def ingest_video_directory(
             assert pinhole.name.lower() in entry.camera_log_path.name.lower(), (
                 f"Camera name mismatch: pinhole '{pinhole.name}' vs. entry '{entry.camera_log_path.name}'"
             )
-            log_pinhole(camera=pinhole, cam_log_path=entry.camera_log_path, static=True, image_plane_distance=0.05)
+            log_pinhole(camera=pinhole, cam_log_path=entry.camera_log_path, static=False, image_plane_distance=0.05)
         prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
             video_path=entry.source_path,
             verbose=verbose,
@@ -885,7 +883,7 @@ def ingest_video_directory(
         if should_cleanup:
             prepared_path.unlink(missing_ok=True)
 
-    return logged_video_entities
+    return logged_video_entities, pinhole_param_list
 
 
 def create_ingest_view(
@@ -900,7 +898,11 @@ def create_ingest_view(
     Paths should point to the `.../pinhole` entities that contain the actual video nodes.
     """
 
-    main_view = rrb.Spatial3DView(origin="/")
+    main_view = rrb.Spatial3DView(
+        origin="/",
+        line_grid=rrb.archetypes.LineGrid3D(visible=True),
+        spatial_information=rrb.SpatialInformation(show_axes=True),
+    )
 
     combined_ego_paths: list[Path] = []
     if ego_video_log_paths:
@@ -941,6 +943,70 @@ def create_ingest_view(
     return main_view
 
 
+def align_oak_to_quest(
+    quest_left_pinholes: list[PinholeParameters],
+    static_ego_pinholes: list[PinholeParameters],
+    quest_timestamps_ns: Int[ndarray, "num_frames"],
+    timeline: str = "video_time",
+) -> None:
+    """Anchor static OAK pinholes to the per-frame Quest reference cameras.
+
+    Args:
+        quest_left_pinholes: Sequence of Quest *left* pinholes ordered per video
+            frame; each element carries the time-varying extrinsics of the Quest
+            left capture camera across the recording.
+        static_ego_pinholes: Small set of OAK pinholes (currently left/rgb/right)
+            whose intrinsics are fixed and whose extrinsics are constant in the
+            raw calibration. This helper will reinterpret those OAK cameras so
+            their poses become dynamic—following the Quest-left trajectory—while
+            preserving the rigid layout between the OAK sensors themselves.
+        quest_timestamps_ns: Timestamps (in nanoseconds) for each frame of the ego
+            video, used to align with the Quest pinholes.
+
+    Notes:
+        Today ``static_ego_pinholes`` typically holds three cameras, but the
+        function is intentionally generic: any number of OAK sensors defined in
+        the static calibration can be re-expressed per frame to match the
+        Quest-left trajectory as long as their relative transforms remain rigid.
+    """
+    oak_left_cam: PinholeParameters = next(p for p in static_ego_pinholes if p.name.lower() == "left")
+    for ts_nano, quest_left_pinhole in zip(quest_timestamps_ns, quest_left_pinholes, strict=True):
+        ts_sec: float = float(ts_nano) * 1e-9
+        rr.set_time(timeline=timeline, duration=ts_sec)
+
+        world_T_quest_ref: Float[ndarray, "4 4"] = quest_left_pinhole.extrinsics.world_T_cam
+        oak_ref_T_world: Float[ndarray, "4 4"] = oak_left_cam.extrinsics.cam_T_world
+        for oak_pinhole in static_ego_pinholes:
+            # camera to world transform for oak sensor
+            world_T_cam_raw: Float[ndarray, "4 4"] = oak_pinhole.extrinsics.world_T_cam
+            # get the rigid offset from the oak reference camera
+            oak_ref_T_cam: Float[ndarray, "4 4"] = oak_ref_T_world @ world_T_cam_raw
+            # add a translation offset between the quest and oak rigs
+            offset_T_cam: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
+            offset_T_cam[:3, 3] = np.array([0.0, -0.3, 0.0], dtype=np.float32)
+            cam_T_offset: Float[ndarray, "4 4"] = np.linalg.inv(offset_T_cam)
+            oak_ref_T_cam = oak_ref_T_cam @ cam_T_offset
+            # world_T_cam_aligned: replace the oak reference origin with quest reference pose
+            # (world ← quest_ref) @ (quest_ref ≡ oak_ref ← cam)
+            world_T_cam_aligned: Float[ndarray, "4 4"] = world_T_quest_ref @ oak_ref_T_cam
+            # update pinhole and relog
+            new_extrinsics: Extrinsics = Extrinsics(
+                world_R_cam=world_T_cam_aligned[:3, :3], world_t_cam=world_T_cam_aligned[:3, 3]
+            )
+            new_oak_pinhole: PinholeParameters = PinholeParameters(
+                name=oak_pinhole.name,
+                intrinsics=oak_pinhole.intrinsics,
+                distortion=oak_pinhole.distortion,
+                extrinsics=new_extrinsics,
+            )
+            log_pinhole(
+                camera=new_oak_pinhole,
+                cam_log_path=Path(f"/world/ego/{oak_pinhole.name}"),
+                static=False,
+                image_plane_distance=0.05,
+            )
+
+
 def main(config: IngestConfig) -> None:
     validate_exoego_dir(config.exoego_dir)
     print(f"Ingesting data from {config.exoego_dir} to RRD at {config.exoego_dir}")
@@ -948,7 +1014,7 @@ def main(config: IngestConfig) -> None:
     parent_log_path: Path = Path("/world")
     timeline: str = "video_time"
     # set the coordinate system for the entire world
-    rr.log("/", rr.ViewCoordinates.RDF, static=True)
+    rr.log("/", rr.ViewCoordinates.RUB, static=True)
     # set time to 0 at the start of the timeline
     rr.set_time(timeline=timeline, duration=0)
     dir_tuple: tuple[Path | None, Path | None] = validate_exoego_dir(config.exoego_dir)
@@ -974,9 +1040,16 @@ def main(config: IngestConfig) -> None:
 
     quest_pinhole_paths: list[Path] | None = None
     quest_dir: Path = config.exoego_dir / "quest"
+    quest_left_pinhole_list: list[PinholeParameters] = []
+    quest_frame_timestamps_ns: Int[ndarray, "n_frames"] | None = None
     if quest_dir.exists():
         quest_config = Quest3VisualizeConfig(rr_config=config.rr_config, data_dir=config.exoego_dir)
-        quest_pinhole_paths = load_and_log_quest_data(quest_config, timeline=timeline)
+        quest_log_outputs: tuple[list[Path], list[PinholeParameters], Int[ndarray, "n_frames"]] = (
+            load_and_log_quest_data(quest_config, timeline=timeline)
+        )
+        quest_pinhole_paths: list[Path] | None = quest_log_outputs[0]
+        quest_left_pinhole_list: list[PinholeParameters] = quest_log_outputs[1]
+        quest_frame_timestamps_ns = quest_log_outputs[2]
 
     ingest_view: ContainerLike = create_ingest_view(
         exo_video_log_paths=[entry.pinhole_log_path for entry in exo_entries] or None,
@@ -996,13 +1069,25 @@ def main(config: IngestConfig) -> None:
 
     if ego_entries:
         # TODO make sure that the ego calibration is in meters not millimeters
-        ingest_video_directory(
+        ego_output_tuple: tuple[list[Path], list[PinholeParameters]] = ingest_video_directory(
             video_entries=ego_entries,
             timeline=timeline,
             verbose=config.verbose,
             progress_label="Ingesting ego videos",
             reencode_to_av1=config.reencode_to_av1,
         )
+        static_ego_pinhole_list: list[PinholeParameters] = ego_output_tuple[1]
+        # align the quest pinholes to the ego pinholes if both are present
+        if (
+            len(quest_left_pinhole_list) > 0
+            and len(static_ego_pinhole_list) > 0
+            and quest_frame_timestamps_ns is not None
+        ):
+            align_oak_to_quest(
+                quest_left_pinholes=quest_left_pinhole_list,
+                static_ego_pinholes=static_ego_pinhole_list,
+                quest_timestamps_ns=quest_frame_timestamps_ns,
+            )
 
 
 def entrypoint() -> None:
