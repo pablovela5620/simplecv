@@ -765,10 +765,22 @@ def collect_video_entries(
     *,
     log_root: Path,
 ) -> list[VideoIngestEntry]:
-    """Gather source/log path pairs for every MP4 inside ``video_dir``."""
+    """Gather source/log path pairs for every MP4/MOV inside ``video_dir``."""
 
-    all_video_paths: list[Path] = natsorted(video_dir.glob("*.mp4"))
-    assert all_video_paths, f"No .mp4 files found in directory: {video_dir}"
+    all_candidates: list[Path] = natsorted(
+        [*video_dir.glob("*.mp4"), *video_dir.glob("*.mov")]
+    )
+    assert all_candidates, f"No .mp4 or .mov files found in directory: {video_dir}"
+
+    # Deduplicate by stem while preferring .mov when both exist.
+    selected_by_stem: dict[str, Path] = {}
+    for path in all_candidates:
+        stem: str = path.stem
+        existing: Path | None = selected_by_stem.get(stem)
+        if existing is None or (existing.suffix.lower() != ".mp4" and path.suffix.lower() == ".mp4"):
+            selected_by_stem[stem] = path
+
+    all_video_paths: list[Path] = natsorted(selected_by_stem.values())
 
     video_entries: list[VideoIngestEntry] = [
         VideoIngestEntry(

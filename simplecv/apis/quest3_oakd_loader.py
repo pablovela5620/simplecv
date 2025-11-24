@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import warnings
 from collections.abc import Iterator, Sequence
@@ -17,7 +19,6 @@ from serde import field as serde_field
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
-from simplecv.ops import conventions
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
@@ -785,18 +786,6 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
             world_R_cam: Float32[ndarray, "3 3"] = _quaternion_xyzw_to_rotation_matrix(rotation_xyzw)
             world_t_cam: Float32[ndarray, "3"] = position_m
             left_extrinsics: Extrinsics = Extrinsics(world_R_cam=world_R_cam, world_t_cam=world_t_cam)
-            # Convert from OpenGL (RUB) to OpenCV (RDF) convention
-            world_T_cam_gl: Float32[np.ndarray, "4 4"] = left_extrinsics.world_T_cam.astype(np.float32)
-            world_T_cam_cv: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
-                world_T_cam_gl,
-                src_convention=conventions.CC.GL,
-                dst_convention=conventions.CC.CV,
-            )
-            left_translation_cv: Float32[ndarray, "3"] = world_T_cam_cv[:3, 3].astype(np.float32)
-            left_extrinsics: Extrinsics = Extrinsics(
-                world_R_cam=world_T_cam_cv[:3, :3],
-                world_t_cam=left_translation_cv,
-            )
 
             right_position_m: Float32[ndarray, "3"] = np.array(
                 [quest_row.right_pos_x, quest_row.right_pos_y, quest_row.right_pos_z],
@@ -809,19 +798,6 @@ def load_head_sequence(head_csv_path: Path) -> list[QuestHeadExtrinsicsSample]:
             right_world_R_cam: Float32[ndarray, "3 3"] = _quaternion_xyzw_to_rotation_matrix(right_rotation_xyzw)
             right_world_t_cam: Float32[ndarray, "3"] = right_position_m
             right_extrinsics: Extrinsics = Extrinsics(world_R_cam=right_world_R_cam, world_t_cam=right_world_t_cam)
-
-            # Convert from OpenGL (RUB) to OpenCV (RDF) convention
-            right_world_T_cam_gl: Float32[np.ndarray, "4 4"] = right_extrinsics.world_T_cam.astype(np.float32)
-            world_T_cam_cv: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
-                right_world_T_cam_gl,
-                src_convention=conventions.CC.GL,
-                dst_convention=conventions.CC.CV,
-            )
-            right_translation_cv: Float32[ndarray, "3"] = world_T_cam_cv[:3, 3].astype(np.float32)
-            right_extrinsics: Extrinsics = Extrinsics(
-                world_R_cam=world_T_cam_cv[:3, :3],
-                world_t_cam=right_translation_cv,
-            )
 
             timestamp_ns: int = int(quest_row.ts_ns)
             sample: QuestHeadExtrinsicsSample = QuestHeadExtrinsicsSample(
