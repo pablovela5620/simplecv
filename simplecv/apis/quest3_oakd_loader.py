@@ -1098,7 +1098,55 @@ def _log_coco133_annotations(
         coco_frame: Float32[ndarray, "133 4"] = assembly21_to_coco133(kpts_lr)
 
         # Overlay body joints into the same COCO frame (only if missing)
-        body_positions: Float32[ndarray, "n_body_joints=32 3"] = body_sequence.joint_positions_m[frame_idx]
+        body_positions: Float32[ndarray, "n_body_joints=32 3"] = body_sequence.joint_positions_m[frame_idx].copy()
+
+        # Widen shoulders to roughly match hip width for better visual alignment
+        left_sh_idx: int = _QUEST_BODY_NAME_TO_IDX["left_shoulder"]
+        right_sh_idx: int = _QUEST_BODY_NAME_TO_IDX["right_shoulder"]
+        left_sh: Float32[ndarray, "3"] = body_positions[left_sh_idx]
+        right_sh: Float32[ndarray, "3"] = body_positions[right_sh_idx]
+
+        left_hip_idx: int = _QUEST_BODY_NAME_TO_IDX["left_upper_leg"]
+        right_hip_idx: int = _QUEST_BODY_NAME_TO_IDX["right_upper_leg"]
+        left_hip: Float32[ndarray, "3"] = body_positions[left_hip_idx]
+        right_hip: Float32[ndarray, "3"] = body_positions[right_hip_idx]
+
+        sh_dir: Float32[ndarray, "3"] = right_sh - left_sh
+        sh_width: float = float(np.linalg.norm(sh_dir))
+        hip_dir: Float32[ndarray, "3"] = right_hip - left_hip
+        hip_width: float = float(np.linalg.norm(hip_dir))
+
+        if hip_width > 1e-6:
+            dir_unit: Float32[ndarray, "3"] = hip_dir / hip_width if sh_width < 1e-6 else sh_dir / sh_width
+            shoulder_center: Float32[ndarray, "3"] = 0.5 * (left_sh + right_sh)
+            desired_half: float = 0.5 * hip_width
+
+            new_left_sh: Float32[ndarray, "3"] = shoulder_center - dir_unit * desired_half
+            new_right_sh: Float32[ndarray, "3"] = shoulder_center + dir_unit * desired_half
+
+            delta_left: Float32[ndarray, "3"] = new_left_sh - left_sh
+            delta_right: Float32[ndarray, "3"] = new_right_sh - right_sh
+
+            body_positions[left_sh_idx] = new_left_sh
+            body_positions[right_sh_idx] = new_right_sh
+
+            # propagate shoulder adjustment down each arm chain
+            left_chain = [
+                _QUEST_BODY_NAME_TO_IDX["left_arm_upper"],
+                _QUEST_BODY_NAME_TO_IDX["left_arm_lower"],
+                _QUEST_BODY_NAME_TO_IDX["left_hand_wrist_twist"],
+            ]
+            right_chain = [
+                _QUEST_BODY_NAME_TO_IDX["right_arm_upper"],
+                _QUEST_BODY_NAME_TO_IDX["right_arm_lower"],
+                _QUEST_BODY_NAME_TO_IDX["right_hand_wrist_twist"],
+            ]
+
+            for idx in left_chain:
+                body_positions[idx] = body_positions[idx] + delta_left
+            for idx in right_chain:
+                body_positions[idx] = body_positions[idx] + delta_right
+
         for joint_name, coco_id in _QUEST_BODY_TO_COCO_ID.items():
             joint_idx: int = _QUEST_BODY_NAME_TO_IDX[joint_name]
             xyz: Float32[ndarray, "3"] = body_positions[joint_idx]
