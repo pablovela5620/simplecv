@@ -175,8 +175,6 @@ repomix-output.xml
 /.codex/config.json.bak
 /.codex/config.toml
 /.codex/config.toml.bak
-/.github/copilot-instructions.md
-/.github/copilot-instructions.md.bak
 /.vscode/mcp.json
 /.vscode/mcp.json.bak
 /AGENTS.md

@@ -1,23 +1,28 @@
+"""CLI to ingest exo/ego recordings into Rerun with optional Quest alignment."""
+
 import json
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import tyro
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from natsort import natsorted
 from numpy import ndarray
 from rerun.blueprint import ContainerLike
+from serde import field as serde_field
 from serde import serde
+from serde.compat import SerdeError
 from serde.json import from_json
 from tqdm.auto import tqdm
 
+from simplecv.apis.quest3_oakd_loader import Quest3VisualizeConfig, load_and_log_quest_data
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_utils import Resolution, reencode_video_optimal
@@ -138,7 +143,269 @@ class OakCalibration:
     """Rigid transform describing ``left``→``rgb`` alignment, omitted when RGB is absent."""
 
 
+_OAK_DIST_COEFF_COUNT: int = 14
+_DEPTHAI_CM_TO_MM: float = 10.0
+
+
+@serde
+class DepthAIResolution:
+    width: int | None = None
+    height: int | None = None
+    left: int | None = None
+    top: int | None = None
+    right: int | None = None
+    bottom: int | None = None
+
+
+@serde
+class DepthAILensIntrinsics:
+    focal_length_x: float
+    focal_length_y: float
+    principal_point_x: float
+    principal_point_y: float
+    skew: float | None = None
+    available: bool | None = None
+
+
+@serde
+class DepthAIDistortion:
+    coefficients: list[float] | None = None
+    available: bool | None = None
+
+
+@serde
+class DepthAILensInfo:
+    focal_length_mm: list[float] | float | None = None
+    fov_deg: float | None = None
+
+
+@serde
+class DepthAISensorInfo:
+    physical_size_mm: DepthAIResolution | None = None
+    active_array_size: DepthAIResolution | None = None
+    pixel_array_size: DepthAIResolution | None = None
+
+
+@serde
+class DepthAIIntrinsicsEntry:
+    camera_id: str
+    lens_intrinsics: DepthAILensIntrinsics
+    positional_layout: str | None = None
+    capture_resolution: DepthAIResolution | None = None
+    sensor_info: DepthAISensorInfo | None = None
+    distortion: DepthAIDistortion | None = None
+    lens_info: DepthAILensInfo | None = None
+
+
+@serde
+class DepthAIExtrinsicsEntry:
+    R: list[list[float]]
+    T: list[float]
+    type: str | None = None
+    from_: str | None = serde_field(default=None, rename="from")
+    to: str | None = None
+    matrix_4x4: list[list[float]] | None = None
+
+
+@serde
+class DepthAICalibration:
+    intrinsics: list[DepthAIIntrinsicsEntry]
+    extrinsics: list[DepthAIExtrinsicsEntry]
+    device_id: str | None = None
+    device_mxid: str | None = None
+
+
+def _load_oak_calibration(calibration_json_path: Path) -> OakCalibration:
+    """Load an OAK calibration JSON emitted either by the legacy or the new DepthAI exporter."""
+
+    payload_text: str = calibration_json_path.read_text()
+    try:
+        return from_json(OakCalibration, payload_text)
+    except SerdeError:
+        depthai_payload: DepthAICalibration = from_json(DepthAICalibration, payload_text)
+        return _oak_calibration_from_depthai_payload(depthai_payload)
+
+
+def _oak_calibration_from_depthai_payload(payload: DepthAICalibration) -> OakCalibration:
+    """Convert the DepthAI calibration schema (intrinsics/extrinsics lists) into ``OakCalibration``."""
+
+    intrinsics_by_layout: dict[str, OakIntrinsics] = {}
+    intrinsics_by_id: dict[str, OakIntrinsics] = {}
+    for entry in payload.intrinsics:
+        intr_obj: OakIntrinsics = _oak_intrinsics_from_depthai_doc(entry)
+        if entry.positional_layout:
+            intrinsics_by_layout[entry.positional_layout.lower()] = intr_obj
+        if entry.camera_id:
+            intrinsics_by_id[entry.camera_id.lower()] = intr_obj
+
+    left_intr: OakIntrinsics | None = intrinsics_by_layout.get("left") or intrinsics_by_id.get("cam_c")
+    right_intr: OakIntrinsics | None = intrinsics_by_layout.get("right") or intrinsics_by_id.get("cam_b")
+    rgb_intr: OakIntrinsics | None = (
+        intrinsics_by_layout.get("center") or intrinsics_by_layout.get("rgb") or intrinsics_by_id.get("cam_a")
+    )
+
+    if left_intr is None or right_intr is None:
+        raise ValueError("Unable to locate left/right camera intrinsics in the DepthAI calibration JSON.")
+
+    left_id: str = left_intr.socket or "left"
+    right_id: str = right_intr.socket or "right"
+    rgb_id: str | None = rgb_intr.socket if rgb_intr and rgb_intr.socket else None
+
+    extr_lr_doc: DepthAIExtrinsicsEntry | None = _find_depthai_extrinsics_doc(
+        payload.extrinsics,
+        expected_type="left_to_right",
+        from_id=left_id,
+        to_id=right_id,
+    )
+    if extr_lr_doc is None:
+        raise ValueError("DepthAI calibration JSON is missing the left-to-right extrinsics block.")
+    extr_lr: OakExtrinsics = _oak_extrinsics_from_depthai_doc(extr_lr_doc)
+
+    extr_rgb_doc: DepthAIExtrinsicsEntry | None = None
+    if rgb_id is not None:
+        extr_rgb_doc = _find_depthai_extrinsics_doc(
+            payload.extrinsics,
+            expected_type="left_to_rgb",
+            from_id=left_id,
+            to_id=rgb_id,
+        )
+    extr_rgb: OakExtrinsics | None = _oak_extrinsics_from_depthai_doc(extr_rgb_doc) if extr_rgb_doc else None
+
+    device_mxid: str = payload.device_mxid or payload.device_id or ""
+
+    return OakCalibration(
+        device_mxid=device_mxid,
+        right=right_intr,
+        left=left_intr,
+        rgb=rgb_intr,
+        extrinsics_left_to_right=extr_lr,
+        extrinsics_left_to_rgb=extr_rgb,
+    )
+
+
+def _oak_intrinsics_from_depthai_doc(doc: DepthAIIntrinsicsEntry) -> OakIntrinsics:
+    """Construct ``OakIntrinsics`` from a DepthAI calibration intrinsics entry."""
+
+    fx: float = float(doc.lens_intrinsics.focal_length_x)
+    fy: float = float(doc.lens_intrinsics.focal_length_y)
+    cx: float = float(doc.lens_intrinsics.principal_point_x)
+    cy: float = float(doc.lens_intrinsics.principal_point_y)
+
+    capture_block: DepthAIResolution | None = doc.capture_resolution
+    if capture_block is None and doc.sensor_info is not None:
+        capture_block = doc.sensor_info.pixel_array_size
+    if capture_block is None or capture_block.width is None or capture_block.height is None:
+        raise ValueError("DepthAI calibration intrinsics entry is missing capture resolution info.")
+    width: int = int(capture_block.width)
+    height: int = int(capture_block.height)
+
+    k_matrix: Float[np.ndarray, "3 3"] = np.array(
+        [
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    distortion_block: DepthAIDistortion | None = doc.distortion
+    coeffs: Float[np.ndarray, "14"] = _coerce_distortion_coeffs(
+        distortion_block.coefficients if distortion_block else None
+    )
+
+    lens_info_block: DepthAILensInfo | None = doc.lens_info
+    if lens_info_block is not None and isinstance(lens_info_block.fov_deg, (int, float)):
+        fov_deg: float = float(lens_info_block.fov_deg)
+    else:
+        fov_deg = _fov_from_fx(width, fx)
+
+    socket: str = doc.camera_id
+
+    return OakIntrinsics(
+        socket=socket,
+        width=width,
+        height=height,
+        intrinsics=k_matrix,
+        distortion=coeffs,
+        fov_deg=fov_deg,
+    )
+
+
+def _find_depthai_extrinsics_doc(
+    entries: list[DepthAIExtrinsicsEntry],
+    *,
+    expected_type: str,
+    from_id: str,
+    to_id: str | None,
+) -> DepthAIExtrinsicsEntry | None:
+    """Return the extrinsics entry matching ``expected_type`` or the provided endpoints."""
+
+    expected_type_lower: str = expected_type.lower()
+    from_id_lower: str = from_id.lower()
+    to_id_lower: str | None = to_id.lower() if to_id is not None else None
+
+    for entry in entries:
+        if entry.type and entry.type.lower() == expected_type_lower:
+            return entry
+
+    for entry in entries:
+        from_lower: str | None = entry.from_.lower() if isinstance(entry.from_, str) else None
+        to_lower: str | None = entry.to.lower() if isinstance(entry.to, str) else None
+        if from_lower == from_id_lower and (to_id_lower is None or to_lower == to_id_lower):
+            return entry
+
+    return None
+
+
+def _oak_extrinsics_from_depthai_doc(entry: DepthAIExtrinsicsEntry) -> OakExtrinsics:
+    """Convert a DepthAI extrinsics block (centimeters) into ``OakExtrinsics`` with millimeter storage."""
+
+    R: Float[np.ndarray, "3 3"] = np.array(entry.R, dtype=np.float32)
+    if R.shape != (3, 3):
+        raise ValueError("DepthAI extrinsics rotation matrix must be 3x3.")
+    translation_cm: Float[np.ndarray, "3"] = np.array(entry.T, dtype=np.float32).reshape(3)
+    translation_mm: Float[np.ndarray, "3"] = translation_cm * float(_DEPTHAI_CM_TO_MM)
+
+    if entry.matrix_4x4 is not None:
+        matrix_raw: Float[np.ndarray, "4 4"] = np.array(entry.matrix_4x4, dtype=np.float32)
+        if matrix_raw.shape != (4, 4):
+            raise ValueError("DepthAI extrinsics matrix must be 4x4 when provided.")
+    else:
+        matrix_raw = np.eye(4, dtype=np.float32)
+        matrix_raw[:3, :3] = R
+    matrix_raw = matrix_raw.copy()
+    matrix_raw[:3, 3] = translation_mm
+
+    return OakExtrinsics(
+        R=R,
+        T=translation_mm,
+        matrix_4x4=matrix_raw,
+    )
+
+
+def _coerce_distortion_coeffs(coefficients_obj: Any) -> Float[np.ndarray, "14"]:
+    """Pad/trim the provided distortion list to the 14-term Brown–Conrady vector."""
+
+    if coefficients_obj is None:
+        coeffs: Float[np.ndarray, "14"] = np.zeros(_OAK_DIST_COEFF_COUNT, dtype=np.float32)
+        return coeffs
+
+    coeffs_array: Float[np.ndarray, "_"] = np.array(coefficients_obj, dtype=np.float32).reshape(-1)
+    if coeffs_array.size < _OAK_DIST_COEFF_COUNT:
+        coeffs_padded: Float[np.ndarray, "14"] = np.pad(
+            coeffs_array,
+            (0, _OAK_DIST_COEFF_COUNT - coeffs_array.size),
+            constant_values=0.0,
+        ).astype(np.float32)
+        return coeffs_padded
+    if coeffs_array.size > _OAK_DIST_COEFF_COUNT:
+        coeffs_trimmed: Float[np.ndarray, "14"] = coeffs_array[:_OAK_DIST_COEFF_COUNT].astype(np.float32)
+        return coeffs_trimmed
+    return coeffs_array.astype(np.float32)
+
+
 def _make_intrinsics(oak_i: OakIntrinsics) -> Intrinsics:
+    """Convert an OAK intrinsics block into the SimpleCV ``Intrinsics`` model."""
     K: Float[np.ndarray, "3 3"] = oak_i.intrinsics.astype(np.float32)
     fx: float = float(K[0, 0])
     fy: float = float(K[1, 1])
@@ -160,6 +427,7 @@ def _make_intrinsics(oak_i: OakIntrinsics) -> Intrinsics:
 
 
 def _make_distortion(oak_i: OakIntrinsics) -> BrownConradyDistortion:
+    """Convert 14-term distortion vector into ``BrownConradyDistortion``."""
     d: Float[np.ndarray, "14"] = oak_i.distortion.astype(np.float32)
     # OpenCV 14-term order: [k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4,tau_x,tau_y]
     k1: float = float(d[0])
@@ -197,6 +465,7 @@ def _make_distortion(oak_i: OakIntrinsics) -> BrownConradyDistortion:
 
 
 def _make_extrinsics(H_left_to_cam: Float[np.ndarray, "4 4"]) -> Extrinsics:
+    """Build an ``Extrinsics`` object from a left→cam homogeneous transform."""
     R: Float[np.ndarray, "3 3"] = H_left_to_cam[:3, :3].astype(np.float32)
     t: Float[np.ndarray, "3"] = H_left_to_cam[:3, 3].astype(np.float32) * 1e-3  # mm -> meters
     extr: Extrinsics = Extrinsics(world_R_cam=R, world_t_cam=t)
@@ -204,6 +473,7 @@ def _make_extrinsics(H_left_to_cam: Float[np.ndarray, "4 4"]) -> Extrinsics:
 
 
 def _build_pinhole(name: str, oak_i: OakIntrinsics, H_left_to_cam: Float[np.ndarray, "4 4"]) -> PinholeParameters:
+    """Create a pinhole camera model from OAK intrinsics/extrinsics."""
     intr: Intrinsics = _make_intrinsics(oak_i)
     dist: BrownConradyDistortion = _make_distortion(oak_i)
     extr: Extrinsics = _make_extrinsics(H_left_to_cam)
@@ -501,10 +771,26 @@ def collect_video_entries(
     *,
     log_root: Path,
 ) -> list[VideoIngestEntry]:
-    """Gather source/log path pairs for every MP4 inside ``video_dir``."""
+    """Gather source/log path pairs for every MP4/MOV inside ``video_dir``."""
 
-    all_video_paths: list[Path] = natsorted(video_dir.glob("*.mp4"))
-    assert all_video_paths, f"No .mp4 files found in directory: {video_dir}"
+    all_candidates: list[Path] = natsorted(
+        [
+            candidate
+            for candidate in video_dir.rglob("*")
+            if candidate.is_file() and candidate.suffix.lower() in {".mp4", ".mov"}
+        ]
+    )
+    assert all_candidates, f"No .mp4 or .mov files found in directory (searched recursively): {video_dir}"
+
+    # Deduplicate by stem while preferring .mp4 when both exist.
+    selected_by_stem: dict[str, Path] = {}
+    for path in all_candidates:
+        stem: str = path.stem
+        existing: Path | None = selected_by_stem.get(stem)
+        if existing is None or (existing.suffix.lower() != ".mp4" and path.suffix.lower() == ".mp4"):
+            selected_by_stem[stem] = path
+
+    all_video_paths: list[Path] = natsorted(selected_by_stem.values())
 
     video_entries: list[VideoIngestEntry] = [
         VideoIngestEntry(
@@ -524,24 +810,28 @@ def ingest_video_directory(
     verbose: bool,
     progress_label: str,
     reencode_to_av1: bool,
-) -> list[Path]:
+) -> tuple[list[Path], list[PinholeParameters]]:
     """Ingest the provided videos ensuring uniform encoding and resolution constraints.
 
     Returns:
-        list[Path]: Entity paths where the prepared videos were logged.
+        tuple[list[Path], list[PinholeParameters]]: Entity paths where the prepared videos were logged and the pinhole parameters.
     """
 
     assert video_entries, "No video entries provided for ingestion."
 
     # 1. Start by loading the calibration file from the first video's parent directory and logging it ONLY if ego
-    perspective: str = video_entries[0].source_path.parent.name
-    assert perspective in {"exo", "ego"}, f"Unexpected perspective directory name: {perspective}"
+    source_path: Path = video_entries[0].source_path
+    perspective: str | None = next(
+        (parent.name for parent in source_path.parents if parent.name in {"exo", "ego"}),
+        None,
+    )
+    assert perspective is not None, f"Expected 'exo' or 'ego' in parent directories for source video: {source_path}"
+    perspective = cast(str, perspective)
 
     if perspective == "ego":
         calibration_json_path: Path = video_entries[0].source_path.parent / "calibration.json"
         assert calibration_json_path.exists(), f"Calibration file not found at {calibration_json_path}"
-        calib_json: str = calibration_json_path.read_text()
-        calibration: OakCalibration = from_json(OakCalibration, calib_json)
+        calibration: OakCalibration = _load_oak_calibration(calibration_json_path)
         calibration: OakCalibration = fill_missing_rgb(
             calibration,
         )
@@ -572,16 +862,12 @@ def ingest_video_directory(
         tqdm(video_entries, desc=progress_label, leave=False),
     )
     for idx, entry in enumerate(iterable_entries):
-        if video_entries[0].source_path.parent.name == "ego":
+        if perspective == "ego":
             pinhole: PinholeParameters = pinhole_param_list[idx]
             assert pinhole.name.lower() in entry.camera_log_path.name.lower(), (
                 f"Camera name mismatch: pinhole '{pinhole.name}' vs. entry '{entry.camera_log_path.name}'"
             )
-            log_pinhole(
-                camera=pinhole,
-                cam_log_path=entry.camera_log_path,
-                static=True,
-            )
+            log_pinhole(camera=pinhole, cam_log_path=entry.camera_log_path, static=False, image_plane_distance=0.05)
         prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
             video_path=entry.source_path,
             verbose=verbose,
@@ -614,13 +900,14 @@ def ingest_video_directory(
         if should_cleanup:
             prepared_path.unlink(missing_ok=True)
 
-    return logged_video_entities
+    return logged_video_entities, pinhole_param_list
 
 
 def create_ingest_view(
     *,
     exo_video_log_paths: list[Path] | None,
     ego_video_log_paths: list[Path] | None,
+    quest_video_log_paths: list[Path] | None,
 ) -> ContainerLike:
     """
     Assemble a Rerun container/view showing exo videos along the bottom row and ego videos on the right column.
@@ -628,14 +915,24 @@ def create_ingest_view(
     Paths should point to the `.../pinhole` entities that contain the actual video nodes.
     """
 
-    main_view = rrb.Spatial3DView(origin="/")
+    main_view = rrb.Spatial3DView(
+        origin="/",
+        line_grid=rrb.archetypes.LineGrid3D(visible=True),
+        spatial_information=rrb.SpatialInformation(show_axes=True),
+    )
 
+    combined_ego_paths: list[Path] = []
     if ego_video_log_paths:
+        combined_ego_paths.extend(ego_video_log_paths)
+    if quest_video_log_paths:
+        combined_ego_paths.extend(quest_video_log_paths)
+
+    if combined_ego_paths:
         ego_views = [
             rrb.Tabs(
                 rrb.Spatial2DView(origin=str(pinhole_log_path)),
             )
-            for pinhole_log_path in ego_video_log_paths
+            for pinhole_log_path in combined_ego_paths
         ]
         main_view = rrb.Horizontal(
             contents=[
@@ -663,6 +960,70 @@ def create_ingest_view(
     return main_view
 
 
+def align_oak_to_quest(
+    quest_left_pinholes: list[PinholeParameters],
+    static_ego_pinholes: list[PinholeParameters],
+    quest_timestamps_ns: Int[ndarray, "num_frames"],
+    timeline: str = "video_time",
+) -> None:
+    """Anchor static OAK pinholes to the per-frame Quest reference cameras.
+
+    Args:
+        quest_left_pinholes: Sequence of Quest *left* pinholes ordered per video
+            frame; each element carries the time-varying extrinsics of the Quest
+            left capture camera across the recording.
+        static_ego_pinholes: Small set of OAK pinholes (currently left/rgb/right)
+            whose intrinsics are fixed and whose extrinsics are constant in the
+            raw calibration. This helper will reinterpret those OAK cameras so
+            their poses become dynamic—following the Quest-left trajectory—while
+            preserving the rigid layout between the OAK sensors themselves.
+        quest_timestamps_ns: Timestamps (in nanoseconds) for each frame of the ego
+            video, used to align with the Quest pinholes.
+
+    Notes:
+        Today ``static_ego_pinholes`` typically holds three cameras, but the
+        function is intentionally generic: any number of OAK sensors defined in
+        the static calibration can be re-expressed per frame to match the
+        Quest-left trajectory as long as their relative transforms remain rigid.
+    """
+    oak_left_cam: PinholeParameters = next(p for p in static_ego_pinholes if p.name.lower() == "left")
+    for ts_nano, quest_left_pinhole in zip(quest_timestamps_ns, quest_left_pinholes, strict=True):
+        ts_sec: float = float(ts_nano) * 1e-9
+        rr.set_time(timeline=timeline, duration=ts_sec)
+
+        world_T_quest_ref: Float[ndarray, "4 4"] = quest_left_pinhole.extrinsics.world_T_cam
+        oak_ref_T_world: Float[ndarray, "4 4"] = oak_left_cam.extrinsics.cam_T_world
+        for oak_pinhole in static_ego_pinholes:
+            # camera to world transform for oak sensor
+            world_T_cam_raw: Float[ndarray, "4 4"] = oak_pinhole.extrinsics.world_T_cam
+            # get the rigid offset from the oak reference camera
+            oak_ref_T_cam: Float[ndarray, "4 4"] = oak_ref_T_world @ world_T_cam_raw
+            # add a translation offset between the quest and oak rigs
+            offset_T_cam: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
+            offset_T_cam[:3, 3] = np.array([0.0, -0.03, 0.0], dtype=np.float32)
+            cam_T_offset: Float[ndarray, "4 4"] = np.linalg.inv(offset_T_cam)
+            oak_ref_T_cam = oak_ref_T_cam @ cam_T_offset
+            # world_T_cam_aligned: replace the oak reference origin with quest reference pose
+            # (world ← quest_ref) @ (quest_ref ≡ oak_ref ← cam)
+            world_T_cam_aligned: Float[ndarray, "4 4"] = world_T_quest_ref @ oak_ref_T_cam
+            # update pinhole and relog
+            new_extrinsics: Extrinsics = Extrinsics(
+                world_R_cam=world_T_cam_aligned[:3, :3], world_t_cam=world_T_cam_aligned[:3, 3]
+            )
+            new_oak_pinhole: PinholeParameters = PinholeParameters(
+                name=oak_pinhole.name,
+                intrinsics=oak_pinhole.intrinsics,
+                distortion=oak_pinhole.distortion,
+                extrinsics=new_extrinsics,
+            )
+            log_pinhole(
+                camera=new_oak_pinhole,
+                cam_log_path=Path(f"/world/ego/{oak_pinhole.name}"),
+                static=False,
+                image_plane_distance=0.05,
+            )
+
+
 def main(config: IngestConfig) -> None:
     validate_exoego_dir(config.exoego_dir)
     print(f"Ingesting data from {config.exoego_dir} to RRD at {config.exoego_dir}")
@@ -670,7 +1031,7 @@ def main(config: IngestConfig) -> None:
     parent_log_path: Path = Path("/world")
     timeline: str = "video_time"
     # set the coordinate system for the entire world
-    rr.log("/", rr.ViewCoordinates.RDF, static=True)
+    rr.log("/", rr.ViewCoordinates.RUB, static=True)
     # set time to 0 at the start of the timeline
     rr.set_time(timeline=timeline, duration=0)
     dir_tuple: tuple[Path | None, Path | None] = validate_exoego_dir(config.exoego_dir)
@@ -694,9 +1055,23 @@ def main(config: IngestConfig) -> None:
         else []
     )
 
+    quest_pinhole_paths: list[Path] | None = None
+    quest_dir: Path = config.exoego_dir / "quest"
+    quest_left_pinhole_list: list[PinholeParameters] = []
+    quest_frame_timestamps_ns: Int[ndarray, "n_frames"] | None = None
+    if quest_dir.exists():
+        quest_config = Quest3VisualizeConfig(rr_config=config.rr_config, data_dir=config.exoego_dir)
+        quest_log_outputs: tuple[list[Path], list[PinholeParameters], Int[ndarray, "n_frames"]] = (
+            load_and_log_quest_data(quest_config, timeline=timeline)
+        )
+        quest_pinhole_paths: list[Path] | None = quest_log_outputs[0]
+        quest_left_pinhole_list: list[PinholeParameters] = quest_log_outputs[1]
+        quest_frame_timestamps_ns = quest_log_outputs[2]
+
     ingest_view: ContainerLike = create_ingest_view(
         exo_video_log_paths=[entry.pinhole_log_path for entry in exo_entries] or None,
         ego_video_log_paths=[entry.pinhole_log_path for entry in ego_entries] or None,
+        quest_video_log_paths=quest_pinhole_paths,
     )
     rr.send_blueprint(rrb.Blueprint(ingest_view, collapse_panels=True))
 
@@ -711,13 +1086,25 @@ def main(config: IngestConfig) -> None:
 
     if ego_entries:
         # TODO make sure that the ego calibration is in meters not millimeters
-        ingest_video_directory(
+        ego_output_tuple: tuple[list[Path], list[PinholeParameters]] = ingest_video_directory(
             video_entries=ego_entries,
             timeline=timeline,
             verbose=config.verbose,
             progress_label="Ingesting ego videos",
             reencode_to_av1=config.reencode_to_av1,
         )
+        static_ego_pinhole_list: list[PinholeParameters] = ego_output_tuple[1]
+        # align the quest pinholes to the ego pinholes if both are present
+        if (
+            len(quest_left_pinhole_list) > 0
+            and len(static_ego_pinhole_list) > 0
+            and quest_frame_timestamps_ns is not None
+        ):
+            align_oak_to_quest(
+                quest_left_pinholes=quest_left_pinhole_list,
+                static_ego_pinholes=static_ego_pinhole_list,
+                quest_timestamps_ns=quest_frame_timestamps_ns,
+            )
 
 
 def entrypoint() -> None:
