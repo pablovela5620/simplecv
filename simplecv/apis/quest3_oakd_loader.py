@@ -938,7 +938,7 @@ def load_hand_sequence(csv_path: Path) -> QuestHandPoseSequence:
 
 
 def load_body_sequence(csv_path: Path) -> QuestBodyPoseSequence:
-    """Load Quest 3 full-body joints from the CSV export."""
+    """Load Quest 3 full-body joints from CSV, zero-offset timestamps, and NaN-out zeros."""
 
     if not csv_path.exists():
         raise FileNotFoundError(csv_path)
@@ -1077,6 +1077,7 @@ def _log_coco133_annotations(
     quest_right_cam_path: Path,
     timeline: str,
 ) -> None:
+    """Log COCO-133 joints by fusing Quest hands, body, and head extrinsics."""
     left_keypoints: Float32[ndarray, "n_frames_left 21 3"] = left_sequence.keypoints_m[:, LANDMARK_TO_QUEST_INDEX]
     right_keypoints: Float32[ndarray, "n_frames_right 21 3"] = right_sequence.keypoints_m[:, LANDMARK_TO_QUEST_INDEX]
     frame_count: int = min(len(head_extrinsics), left_keypoints.shape[0], right_keypoints.shape[0], len(body_sequence))
@@ -1211,7 +1212,7 @@ def _log_projected_keypoints(
     class_id: int,
     entity_suffix: str,
 ) -> None:
-    """Project 3D joints into a camera view and stream them to Rerun."""
+    """Project 3D joints into image space and stream them (with confidences) to Rerun."""
 
     if len(keypoint_ids) != positions.shape[0]:
         raise ValueError("Keypoint ID list must match number of positions provided.")

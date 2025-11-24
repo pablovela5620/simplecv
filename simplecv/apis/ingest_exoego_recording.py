@@ -1,3 +1,5 @@
+"""CLI to ingest exo/ego recordings into Rerun with optional Quest alignment."""
+
 import json
 import subprocess
 from collections.abc import Iterable
@@ -403,6 +405,7 @@ def _coerce_distortion_coeffs(coefficients_obj: Any) -> Float[np.ndarray, "14"]:
 
 
 def _make_intrinsics(oak_i: OakIntrinsics) -> Intrinsics:
+    """Convert an OAK intrinsics block into the SimpleCV ``Intrinsics`` model."""
     K: Float[np.ndarray, "3 3"] = oak_i.intrinsics.astype(np.float32)
     fx: float = float(K[0, 0])
     fy: float = float(K[1, 1])
@@ -424,6 +427,7 @@ def _make_intrinsics(oak_i: OakIntrinsics) -> Intrinsics:
 
 
 def _make_distortion(oak_i: OakIntrinsics) -> BrownConradyDistortion:
+    """Convert 14-term distortion vector into ``BrownConradyDistortion``."""
     d: Float[np.ndarray, "14"] = oak_i.distortion.astype(np.float32)
     # OpenCV 14-term order: [k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4,tau_x,tau_y]
     k1: float = float(d[0])
@@ -461,6 +465,7 @@ def _make_distortion(oak_i: OakIntrinsics) -> BrownConradyDistortion:
 
 
 def _make_extrinsics(H_left_to_cam: Float[np.ndarray, "4 4"]) -> Extrinsics:
+    """Build an ``Extrinsics`` object from a left→cam homogeneous transform."""
     R: Float[np.ndarray, "3 3"] = H_left_to_cam[:3, :3].astype(np.float32)
     t: Float[np.ndarray, "3"] = H_left_to_cam[:3, 3].astype(np.float32) * 1e-3  # mm -> meters
     extr: Extrinsics = Extrinsics(world_R_cam=R, world_t_cam=t)
@@ -468,6 +473,7 @@ def _make_extrinsics(H_left_to_cam: Float[np.ndarray, "4 4"]) -> Extrinsics:
 
 
 def _build_pinhole(name: str, oak_i: OakIntrinsics, H_left_to_cam: Float[np.ndarray, "4 4"]) -> PinholeParameters:
+    """Create a pinhole camera model from OAK intrinsics/extrinsics."""
     intr: Intrinsics = _make_intrinsics(oak_i)
     dist: BrownConradyDistortion = _make_distortion(oak_i)
     extr: Extrinsics = _make_extrinsics(H_left_to_cam)
