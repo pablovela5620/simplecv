@@ -973,6 +973,8 @@ def load_and_log_quest_data(
     if not data_root.exists():
         raise FileNotFoundError(data_root)
 
+    rr.log("/", rr.ViewCoordinates.RUB, static=True)
+
     left_csv: Path = data_root / "quest" / "left_hand_poses.csv"
     right_csv: Path = data_root / "quest" / "right_hand_poses.csv"
     head_csv: Path = data_root / "quest" / "head_pose.csv"
