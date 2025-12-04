@@ -24,7 +24,23 @@ class EgoData:
 
 @dataclass
 class ExoEgoLabels:
+    """3D COCO-133 annotations plus optional MANO and timing metadata.
+
+    Attributes
+    ----------
+    xyzc_stack:
+        3D keypoints in meters with per-joint confidence ``[x, y, z, c]``.
+    timestamps_ns:
+        Nanosecond timestamps aligned with ``xyzc_stack``; when provided they are
+        used as-is for logging to keep original recording cadence. When ``None``
+        the visualization falls back to the video timeline, matching the prior
+        behaviour but risking drift when label and video frame rates differ.
+    mano_stack:
+        Optional MANO parameters associated with the same frames.
+    """
+
     xyzc_stack: Float[ndarray, "num_frames 133 4"]
+    timestamps_ns: Int[ndarray, "num_frames"] | None = None
     mano_stack: ManoStack | None = None
 
 

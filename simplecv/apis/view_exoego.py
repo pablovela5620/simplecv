@@ -241,7 +241,7 @@ def log_mano_batch(
     exoego_sequence: BaseExoEgoSequence,
     mano_parent_log_path: Path,
     timeline: str,
-    shortest_timestamp: Int[ndarray, "n_frames"],
+    timestamps_ns: Int[ndarray, "n_frames"],
     log_mano: bool,
 ) -> None:
     """Stream MANO meshes and derived COCO joints to Rerun for both hands.
@@ -252,8 +252,9 @@ def log_mano_batch(
         parent_log_path (Path): Root Rerun entity under which MANO data is
             organized.
         timeline (str): Logical timeline label shared across logged modalities.
-        shortest_timestamp (Int[np.ndarray, "n_frames"]): Nanosecond timestamps
-            that define the synchronized slice applied to all logged data.
+        timestamps_ns (Int[np.ndarray, "n_frames"]): Nanosecond timestamps
+            aligned with the MANO parameter stream; typically the label
+            timeline from the recording.
         log_mano (bool): Gate controlling whether any MANO data is emitted.
 
     Returns:
@@ -287,7 +288,7 @@ def log_mano_batch(
             mano_trans, "n_frames n_hands dim -> n_hands n_frames dim"
         )
         # Prepare a single COCO-133 buffer (both hands combined)
-        n_frames_mano_total: int = min(so3_per_hand.shape[1], len(shortest_timestamp))
+        n_frames_mano_total: int = min(so3_per_hand.shape[1], len(timestamps_ns))
         xyz_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133 3"] = np.full(
             (n_frames_mano_total, 133, 3), np.nan, dtype=np.float32
         )
@@ -322,13 +323,13 @@ def log_mano_batch(
             # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
             faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
             verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
-            n_frames_mesh: int = min(len(verts_np), len(shortest_timestamp))
+            n_frames_mesh: int = min(len(verts_np), len(timestamps_ns))
             vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
                 verts_np[0:n_frames_mesh], faces_np
             )
             rr.send_columns(
                 f"{mesh_entity_path}",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_timestamp[0:n_frames_mesh])],
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * timestamps_ns[0:n_frames_mesh])],
                 columns=[
                     *rr.Mesh3D.columns(
                         vertex_positions=rearrange(
@@ -376,7 +377,7 @@ def log_mano_batch(
                 indexes=[
                     rr.TimeColumn(
                         timeline,
-                        duration=1e-9 * shortest_timestamp[0:n_frames_mano_total],
+                        duration=1e-9 * timestamps_ns[0:n_frames_mano_total],
                     )
                 ],
                 columns=[
@@ -406,8 +407,9 @@ def log_exoego_batch(
         parent_log_path (Path): Root entity under which all logged data is
             organized.
         timeline (str): Logical timeline name shared between all logged tracks.
-        shortest_timestamp (Int[np.ndarray, "n_frames"]): Nanosecond timestamps
-            representing the synchronized window applied to every stream.
+        shortest_timestamp (Int[np.ndarray, "n_frames"]): Fallback timestamps
+            derived from the video streams; used when label timestamps are not
+            present in the dataset.
         log_ego (bool): Enable logging of ego camera projections.
         log_exo (bool): Enable logging of exo camera projections.
         log_mano (bool): Enable logging of MANO-derived meshes and keypoints.
@@ -425,11 +427,15 @@ def log_exoego_batch(
     # batch send all 3D data #
     ##########################
     xyzc_stack_all: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
+    label_timestamps_ns: Int[ndarray, "n_frames"] = (
+        exoego_labels.timestamps_ns if exoego_labels.timestamps_ns is not None else shortest_timestamp
+    )
     n_frames_labels: int = len(xyzc_stack_all)
-    n_frames_timestamps: int = len(shortest_timestamp)
+    n_frames_timestamps: int = len(label_timestamps_ns)
     n_frames_total: int = min(n_frames_labels, n_frames_timestamps)
 
     xyzc_stack: Float[ndarray, "n_frames 133 4"] = xyzc_stack_all[0:n_frames_total]
+    label_timestamps_trim: Int[ndarray, "n_frames"] = label_timestamps_ns[0:n_frames_total]
     xyz_stack: Float[ndarray, "n_frames 133 3"] = xyzc_stack[:, :, :3]
     conf_stack: Float[ndarray, "n_frames 133"] = xyzc_stack[:, :, 3]
     colors: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(confidence_scores=conf_stack[..., np.newaxis])
@@ -463,7 +469,7 @@ def log_exoego_batch(
             indexes=[
                 rr.TimeColumn(
                     timeline,
-                    duration=1e-9 * shortest_timestamp[0:n_frames_total],
+                    duration=1e-9 * label_timestamps_trim,
                 )
             ],
             columns=[
@@ -482,7 +488,7 @@ def log_exoego_batch(
             exoego_sequence=exoego_sequence,
             mano_parent_log_path=gt_root_path,
             timeline=timeline,
-            shortest_timestamp=shortest_timestamp,
+            timestamps_ns=label_timestamps_trim,
             log_mano=log_mano,
         )
 
@@ -547,7 +553,7 @@ def log_exoego_batch(
                     indexes=[
                         rr.TimeColumn(
                             timeline,
-                            duration=1e-9 * shortest_timestamp[0:n_frames_cam],
+                            duration=1e-9 * label_timestamps_trim[0:n_frames_cam],
                         )
                     ],
                     columns=[
@@ -653,7 +659,7 @@ def log_exoego_batch(
                     indexes=[
                         rr.TimeColumn(
                             timeline,
-                            duration=1e-9 * shortest_timestamp[0:n_frames_cam],
+                            duration=1e-9 * label_timestamps_trim[0:n_frames_cam],
                         )
                     ],
                     columns=[
@@ -691,6 +697,17 @@ class SceneSetupResult(NamedTuple):
 
     log_paths: LogPaths
     shortest_timestamp: Int[ndarray, "n_frames"]
+
+
+def _choose_shortest_timeline_by_duration(
+    timelines: list[Int[ndarray, "n_frames"]],
+) -> Int[ndarray, "n_frames"]:
+    """Select the timeline with the smallest actual duration, not frame count."""
+
+    assert timelines, "No timelines provided to select from."
+    durations_ns: list[int] = [int(ts[-1] - ts[0]) for ts in timelines]
+    min_idx: int = int(np.argmin(durations_ns))
+    return timelines[min_idx]
 
 
 def setup_scene(
@@ -777,7 +794,7 @@ def setup_scene(
         ego_video_log_paths = ego_video_log_path_list
 
         # log the ego cameras and their trajectories
-        shortest_ego_timestamp: Int[ndarray, "n_frames"] = min(ego_timestamp_list, key=len)
+        shortest_ego_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(ego_timestamp_list)
         ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
             dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
         )
@@ -826,9 +843,8 @@ def setup_scene(
                 recording=recording,
             )
 
-    shortest_timestamp: Int[ndarray, "n_frames"] = min(
-        exo_timestamp_list + ego_timestamp_list,
-        key=len,
+    shortest_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(
+        exo_timestamp_list + ego_timestamp_list
     )
 
     return SceneSetupResult(

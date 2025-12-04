@@ -332,14 +332,21 @@ def mux_h264_to_mp4(times: ChunkedArray, samples: ChunkedArray, output_path: str
     # Setup output container.
     output_container = av.open(output_path, mode="w")
     output_stream = output_container.add_stream_from_template(input_stream)
+    # Preserve nanosecond timeline from the recording to avoid fps skew when
+    # remuxing. Without this, ffmpeg/pyav may infer a default time_base that
+    # snaps frames to a different cadence than the recorded timestamps.
+    output_stream.time_base = Fraction(1, 1_000_000_000)
+    if output_stream.codec_context is not None:
+        output_stream.codec_context.time_base = output_stream.time_base
 
     # Timestamps are made relative to the first timestamp.
     start_time = times.chunk(0)[0]
     print(f"Offsetting timestamps with start time: {start_time}")
 
     # Demux and mux packets.
+    ns_time_base = Fraction(1, 1_000_000_000)
     for packet, time in zip(input_container.demux(input_stream), times, strict=False):
-        packet.time_base = Fraction(1, 1_000_000_000)  # Assuming duration timestamps in nanoseconds.
+        packet.time_base = ns_time_base  # timestamps stored in nanoseconds
         packet.pts = int(time.value - start_time.value)
         packet.dts = packet.pts  # dts == pts since there's no B-frames.
         packet.stream = output_stream

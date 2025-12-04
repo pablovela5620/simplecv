@@ -71,6 +71,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         confidences_series: pd.DataFrame | pd.Series | None = df[
             f"/{entity_path}:simplecv.KeypointConfidence3D:confidences"
         ]
+        timestamps_series: pd.Series | None = df.get(timeline)
 
         if positions_series is None or confidences_series is None:
             return None
@@ -85,13 +86,18 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         ]
         conf_stack: Float32[ndarray, "num_frames 133"] = np.stack(confidences_arrays, axis=0)
 
+        timestamps_ns: Int[ndarray, "num_frames"] | None = None
+        if timestamps_series is not None:
+            timestamps_ns = np.asarray(timestamps_series.to_numpy(), dtype=np.int64)
+
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.concatenate(
             [xyz_stack, conf_stack[..., np.newaxis]],
             axis=-1,
         )
-        print(len(xyzc_stack))
-
-        return ExoEgoLabels(xyzc_stack=xyzc_stack)
+        return ExoEgoLabels(
+            xyzc_stack=xyzc_stack,
+            timestamps_ns=timestamps_ns,
+        )
 
     def load_environment_mesh(self) -> EnvironmentMesh | None:
         """Load the static environment mesh from the recording, if any."""
