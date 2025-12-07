@@ -89,32 +89,115 @@ class Extrinsics:
         return R, t
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Intrinsics:
+    """Camera intrinsics with two construction paths.
+
+    Usage
+    -----
+    - From focal lengths and principal point (legacy path):
+        ``Intrinsics.from_focal_principal_point(camera_conventions="RDF", fl_x=fx, fl_y=fy, cx=cx, cy=cy, height=H, width=W)``
+    - From a full 3x3 K matrix (new path):
+        ``Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=K, height=H, width=W)``
+
+    Exactly one of these sets must be provided. Passing both will raise a ``ValueError``.
+    The class stores both the individual scalars and the derived ``k_matrix`` so downstream
+    callers can continue to use either representation.
+    """
+
     camera_conventions: Literal["RDF", "RUB"]
     """RDF(OpenCV): X Right - Y Down - Z Front | RUB (OpenGL): X Right- Y Up - Z Back"""
-    fl_x: float
-    fl_y: float
-    cx: float
-    cy: float
     height: int
     width: int
-    k_matrix: Float[ndarray, "3 3"] = field(init=False)
+    # Either (fl_x, fl_y, cx, cy) OR k_matrix must be provided by the caller.
+    fl_x: float | np.floating | None = None
+    fl_y: float | np.floating | None = None
+    cx: float | np.floating | None = None
+    cy: float | np.floating | None = None
+    k_matrix: Float[ndarray, "3 3"] | None = None
 
-    def __post_init__(self):
-        self.compute_k_matrix()
+    def __post_init__(self) -> None:
+        provided_k: bool = self.k_matrix is not None
+        provided_components: bool = all(value is not None for value in (self.fl_x, self.fl_y, self.cx, self.cy))
 
-    def compute_k_matrix(self):
-        # Compute the camera matrix using the focal length and principal point
-        self.k_matrix = np.array(
-            [
-                [self.fl_x, 0, self.cx],  # noqa: E501
-                [0, self.fl_y, self.cy],
-                [0, 0, 1],
-            ]
+        if provided_k and provided_components:
+            raise ValueError("Provide either k_matrix or fl_x/fl_y/cx/cy, not both.")
+        if not provided_k and not provided_components:
+            raise ValueError("You must provide k_matrix or fl_x/fl_y/cx/cy.")
+
+        if provided_k:
+            k_matrix: Float[ndarray, "3 3"] = np.asarray(self.k_matrix, dtype=float)
+            if k_matrix.shape != (3, 3):
+                raise ValueError("k_matrix must have shape (3, 3).")
+
+            self.k_matrix = k_matrix
+            self.fl_x = float(k_matrix[0, 0])
+            self.fl_y = float(k_matrix[1, 1])
+            self.cx = float(k_matrix[0, 2])
+            self.cy = float(k_matrix[1, 2])
+        else:
+            assert self.fl_x is not None and self.fl_y is not None and self.cx is not None and self.cy is not None
+            k_matrix: Float[ndarray, "3 3"] = np.array(
+                [
+                    [self.fl_x, 0, self.cx],
+                    [0, self.fl_y, self.cy],
+                    [0, 0, 1],
+                ],
+                dtype=float,
+            )
+            self.k_matrix = k_matrix
+
+    @classmethod
+    def from_k_matrix(
+        cls,
+        *,
+        camera_conventions: Literal["RDF", "RUB"],
+        k_matrix: Float[ndarray, "3 3"],
+        height: int,
+        width: int,
+    ) -> "Intrinsics":
+        """Construct intrinsics directly from a 3x3 camera matrix.
+
+        Use this when you already have the calibrated K matrix; the focal lengths and
+        principal point will be derived from it.
+        """
+
+        return cls(
+            camera_conventions=camera_conventions,
+            k_matrix=k_matrix,
+            height=height,
+            width=width,
         )
 
-    def __repr__(self):
+    @classmethod
+    def from_focal_principal_point(
+        cls,
+        *,
+        camera_conventions: Literal["RDF", "RUB"],
+        fl_x: float | np.floating,
+        fl_y: float | np.floating,
+        cx: float | np.floating,
+        cy: float | np.floating,
+        height: int,
+        width: int,
+    ) -> "Intrinsics":
+        """Construct intrinsics from focal lengths and principal point.
+
+        Use this when you have separate fx/fy/cx/cy values; the 3x3 K matrix will
+        be built during initialization.
+        """
+
+        return cls(
+            camera_conventions=camera_conventions,
+            fl_x=fl_x,
+            fl_y=fl_y,
+            cx=cx,
+            cy=cy,
+            height=height,
+            width=width,
+        )
+
+    def __repr__(self) -> str:
         return (
             f"Intrinsics(camera_conventions={self.camera_conventions}, "
             f"fl_x={self.fl_x}, fl_y={self.fl_y}, cx={self.cx}, cy={self.cy}, "

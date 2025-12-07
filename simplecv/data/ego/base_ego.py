@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 from jaxtyping import Float
 from numpy import ndarray
@@ -50,9 +50,7 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
             sorted_cams_and_videos: tuple[
                 dict[CamNameType, list[CameraParam]],
                 dict[CamNameType, Path],
-            ] = (
-                self.align_cams_and_videos(video_path_list=self._video_path_list, ego_cam_dict=self._ego_cam_dict)
-            )
+            ] = self.align_cams_and_videos(video_path_list=self._video_path_list, ego_cam_dict=self._ego_cam_dict)
             # validate that the number of cameras matches the number of videos and names are aligned
             assert len(sorted_cams_and_videos[0]) == len(sorted_cams_and_videos[1]), (
                 f"Number of cameras ({len(sorted_cams_and_videos[0])}) does not match number of videos "
@@ -97,12 +95,6 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
     @abstractmethod
     def load_ego_cams(self) -> dict[str, list[CameraParam]]:
         pass
-
-    # @abstractmethod
-    # def load_labels(self) -> EgoLabels:
-    #     """Load labels for the sequence, if applicable."""
-    #     # TODO this will load in the future the labels for the sequence, if applicable
-    #     pass
 
     @abstractmethod
     def align_cams_and_videos(
