@@ -4,6 +4,7 @@ import os
 import warnings
 from collections.abc import Sequence
 
+import cv2
 import numpy as np
 from einops import rearrange
 from jaxtyping import Float
@@ -238,6 +239,60 @@ def apply_brown_conrady_distortion_batch(
     uv_distorted[..., 1] = uv_normalized[..., 1] * fy[None, :, None] + cy[None, :, None]
 
     return uv_distorted
+
+
+def undistort_brown_conrady_batch(
+    uv_distorted: Float[ndarray, "n_frames n_views n_kpts 2"],
+    intrinsics_stack: Float[ndarray, "n_views 3 3"],
+    distortions: Sequence[BrownConradyDistortion | None],
+) -> Float[ndarray, "n_frames n_views n_kpts 2"]:
+    """Remove Brown–Conrady distortion in pixel space for a batched set of views using OpenCV.
+
+    Note:
+        This mirrors OpenCV's ``undistortPoints`` with ``P=K`` so outputs stay in pixel space,
+        matching the projection matrices used by downstream triangulation.
+    """
+
+    if all(distortion is None for distortion in distortions):
+        return uv_distorted
+
+    uv_out: Float[ndarray, "n_frames n_views n_kpts 2"] = uv_distorted.copy().astype(float)
+    n_frames, n_views, n_kpts, _ = uv_out.shape
+    K_views: Float[ndarray, "n_views 3 3"] = np.asarray(intrinsics_stack, dtype=float)
+
+    for view_idx, distortion in enumerate(distortions):
+        if distortion is None:
+            continue
+
+        dvec: Float[ndarray, "14"] = np.array(
+            [
+                distortion.k1,
+                distortion.k2,
+                distortion.p1,
+                distortion.p2,
+                distortion.k3,
+                distortion.k4,
+                distortion.k5,
+                distortion.k6,
+                distortion.s1,
+                distortion.s2,
+                distortion.s3,
+                distortion.s4,
+                distortion.tau_x,
+                distortion.tau_y,
+            ],
+            dtype=np.float64,
+        )
+        flat: Float[ndarray, "_ 2"] = uv_out[:, view_idx, :, :].reshape(-1, 2).astype(np.float64)
+        undist_flat = cv2.undistortPoints(
+            flat[:, None, :],
+            cameraMatrix=K_views[view_idx],
+            distCoeffs=dvec,
+            P=K_views[view_idx],
+        )
+        uv_out[:, view_idx, :, :] = undist_flat.reshape(n_frames, n_kpts, 2)
+
+    return uv_out
 
 
 def project_brown_conrady_batched(
