@@ -509,20 +509,8 @@ def log_exoego_batch(
             )
         else:
             if isinstance(exo_cam_param_list[0], PinholeParameters):
-                # Strip distortion for projection until BC distortion is implemented in batched path.
-                # TODO: implement Brown–Conrady distortion in project_brown_conrady_batched and
-                # drop this distortion=None workaround.
-                exo_cam_param_list_nodist: list[PinholeParameters] = [
-                    PinholeParameters(
-                        name=cam.name,
-                        intrinsics=cam.intrinsics,
-                        extrinsics=cam.extrinsics,
-                        distortion=None,
-                    )
-                    for cam in exo_cam_param_list
-                ]
                 uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = project_brown_conrady_batched(
-                    xyz_stack_world=xyz_stack, pinhole_param_list=exo_cam_param_list_nodist
+                    xyz_stack_world=xyz_stack, pinhole_param_list=exo_cam_param_list
                 )
             else:
                 raise NotImplementedError(
@@ -610,21 +598,9 @@ def log_exoego_batch(
                     pinhole_slice_full: list[PinholeParameters] = cast(
                         list[PinholeParameters], ego_cam_param_list[start_idx:end_idx]
                     )
-                    # Strip distortion for projection until BC distortion is implemented in batched path.
-                    # TODO: implement Brown–Conrady distortion in project_brown_conrady_batched and
-                    # drop this distortion=None workaround.
-                    pinhole_slice: list[PinholeParameters] = [
-                        PinholeParameters(
-                            name=cam.name,
-                            intrinsics=cam.intrinsics,
-                            extrinsics=cam.extrinsics,
-                            distortion=None,
-                        )
-                        for cam in pinhole_slice_full
-                    ]
                     uv_batch = project_brown_conrady_batched(
                         xyz_stack_world=xyz_trim[start_idx:end_idx],
-                        pinhole_param_list=pinhole_slice,
+                        pinhole_param_list=pinhole_slice_full,
                         filter_invalid=True,
                     )
 

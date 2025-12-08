@@ -6,6 +6,13 @@ import rerun as rr
 from jaxtyping import Float, Int, UInt8
 from numpy import ndarray
 
+from simplecv.camera_parameters import (
+    BrownConradyDistortion,
+    Fisheye62Parameters,
+    KannalaBrandtDistortion,
+    PinholeParameters,
+)
+
 
 def confidence_scores_to_rgb(
     confidence_scores: Float[ndarray, "n_frames n_kpts 1"],
@@ -190,15 +197,16 @@ class Points2DWithConfidence(rr.AsComponents):
         confidences: Float[ndarray, "n_kpts"],
         class_ids: int,
         keypoint_ids: list[int],
-        show_labels: bool = False,
+        show_labels: bool | Int[ndarray, "..."] = False,
         colors: UInt8[ndarray, "n_kpts 3"] | None = None,
         radii: float | None = None,
     ) -> None:
+        show_labels_bool: bool = bool(np.all(show_labels)) if np.size(show_labels) else bool(show_labels)
         self.points2d = rr.Points2D(
             positions=positions,
             class_ids=class_ids,
             keypoint_ids=keypoint_ids,
-            show_labels=show_labels,
+            show_labels=show_labels_bool,
             colors=colors,
             radii=radii,
         )
@@ -241,11 +249,15 @@ class Points2DWithConfidence(rr.AsComponents):
         returned list can be partitioned with per-frame lengths before handing it
         to `rr.send_columns`.
         """
+        show_labels_param: list[bool] | None = (
+            None if show_labels is None else [bool(np.all(show_labels)) if np.size(show_labels) else bool(show_labels)]
+        )
+
         base_columns: rr.ComponentColumnList = rr.Points2D.columns(
             positions=positions,
             radii=radii,
             colors=colors,
-            show_labels=show_labels,
+            show_labels=show_labels_param,
             class_ids=class_ids,
             keypoint_ids=keypoint_ids,
         )
@@ -365,41 +377,54 @@ class PinholeWithDistortion(rr.AsComponents):
     @classmethod
     def from_camera(
         cls,
-        camera: Any,
+        camera: PinholeParameters | Fisheye62Parameters,
         *,
         image_plane_distance: float | int = 0.5,
         include_distortion: bool = True,
     ) -> "PinholeWithDistortion":
+        if camera.intrinsics.camera_conventions == "RDF":
+            view_coords = rr.ViewCoordinates.RDF
+        elif camera.intrinsics.camera_conventions == "RUB":
+            view_coords = rr.ViewCoordinates.RUB
+        else:
+            raise ValueError(f"Unsupported camera convention: {camera.intrinsics.camera_conventions}")
+
         pinhole = rr.Pinhole(
             image_from_camera=camera.intrinsics.k_matrix,
             height=camera.intrinsics.height,
             width=camera.intrinsics.width,
-            camera_xyz=getattr(rr.ViewCoordinates, camera.intrinsics.camera_conventions),
+            camera_xyz=view_coords,
             image_plane_distance=image_plane_distance,
         )
 
         distortion_obj: CameraDistortion | None = None
-        if include_distortion and getattr(camera, "distortion", None) is not None:
-            dist = camera.distortion
-            coeffs = [
-                dist.k1,
-                dist.k2,
-                dist.p1,
-                dist.p2,
-                dist.k3,
-                dist.k4,
-                dist.k5,
-                dist.k6,
-                dist.s1,
-                dist.s2,
-                dist.s3,
-                dist.s4,
-                dist.tau_x,
-                dist.tau_y,
-            ]
-            while len(coeffs) > 5 and abs(coeffs[-1]) < 1e-9:
-                coeffs.pop()
-            distortion_obj = CameraDistortion(model="brown_conrady", coefficients=np.array(coeffs, dtype=np.float32))
+        if include_distortion:
+            dist: BrownConradyDistortion | KannalaBrandtDistortion | None = camera.distortion
+            if isinstance(dist, BrownConradyDistortion):
+                coeffs = [
+                    dist.k1,
+                    dist.k2,
+                    dist.p1,
+                    dist.p2,
+                    dist.k3,
+                    dist.k4,
+                    dist.k5,
+                    dist.k6,
+                    dist.s1,
+                    dist.s2,
+                    dist.s3,
+                    dist.s4,
+                    dist.tau_x,
+                    dist.tau_y,
+                ]
+                while len(coeffs) > 5 and abs(coeffs[-1]) < 1e-9:
+                    coeffs.pop()
+                distortion_obj = CameraDistortion(
+                    model="brown_conrady", coefficients=np.array(coeffs, dtype=np.float32)
+                )
+            elif isinstance(dist, KannalaBrandtDistortion) or dist is None:
+                # Fisheye and other non-Brown–Conrady models are currently not emitted as distortion components.
+                distortion_obj = None
 
         return cls(pinhole=pinhole, distortion=distortion_obj)
 
@@ -413,15 +438,16 @@ class Points3DWithConfidence(rr.ComponentColumn):
         confidences: Float[ndarray, "n_kpts"],
         class_ids: int,
         keypoint_ids: list[int],
-        show_labels: bool = False,
+        show_labels: bool | Int[ndarray, "..."] = False,
         colors: UInt8[ndarray, "n_kpts 3"] | None = None,
         radii: float | None = None,
     ) -> None:
+        show_labels_bool: bool = bool(np.all(show_labels)) if np.size(show_labels) else bool(show_labels)
         self.points3d = rr.Points3D(
             positions=positions,
             class_ids=class_ids,
             keypoint_ids=keypoint_ids,
-            show_labels=show_labels,
+            show_labels=show_labels_bool,
             colors=colors,
             radii=radii,
         )
@@ -459,11 +485,15 @@ class Points3DWithConfidence(rr.ComponentColumn):
         radii: float | Float[ndarray, "n"] | None = None,
     ) -> rr.ComponentColumnList:
         """Return column components mirroring `rr.Points3D.columns` plus confidences."""
+        show_labels_param: list[bool] | None = (
+            None if show_labels is None else [bool(np.all(show_labels)) if np.size(show_labels) else bool(show_labels)]
+        )
+
         base_columns: rr.ComponentColumnList = rr.Points3D.columns(
             positions=positions,
             colors=colors,
             radii=radii,
-            show_labels=show_labels,
+            show_labels=show_labels_param,
             class_ids=class_ids,
             keypoint_ids=keypoint_ids,
         )

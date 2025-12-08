@@ -1293,7 +1293,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pyarrow-stubs-20.0.0.20251107-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pycparser-2.22-pyh29332c3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.19.2-pyhd8ed1ab_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.42.3-h2b88eb6_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.44.2-h2b88eb6_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyserde-0.20.1-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pysocks-1.7.1-pyha55dd90_7.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
@@ -11125,18 +11125,19 @@ packages:
   name: pyrealsense2
   version: 2.53.1.4623
   sha256: f30aaa13460dec96a78a3df7975274cd2f3dcc66b4c8149cae4f3c7da0f9fb8f
-- conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.42.3-h2b88eb6_0.conda
-  sha256: 28ffe7a595262ad28a88a053b3a0899f9b6688bfbbc26d069646d0eb324a5877
-  md5: 671d79c83700da071f74f5b56e36d7db
+- conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.44.2-h2b88eb6_0.conda
+  sha256: e17e3d2678108026ede8345b657f2c04f8c0ef58310cb50741f4c184acd5efd4
+  md5: 15ec28c60772f0756149538eeac9d34f
   depends:
   - libgcc >=14
   - __glibc >=2.17,<3.0.a0
   constrains:
   - __glibc >=2.17
   license: MIT
+  license_family: MIT
   purls: []
-  size: 8703695
-  timestamp: 1763773792307
+  size: 8849946
+  timestamp: 1764970517782
 - conda: https://prefix.dev/conda-forge/noarch/pyserde-0.20.1-pyhd8ed1ab_0.conda
   sha256: a3af70ef83a4010e71933df3162d7a086c42a5a7fd6d1b6020adecc2730affcf
   md5: c468b661f7fd8a17e7cf302dbed7844e
@@ -12316,7 +12317,7 @@ packages:
 - pypi: ./
   name: simplecv
   version: 0.6.0
-  sha256: e7fa08e86efba40d4b27fb4837a2ee20a204473998ab1f52abf0969682374363
+  sha256: b2a5c18e071c529931757782729ef53901da04b278aafbb63d4a18b8e73fd23a
   requires_dist:
   - jaxtyping<0.3.0
   - numpy>=2.0
