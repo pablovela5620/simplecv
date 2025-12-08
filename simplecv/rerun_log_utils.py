@@ -18,6 +18,7 @@ from pyarrow import ChunkedArray
 from rerun_bindings import Recording, RecordingView
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.rerun_custom_types import PinholeWithDistortion
 
 
 def _default_cache_root() -> Path:
@@ -166,6 +167,7 @@ def log_pinhole(
     static: bool = False,
     *,
     recording: rr.RecordingStream | None = None,
+    include_distortion: bool = True,
 ) -> None:
     """
     Logs the pinhole camera parameters and transformation data.
@@ -182,15 +184,10 @@ def log_pinhole(
     # camera intrinsics
     rr.log(
         f"{cam_log_path}/pinhole",
-        rr.Pinhole(
-            image_from_camera=camera.intrinsics.k_matrix,
-            height=camera.intrinsics.height,
-            width=camera.intrinsics.width,
-            camera_xyz=getattr(
-                rr.ViewCoordinates,
-                camera.intrinsics.camera_conventions,
-            ),
+        PinholeWithDistortion.from_camera(
+            camera,
             image_plane_distance=image_plane_distance,
+            include_distortion=include_distortion,
         ),
         static=static,
         recording=recording,

@@ -12,9 +12,10 @@ import numpy as np
 import rerun as rr
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
+from pyarrow import Table
 from rerun_bindings import ComponentColumnDescriptor, IndexColumnDescriptor, Recording, RecordingView, Schema
 
-from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType, EgoData
 from simplecv.rerun_log_utils import (
     get_video_cache,
@@ -29,6 +30,8 @@ else:  # pragma: no cover - runtime alias to avoid circular import
 
 
 AXIS_CODES: dict[int, str] = {1: "U", 2: "D", 3: "R", 4: "L", 5: "F", 6: "B"}
+_DISTORTION_MODEL_COMPONENT = "simplecv.components.DistortionModel"
+_DISTORTION_COEFF_COMPONENT = "simplecv.components.DistortionCoefficients"
 
 
 @dataclass(slots=True)
@@ -141,6 +144,9 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
             transform_entity: Path = ego_entity_path / cam_name
             try:
                 intrinsics: Intrinsics = self._load_intrinsics(recording, pinhole_entity, timeline_name)
+                distortion: BrownConradyDistortion | None = self._load_distortion(
+                    recording, pinhole_entity, timeline_name
+                )
             except ValueError as exc:
                 warnings.warn(
                     (
@@ -162,7 +168,12 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 rotation_default: Float32[ndarray, "3 3"] = np.eye(3, dtype=np.float32)
                 extrinsics_default = Extrinsics(cam_R_world=rotation_default, cam_t_world=translation_default)
                 ego_cam_dict[cam_name] = [
-                    PinholeParameters(name=cam_name, intrinsics=intrinsics, extrinsics=extrinsics_default)
+                    PinholeParameters(
+                        name=cam_name,
+                        intrinsics=intrinsics,
+                        extrinsics=extrinsics_default,
+                        distortion=distortion,
+                    )
                 ]
                 continue
 
@@ -171,7 +182,14 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 rotation_mat: Float32[ndarray, "3 3"] = cam_R_world_batch[idx]
                 translation_vec: Float32[ndarray, "3"] = cam_t_world_batch[idx]
                 extrinsics = Extrinsics(cam_R_world=rotation_mat, cam_t_world=translation_vec)
-                cam_params.append(PinholeParameters(name=cam_name, intrinsics=intrinsics, extrinsics=extrinsics))
+                cam_params.append(
+                    PinholeParameters(
+                        name=cam_name,
+                        intrinsics=intrinsics,
+                        extrinsics=extrinsics,
+                        distortion=distortion,
+                    )
+                )
             if cam_params:
                 ego_cam_dict[cam_name] = cam_params
 
@@ -237,7 +255,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def _load_intrinsics(self, recording: Recording, pinhole_entity: Path, timeline: str) -> Intrinsics:
         view: RecordingView = recording.view(index=timeline, contents=str(pinhole_entity))
-        table = (
+        table: Table = (
             view.filter_index_values(values=[0])
             .select(
                 f"{pinhole_entity}:Pinhole:image_from_camera",
@@ -264,6 +282,56 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
             height=int(resolution[1]),
             width=int(resolution[0]),
         )
+
+    def _load_distortion(
+        self,
+        recording: Recording,
+        pinhole_entity: Path,
+        timeline: str,
+    ) -> BrownConradyDistortion | None:
+        """Load optional Brown–Conrady distortion components if present."""
+        view: RecordingView = recording.view(index=timeline, contents=str(pinhole_entity))
+        model_path: str = f"{pinhole_entity}:{_DISTORTION_MODEL_COMPONENT}"
+        coeff_path: str = f"{pinhole_entity}:{_DISTORTION_COEFF_COMPONENT}"
+
+        # Read all rows for the two custom components and pick the first non-null entry.
+        table: Table = view.select(model_path, coeff_path).read_all()
+
+        # we assume distortion model and coeffs are constant over time, so just pick the first non-null entry
+        model_raw: list[Literal["brown_conrady"]] | None = table.column(0).to_pylist()[0]
+        coeffs_raw: list[list[float]] | None = table.column(1).to_pylist()[0]
+
+        if model_raw is None and coeffs_raw is None:
+            return None
+        else:
+            assert model_raw is not None, "Distortion model is missing though coefficients are present"
+            assert coeffs_raw is not None, "Distortion coefficients are missing though model is present"
+            # wrapped in a list for both model and coeffs
+
+            model: Literal["brown_conrady"] = model_raw[0]
+            coeffs_arr: Float32[ndarray, "14"] = np.asarray(coeffs_raw[0], dtype=np.float32).flatten()
+            assert model == "brown_conrady", f"Unsupported distortion model: {model}"
+
+            # Helper to guard missing trailing coefficients.
+            def _safe(idx: int) -> float:
+                return float(coeffs_arr[idx]) if idx < len(coeffs_arr) else 0.0
+
+            return BrownConradyDistortion(
+                k1=_safe(0),
+                k2=_safe(1),
+                p1=_safe(2),
+                p2=_safe(3),
+                k3=_safe(4),
+                k4=_safe(5),
+                k5=_safe(6),
+                k6=_safe(7),
+                s1=_safe(8),
+                s2=_safe(9),
+                s3=_safe(10),
+                s4=_safe(11),
+                tau_x=_safe(12),
+                tau_y=_safe(13),
+            )
 
     def _load_extrinsics_series(
         self,

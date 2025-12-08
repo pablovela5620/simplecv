@@ -294,6 +294,116 @@ class Points2DWithConfidence(rr.AsComponents):
         return instance
 
 
+# ---- Distortion components (Brown–Conrady) -----------------------------------
+
+_DISTORTION_MODEL_COMPONENT: str = "simplecv.components.DistortionModel"
+_DISTORTION_COEFF_COMPONENT: str = "simplecv.components.DistortionCoefficients"
+
+
+def _distortion_component_descriptor(component: str) -> rr.ComponentDescriptor:
+    return rr.ComponentDescriptor(component=component, component_type=component)
+
+
+class DistortionModelBatch(rr.ComponentBatchMixin):
+    """Single-string distortion model identifier (e.g., 'brown_conrady')."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+
+    def component_descriptor(self) -> rr.ComponentDescriptor:
+        return _distortion_component_descriptor(_DISTORTION_MODEL_COMPONENT)
+
+    def as_arrow_array(self) -> pa.Array:
+        return pa.array([self.model], type=pa.string())
+
+
+class DistortionCoefficientsBatch(rr.ComponentBatchMixin):
+    """Variable-length vector of distortion coefficients."""
+
+    def __init__(self, coefficients: Float[ndarray, "n"]) -> None:
+        coeffs_arr: Float[ndarray, "n"] = np.asarray(coefficients, dtype=np.float32).reshape(-1)
+        self.coefficients: Float[ndarray, "n"] = coeffs_arr
+
+    def component_descriptor(self) -> rr.ComponentDescriptor:
+        return _distortion_component_descriptor(_DISTORTION_COEFF_COMPONENT)
+
+    def as_arrow_array(self) -> pa.Array:
+        coeff_list = self.coefficients.tolist()
+        return pa.array([coeff_list], type=pa.list_(pa.float32()))
+
+
+class CameraDistortion(rr.AsComponents):
+    """Bundle distortion model + coefficients as custom components."""
+
+    def __init__(self, model: str, coefficients: Float[ndarray, "n"]) -> None:
+        self.model: str = model
+        coeffs_arr: Float[ndarray, "n"] = np.asarray(coefficients, dtype=np.float32).reshape(-1)
+        self.coefficients: Float[ndarray, "n"] = coeffs_arr
+
+    def as_component_batches(self) -> list[rr.DescribedComponentBatch]:
+        model_batch = DistortionModelBatch(self.model)
+        coeff_batch = DistortionCoefficientsBatch(self.coefficients)
+        return [
+            model_batch.described(model_batch.component_descriptor()),
+            coeff_batch.described(coeff_batch.component_descriptor()),
+        ]
+
+
+class PinholeWithDistortion(rr.AsComponents):
+    """Wrap standard Pinhole archetype while appending custom distortion components."""
+
+    def __init__(self, pinhole: rr.archetypes.Pinhole, distortion: CameraDistortion | None) -> None:
+        self.pinhole = pinhole
+        self.distortion = distortion
+
+    def as_component_batches(self) -> list[rr.DescribedComponentBatch]:
+        batches: list[rr.DescribedComponentBatch] = list(self.pinhole.as_component_batches())
+        if self.distortion is not None:
+            batches.extend(self.distortion.as_component_batches())
+        return batches
+
+    @classmethod
+    def from_camera(
+        cls,
+        camera: Any,
+        *,
+        image_plane_distance: float | int = 0.5,
+        include_distortion: bool = True,
+    ) -> "PinholeWithDistortion":
+        pinhole = rr.Pinhole(
+            image_from_camera=camera.intrinsics.k_matrix,
+            height=camera.intrinsics.height,
+            width=camera.intrinsics.width,
+            camera_xyz=getattr(rr.ViewCoordinates, camera.intrinsics.camera_conventions),
+            image_plane_distance=image_plane_distance,
+        )
+
+        distortion_obj: CameraDistortion | None = None
+        if include_distortion and getattr(camera, "distortion", None) is not None:
+            dist = camera.distortion
+            coeffs = [
+                dist.k1,
+                dist.k2,
+                dist.p1,
+                dist.p2,
+                dist.k3,
+                dist.k4,
+                dist.k5,
+                dist.k6,
+                dist.s1,
+                dist.s2,
+                dist.s3,
+                dist.s4,
+                dist.tau_x,
+                dist.tau_y,
+            ]
+            while len(coeffs) > 5 and abs(coeffs[-1]) < 1e-9:
+                coeffs.pop()
+            distortion_obj = CameraDistortion(model="brown_conrady", coefficients=np.array(coeffs, dtype=np.float32))
+
+        return cls(pinhole=pinhole, distortion=distortion_obj)
+
+
 class Points3DWithConfidence(rr.ComponentColumn):
     """Custom Points3D archetype with per-keypoint and average confidences."""
 

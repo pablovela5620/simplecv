@@ -1290,6 +1290,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/pugixml-1.14-h59595ed_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pure_eval-0.2.3-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/py-opencv-4.10.0-qt6_py312h7519628_613.conda
+      - conda: https://prefix.dev/conda-forge/noarch/pyarrow-stubs-20.0.0.20251107-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pycparser-2.22-pyh29332c3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.19.2-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.42.3-h2b88eb6_0.conda
@@ -11046,6 +11047,17 @@ packages:
   version: 22.0.0
   sha256: bea79263d55c24a32b0d79c00a1c58bb2ee5f0757ed95656b01c0fb310c5af3d
   requires_python: '>=3.10'
+- conda: https://prefix.dev/conda-forge/noarch/pyarrow-stubs-20.0.0.20251107-pyhd8ed1ab_0.conda
+  sha256: 8c06432137e5da9cf7251d0f0e93be217884034afe9f8da0651372c2df6eac4d
+  md5: 4015f2333830f917af5ffe65106764af
+  depends:
+  - python >=3.10,<4.0
+  license: BSD-2-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/pyarrow-stubs?source=hash-mapping
+  size: 168666
+  timestamp: 1762490020334
 - conda: https://prefix.dev/conda-forge/noarch/pycparser-2.22-pyh29332c3_1.conda
   sha256: 79db7928d13fab2d892592223d7570f5061c192f27b9febd1a418427b719acc6
   md5: 12c566707c80111f9799308d9e265aef
@@ -12304,7 +12316,7 @@ packages:
 - pypi: ./
   name: simplecv
   version: 0.6.0
-  sha256: 32832a92a9d540a26b362532d73247d786aa6dde914c659a1bf6925d2dd1a8de
+  sha256: e7fa08e86efba40d4b27fb4837a2ee20a204473998ab1f52abf0969682374363
   requires_dist:
   - jaxtyping<0.3.0
   - numpy>=2.0

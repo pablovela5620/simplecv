@@ -183,6 +183,7 @@ pytest = ">=8.3.3,<9"
 hypothesis = ">=6.112.1,<7"
 pyrefly = "==0.42.3"
 types-tqdm = ">=4.67.0,<5"
+pyarrow-stubs = "*"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 pytest-beartype = ">=0.2,<1"

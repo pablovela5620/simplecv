@@ -25,7 +25,12 @@ from simplecv.data.skeleton.coco_133 import (
     LEFT_HAND_IDX,
     RIGHT_HAND_IDX,
 )
-from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import (
+    PinholeWithDistortion,
+    Points2DWithConfidence,
+    Points3DWithConfidence,
+    confidence_scores_to_rgb,
+)
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
     log_pinhole,
@@ -504,15 +509,25 @@ def log_exoego_batch(
             )
         else:
             if isinstance(exo_cam_param_list[0], PinholeParameters):
+                # Strip distortion for projection until BC distortion is implemented in batched path.
+                # TODO: implement Brown–Conrady distortion in project_brown_conrady_batched and
+                # drop this distortion=None workaround.
+                exo_cam_param_list_nodist: list[PinholeParameters] = [
+                    PinholeParameters(
+                        name=cam.name,
+                        intrinsics=cam.intrinsics,
+                        extrinsics=cam.extrinsics,
+                        distortion=None,
+                    )
+                    for cam in exo_cam_param_list
+                ]
                 uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = project_brown_conrady_batched(
-                    xyz_stack_world=xyz_stack, pinhole_param_list=exo_cam_param_list
+                    xyz_stack_world=xyz_stack, pinhole_param_list=exo_cam_param_list_nodist
                 )
-
             else:
                 raise NotImplementedError(
                     f"Exo camera parameters of type '{type(exo_cam_param_list[0])}' are not supported."
                 )
-            # proj_rows_exo: Float[ndarray, "n_views 4"] = Pall_exo[:, 2, :]
             for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
                 exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
                 exo_pinhole_path: Path = exo_cam_path / "pinhole"
@@ -537,8 +552,6 @@ def log_exoego_batch(
                 n_keypoints: int = len(COCO_133_IDS)
                 keypoint_lengths_cam: Int[ndarray, "n_frames"] = np.full(n_frames_cam, n_keypoints, dtype=np.int32)
 
-                # Confidence-aware helper keeps the familiar column API while adding
-                # confidences and per-frame averages internally.
                 rr.log(
                     f"{exo_pinhole_path}/coco133_uv",
                     Points2DWithConfidence.from_fields(
@@ -594,9 +607,21 @@ def log_exoego_batch(
                 end_idx: int = min(start_idx + batch_size, n_frames_total)
 
                 if isinstance(ego_cam_param_list[0], PinholeParameters):
-                    pinhole_slice: list[PinholeParameters] = cast(
+                    pinhole_slice_full: list[PinholeParameters] = cast(
                         list[PinholeParameters], ego_cam_param_list[start_idx:end_idx]
                     )
+                    # Strip distortion for projection until BC distortion is implemented in batched path.
+                    # TODO: implement Brown–Conrady distortion in project_brown_conrady_batched and
+                    # drop this distortion=None workaround.
+                    pinhole_slice: list[PinholeParameters] = [
+                        PinholeParameters(
+                            name=cam.name,
+                            intrinsics=cam.intrinsics,
+                            extrinsics=cam.extrinsics,
+                            distortion=None,
+                        )
+                        for cam in pinhole_slice_full
+                    ]
                     uv_batch = project_brown_conrady_batched(
                         xyz_stack_world=xyz_trim[start_idx:end_idx],
                         pinhole_param_list=pinhole_slice,
@@ -757,6 +782,7 @@ def setup_scene(
                     image_plane_distance=exo_sequence.image_plane_distance,
                     static=True,
                     recording=recording,
+                    include_distortion=True,
                 )
                 logged_exo_cameras.add(stream_name)
 
@@ -811,15 +837,10 @@ def setup_scene(
             pinhole_log_path: Path = cam_log_path / "pinhole"
             rr.log(
                 f"{pinhole_log_path}",
-                rr.Pinhole(
-                    image_from_camera=first_cam.intrinsics.k_matrix,
-                    height=first_cam.intrinsics.height,
-                    width=first_cam.intrinsics.width,
-                    camera_xyz=getattr(
-                        rr.ViewCoordinates,
-                        first_cam.intrinsics.camera_conventions,
-                    ),
+                PinholeWithDistortion.from_camera(
+                    first_cam,
                     image_plane_distance=ego_sequence.image_plane_distance,
+                    include_distortion=True,
                 ),
                 static=True,
                 recording=recording,
