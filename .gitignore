@@ -169,7 +169,7 @@ data/*
 *MANO_*.pkl
 repomix-output.xml
 
-
+pretrained_models/*
 # START Ruler Generated Files
 /.codex/config.json
 /.codex/config.json.bak

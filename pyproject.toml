@@ -17,6 +17,7 @@ dependencies = [
     "hf-transfer>=0.1.9",
     "lovely-numpy>=0.2.13,<0.3",
     "pandas>=2.3.3",
+    "onnxruntime>=1.22.0,<2",
 ]
 
 [project.scripts]
@@ -108,6 +109,8 @@ description = "Downloads an example assembly101 720p dataset from huggingface"
 
 [tool.pixi.pypi-dependencies]
 simplecv = { path = ".", editable = true }
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }
 
 
 [tool.pixi.dependencies]
@@ -125,10 +128,13 @@ open3d = ">=0.18.0,<0.19"
 scipy = ">=1.15.2,<2"
 natsort = ">=8.4.0,<9"
 av = "*"
+pytorch = "*"
+torchvision = "*"
 
 hdf5 = ">=1.14.4,<2"
 h5py = ">=3.12.1,<4"
 jupyterlab = ">=4.4.9,<5"
+dill = ">=0.4.0,<0.5"
 
 # cuda128 begin
 [tool.pixi.feature.cuda128]
@@ -188,9 +194,6 @@ pyarrow-stubs = "*"
 [tool.pixi.feature.dev.pypi-dependencies]
 pytest-beartype = ">=0.2,<1"
 ipython-beartype = "*"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }
-
 
 [tool.pixi.feature.dev.tasks]
 # Run tests in the dev environment
