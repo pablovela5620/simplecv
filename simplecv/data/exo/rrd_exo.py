@@ -44,6 +44,12 @@ class _RRDCameraStream:
 class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
     """RRD-backed exo sequence that remuxes recorded H.264 streams into mp4 assets."""
 
+    _recording: Recording | None = None
+
+    def __init__(self, cfg: RRDExoEgoConfig, recording: Recording | None = None) -> None:
+        self._recording = recording
+        super().__init__(cfg)
+
     def __getitem__(self, idx: int) -> None:
         return None
 
@@ -65,7 +71,7 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         self._remux_tmpdir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(prefix="rrd_exo_remux_")
         atexit.register(self._remux_tmpdir.cleanup)
 
-        self._recording: Recording = rr.dataframe.load_recording(str(rrd_path))
+        assert self._recording is not None, "Recording must be provided by caller"
         schema = self._recording.schema()
         self._video_timeline: str = self._select_timeline(schema)
         self._camera_streams: list[_RRDCameraStream] = self._discover_camera_streams(schema)
@@ -108,7 +114,8 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         return video_paths
 
     def load_exo_cams(self) -> list[PinholeParameters]:
-        recording: Recording = getattr(self, "_recording", rr.dataframe.load_recording(str(self.config.rrd_path)))
+        assert self._recording is not None, "Recording must be provided by caller"
+        recording: Recording = self._recording
         schema = recording.schema()
         timeline: str = getattr(self, "_video_timeline", self._select_timeline(schema))
         camera_streams: list[_RRDCameraStream] = getattr(

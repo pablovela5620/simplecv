@@ -48,8 +48,15 @@ class _RRDEgoCameraStream:
 class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
     """RRD-backed ego sequence that remuxes recorded H.264 streams into mp4 assets."""
 
+    def __init__(self, cfg: RRDExoEgoConfig, recording: Recording | None = None) -> None:
+        self._recording = recording
+        super().__init__(cfg)
+
+    _recording: Recording | None = None
+
     def load_video_paths(self) -> list[Path]:
-        recording: Recording = rr.dataframe.load_recording(str(self.config.rrd_path))
+        assert self._recording is not None, "Recording must be provided by caller"
+        recording: Recording = self._recording
         schema: Schema = recording.schema()
         timelines: list[IndexColumnDescriptor] = schema.index_columns()
         # make sure the timeline exsits
@@ -109,7 +116,8 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         return ordered_paths
 
     def load_ego_cams(self) -> dict[CamNameType, list[PinholeParameters]]:
-        recording: Recording = rr.dataframe.load_recording(str(self.config.rrd_path))
+        assert self._recording is not None, "Recording must be provided by caller"
+        recording: Recording = self._recording
         schema: Schema = recording.schema()
         timelines: list[IndexColumnDescriptor] = schema.index_columns()
         # Component Columns

@@ -28,6 +28,13 @@ class RRDExoEgoConfig(BaseExoEgoDatasetConfig):
 
 
 class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
+    _recording: Recording | None = None
+
+    def __init__(self, cfg: RRDExoEgoConfig) -> None:
+        # Load once and share with ego/exo/labels.
+        self._recording = rr.dataframe.load_recording(str(cfg.rrd_path))
+        super().__init__(cfg)
+
     def __getitem__(self, idx: int) -> EgoData:
         return EgoData(cam_params_list=[], bgr_list=[])
 
@@ -36,7 +43,8 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     def _build_ego(self) -> BaseEgoSequence[RRDExoEgoConfig] | None:
         try:
-            return RRDEgoSequence(self.config)
+            ego_seq = RRDEgoSequence(self.config, recording=self._recording)
+            return ego_seq
         except AssertionError as exc:
             if "No ego camera streams" in str(exc):
                 return None
@@ -44,7 +52,8 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     def _build_exo(self) -> BaseExoSequence[RRDExoEgoConfig] | None:
         try:
-            return RRDExoSequence(self.config)
+            exo_seq = RRDExoSequence(self.config, recording=self._recording)
+            return exo_seq
         except AssertionError as exc:
             if "No exo camera streams" in str(exc):
                 return None
@@ -55,7 +64,9 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         rrd_path: Path = self.config.rrd_path
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
-        recording: Recording = rr.dataframe.load_recording(str(rrd_path))
+        if self._recording is None:
+            self._recording = rr.dataframe.load_recording(str(rrd_path))
+        recording: Recording = self._recording
 
         timeline: str = "video_time"
         entity_path: str = "world/gt/coco133_xyz"
