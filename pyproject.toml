@@ -134,7 +134,11 @@ torchvision = "*"
 hdf5 = ">=1.14.4,<2"
 h5py = ">=3.12.1,<4"
 jupyterlab = ">=4.4.9,<5"
-dill = ">=0.4.0,<0.5"
+dill = ">=0.3.8,<0.3.9"
+
+[tool.pixi.target.linux-64.dependencies]
+# Overwrite the needed python version only on linux-64
+datasets = ">=4.0.0"
 
 # cuda128 begin
 [tool.pixi.feature.cuda128]
@@ -142,12 +146,12 @@ platforms = ["linux-64"]
 channels = ["https://prefix.dev/conda-forge"]
 
 [tool.pixi.feature.cuda128.system-requirements]
-cuda = "12.8"
+cuda = "12.9"
 
 [tool.pixi.feature.cuda128.dependencies]
 # CUDA Build Tools
 cuda-compiler = "*"
-cuda-version = "12.8.*"
+cuda-version = "12.9.*"
 cuda-cudart-dev = "*"
 cuda-crt = "*"
 libcusparse-dev = "*"
