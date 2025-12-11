@@ -36,7 +36,11 @@ from simplecv.data.skeleton.coco_133 import (
 from simplecv.ops.triangulate import batch_triangulate
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.sensors.camera.brown_conrady import project_brown_conrady_batched, undistort_brown_conrady_batch
+from simplecv.sensors.camera.brown_conrady import (
+    project_brown_conrady_diagonal,
+    project_brown_conrady_grid,
+    undistort_brown_conrady_batch,
+)
 from simplecv.video_io import MultiVideoReader
 
 np.set_printoptions(suppress=True)
@@ -416,9 +420,9 @@ def single_frame_mv_hands(
     aligned_conf_full: Float32[ndarray, "1 133"] = np.zeros((1, 133), dtype=np.float32)
     aligned_xyz_full[0, valid_mask, :] = aligned_points.astype(np.float32, copy=False)
     aligned_conf_full[0, valid_mask] = xyzc_coco[valid_mask, 3].astype(np.float32, copy=False)
-    uv_aligned: Float32[ndarray, "1 n_views 133 2"] = project_brown_conrady_batched(
+    uv_aligned: Float32[ndarray, "1 n_views 133 2"] = project_brown_conrady_grid(
         xyz_stack_world=aligned_xyz_full,
-        pinhole_param_list=pinhole_param_list,
+        pinholes_per_view=pinhole_param_list,
         filter_invalid=True,
     )
     aligned_conf_rgb: UInt8[ndarray, "1 133 3"] = confidence_scores_to_rgb(aligned_conf_full[..., np.newaxis])
@@ -660,33 +664,17 @@ def log_reprojected_gt_uv(
         conf_trim: Float[ndarray, "n_frames 133"] = conf_stack[:n_frames_total]
         color_trim: UInt8[ndarray, "n_frames 133 3"] = colors[:n_frames_total]
 
-        uv_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((n_frames_total, 133, 2), dtype=np.float32)
-
-        batch_size = min(100, n_frames_total)
-        for start_idx in tqdm(
-            range(0, n_frames_total, batch_size),
-            desc=f"Reproject GT into {cam_name}",
-            leave=False,
-        ):
-            end_idx: int = min(start_idx + batch_size, n_frames_total)
-            batch_len = end_idx - start_idx
-            indices = np.arange(batch_len)
-
-            if isinstance(ego_cam_param_list[0], PinholeParameters):
-                pinhole_slice: list[PinholeParameters] = cast(
-                    list[PinholeParameters], ego_cam_param_list[start_idx:end_idx]
-                )
-                uv_batch = project_brown_conrady_batched(
-                    xyz_stack_world=xyz_trim[start_idx:end_idx],
-                    pinhole_param_list=pinhole_slice,
-                    filter_invalid=True,
-                )
-            else:
-                raise NotImplementedError(
-                    f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
-                )
-
-            uv_stack[start_idx:end_idx] = uv_batch[indices, indices]
+        if isinstance(ego_cam_param_list[0], PinholeParameters):
+            pinhole_slice: list[PinholeParameters] = cast(list[PinholeParameters], ego_cam_param_list[:n_frames_total])
+            uv_stack: Float[ndarray, "n_frames 133 2"] = project_brown_conrady_diagonal(
+                xyz_stack_world=xyz_trim,
+                pinholes_per_frame=pinhole_slice,
+                filter_invalid=True,
+            )
+        else:
+            raise NotImplementedError(
+                f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
+            )
 
         positions_flat: Float[ndarray, "n_total 2"] = rearrange(
             uv_stack,

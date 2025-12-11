@@ -36,7 +36,10 @@ from simplecv.rerun_log_utils import (
     log_pinhole,
     log_video,
 )
-from simplecv.sensors.camera.brown_conrady import project_brown_conrady_batched
+from simplecv.sensors.camera.brown_conrady import (
+    project_brown_conrady_diagonal,
+    project_brown_conrady_grid,
+)
 from simplecv.sensors.camera.fisheye62 import project_kannala_brandt_batched
 from simplecv.video_io import MultiVideoReader
 
@@ -509,8 +512,8 @@ def log_exoego_batch(
             )
         else:
             if isinstance(exo_cam_param_list[0], PinholeParameters):
-                uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = project_brown_conrady_batched(
-                    xyz_stack_world=xyz_stack, pinhole_param_list=exo_cam_param_list
+                uv_raw_stack: Float[ndarray, "n_frames n_views 133 2"] = project_brown_conrady_grid(
+                    xyz_stack_world=xyz_stack, pinholes_per_view=exo_cam_param_list
                 )
             else:
                 raise NotImplementedError(
@@ -589,22 +592,22 @@ def log_exoego_batch(
 
             uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((n_frames_total, 133, 2))
 
-            # Process in batches to balance memory usage and performance
-            batch_size = min(100, len(xyz_stack))  # Adjust based on available memory
-            for start_idx in range(0, n_frames_total, batch_size):
-                end_idx: int = min(start_idx + batch_size, n_frames_total)
+            if isinstance(ego_cam_param_list[0], PinholeParameters):
+                # Time-aligned fast path: one call over the full trimmed sequence
+                pinhole_slice_full: list[PinholeParameters] = cast(
+                    list[PinholeParameters], ego_cam_param_list[:n_frames_total]
+                )
+                uv_ego_stack[:, :, :] = project_brown_conrady_diagonal(
+                    xyz_stack_world=xyz_trim[:n_frames_total],
+                    pinholes_per_frame=pinhole_slice_full,
+                    filter_invalid=True,
+                )
 
-                if isinstance(ego_cam_param_list[0], PinholeParameters):
-                    pinhole_slice_full: list[PinholeParameters] = cast(
-                        list[PinholeParameters], ego_cam_param_list[start_idx:end_idx]
-                    )
-                    uv_batch = project_brown_conrady_batched(
-                        xyz_stack_world=xyz_trim[start_idx:end_idx],
-                        pinhole_param_list=pinhole_slice_full,
-                        filter_invalid=True,
-                    )
-
-                elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
+            elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
+                # Keep batching for fisheye (no time-aligned helper)
+                batch_size = min(100, len(xyz_stack))
+                for start_idx in range(0, n_frames_total, batch_size):
+                    end_idx: int = min(start_idx + batch_size, n_frames_total)
                     fisheye_slice: list[Fisheye62Parameters] = cast(
                         list[Fisheye62Parameters], ego_cam_param_list[start_idx:end_idx]
                     )
@@ -613,18 +616,13 @@ def log_exoego_batch(
                         pinhole_param_list=fisheye_slice,
                         filter_invalid=True,
                     )
-                else:
-                    raise NotImplementedError(
-                        f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
-                    )
-
-                # Extract diagonal to get frame-to-frame correspondence
-                batch_len = end_idx - start_idx
-                indices = np.arange(batch_len)
-                uv_batch_diagonal = uv_batch[indices, indices]
-
-                # Store results
-                uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
+                    batch_len = end_idx - start_idx
+                    indices = np.arange(batch_len)
+                    uv_ego_stack[start_idx:end_idx] = uv_batch[indices, indices]
+            else:
+                raise NotImplementedError(
+                    f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
+                )
 
             n_frames_cam: int = len(uv_ego_stack)
             if n_frames_cam > 0:

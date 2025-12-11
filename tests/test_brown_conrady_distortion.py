@@ -10,7 +10,7 @@ from hypothesis import strategies as st
 from hypothesis.strategies import DrawFn, composite
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
-from simplecv.sensors.camera.brown_conrady import project_brown_conrady_batched
+from simplecv.sensors.camera.brown_conrady import project_brown_conrady_grid
 
 
 @composite
@@ -79,9 +79,9 @@ def test_brown_conrady_matches_opencv(case: tuple[np.ndarray, list[PinholeParame
     n_frames, n_points, _ = xyz_world.shape
     n_views = len(pinholes)
 
-    uv_bc = project_brown_conrady_batched(
+    uv_bc = project_brown_conrady_grid(
         xyz_stack_world=xyz_world.astype(np.float64),
-        pinhole_param_list=pinholes,
+        pinholes_per_view=pinholes,
         filter_invalid=False,
     )
     assert uv_bc.shape == (n_frames, n_views, n_points, 2)
