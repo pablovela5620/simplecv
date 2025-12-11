@@ -134,7 +134,7 @@ torchvision = "*"
 hdf5 = ">=1.14.4,<2"
 h5py = ">=3.12.1,<4"
 jupyterlab = ">=4.4.9,<5"
-dill = ">=0.3.8,<0.3.9"
+dill = ">=0.3.8,<0.4.1"
 
 [tool.pixi.target.linux-64.dependencies]
 # Overwrite the needed python version only on linux-64
