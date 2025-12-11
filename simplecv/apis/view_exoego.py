@@ -40,7 +40,7 @@ from simplecv.sensors.camera.brown_conrady import (
     project_brown_conrady_diagonal,
     project_brown_conrady_grid,
 )
-from simplecv.sensors.camera.fisheye62 import project_kannala_brandt_batched
+from simplecv.sensors.camera.fisheye62 import project_kannala_brandt_diagonal
 from simplecv.video_io import MultiVideoReader
 
 # Improve console readability when inspecting numeric debugging output.
@@ -590,35 +590,30 @@ def log_exoego_batch(
             conf_trim: Float[ndarray, "n_frames 133"] = conf_stack[:n_frames_total]
             color_trim: UInt8[ndarray, "n_frames 133 3"] = colors[:n_frames_total]
 
-            uv_ego_stack: Float[ndarray, "n_frames 133 2"] = np.zeros((n_frames_total, 133, 2))
+            if n_frames_total == 0:
+                continue
 
             if isinstance(ego_cam_param_list[0], PinholeParameters):
                 # Time-aligned fast path: one call over the full trimmed sequence
                 pinhole_slice_full: list[PinholeParameters] = cast(
                     list[PinholeParameters], ego_cam_param_list[:n_frames_total]
                 )
-                uv_ego_stack[:, :, :] = project_brown_conrady_diagonal(
+                uv_ego_stack: Float[ndarray, "n_frames 133 2"] = project_brown_conrady_diagonal(
                     xyz_stack_world=xyz_trim[:n_frames_total],
                     pinholes_per_frame=pinhole_slice_full,
                     filter_invalid=True,
                 )
 
             elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
-                # Keep batching for fisheye (no time-aligned helper)
-                batch_size = min(100, len(xyz_stack))
-                for start_idx in range(0, n_frames_total, batch_size):
-                    end_idx: int = min(start_idx + batch_size, n_frames_total)
-                    fisheye_slice: list[Fisheye62Parameters] = cast(
-                        list[Fisheye62Parameters], ego_cam_param_list[start_idx:end_idx]
-                    )
-                    uv_batch = project_kannala_brandt_batched(
-                        xyz_stack_world=xyz_trim[start_idx:end_idx],
-                        pinhole_param_list=fisheye_slice,
-                        filter_invalid=True,
-                    )
-                    batch_len = end_idx - start_idx
-                    indices = np.arange(batch_len)
-                    uv_ego_stack[start_idx:end_idx] = uv_batch[indices, indices]
+                # Time-aligned fisheye fast path: one pose per frame, no outer-product grid
+                fisheye_slice_full: list[Fisheye62Parameters] = cast(
+                    list[Fisheye62Parameters], ego_cam_param_list[:n_frames_total]
+                )
+                uv_ego_stack: Float[ndarray, "n_frames 133 2"] = project_kannala_brandt_diagonal(
+                    xyz_stack_world=xyz_trim[:n_frames_total],
+                    pinholes_per_frame=fisheye_slice_full,
+                    filter_invalid=True,
+                )
             else:
                 raise NotImplementedError(
                     f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
