@@ -230,7 +230,7 @@ def single_frame_mv_hands(
     timeline: str,
     shortest_timestamp: Int[ndarray, "num_frames"],
     ts_nano: int,
-    hand_device: Literal["auto", "cuda", "cpu"] = "auto",
+    debug: bool = False,
 ) -> UmeyamaResult | None:
     """
     Take a single frame from the ego sequence and run hand detection and keypoint estimation
@@ -274,16 +274,16 @@ def single_frame_mv_hands(
                 rgb_hw3=rgb_hw3, xyxy=det_results.left_xyxy, handedness="left"
             )
             assert isinstance(wilor_preds, KeypointResults)
-
-            rr.log(
-                f"{pinhole_log_path}/image/{COCO133_ROI_LABELS[Coco133RoiLayer.LEFT_HAND]}",
-                rr.Boxes2D(
-                    array=det_results.left_xyxy,
-                    array_format=rr.Box2DFormat.XYXY,
-                    class_ids=int(Coco133RoiLayer.LEFT_HAND),
-                    show_labels=False,
-                ),
-            )
+            if debug:
+                rr.log(
+                    f"{pinhole_log_path}/image/{COCO133_ROI_LABELS[Coco133RoiLayer.LEFT_HAND]}",
+                    rr.Boxes2D(
+                        array=det_results.left_xyxy,
+                        array_format=rr.Box2DFormat.XYXY,
+                        class_ids=int(Coco133RoiLayer.LEFT_HAND),
+                        show_labels=False,
+                    ),
+                )
 
             uvc_coco[LEFT_HAND_IDX, :2] = wilor_preds.keypoints_2d[0]
             uvc_coco[LEFT_HAND_IDX, 2] = wilor_preds.scores[0]
@@ -293,16 +293,16 @@ def single_frame_mv_hands(
                 rgb_hw3=rgb_hw3, xyxy=det_results.right_xyxy, handedness="right"
             )
             assert isinstance(wilor_preds, KeypointResults)
-
-            rr.log(
-                f"{pinhole_log_path}/image/{COCO133_ROI_LABELS[Coco133RoiLayer.RIGHT_HAND]}",
-                rr.Boxes2D(
-                    array=det_results.right_xyxy,
-                    array_format=rr.Box2DFormat.XYXY,
-                    class_ids=int(Coco133RoiLayer.RIGHT_HAND),
-                    show_labels=False,
-                ),
-            )
+            if debug:
+                rr.log(
+                    f"{pinhole_log_path}/image/{COCO133_ROI_LABELS[Coco133RoiLayer.RIGHT_HAND]}",
+                    rr.Boxes2D(
+                        array=det_results.right_xyxy,
+                        array_format=rr.Box2DFormat.XYXY,
+                        class_ids=int(Coco133RoiLayer.RIGHT_HAND),
+                        show_labels=False,
+                    ),
+                )
 
             uvc_coco[RIGHT_HAND_IDX, :2] = wilor_preds.keypoints_2d[0]
             uvc_coco[RIGHT_HAND_IDX, 2] = wilor_preds.scores[0]
@@ -314,17 +314,18 @@ def single_frame_mv_hands(
         )
         confidence_rgb_view: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_view_stack[0]
         # log all keypoints
-        rr.log(
-            f"{pinhole_log_path}/image/left_hand/keypoints_2d",
-            Points2DWithConfidence(
-                positions=uvc_coco[:, :2],
-                confidences=uvc_coco[:, 2],
-                class_ids=int(Coco133AnnotationLayer.RAW_2D),
-                keypoint_ids=COCO_133_IDS,
-                show_labels=False,
-                colors=confidence_rgb_view,
-            ),
-        )
+        if debug:
+            rr.log(
+                f"{pinhole_log_path}/image/left_hand/keypoints_2d",
+                Points2DWithConfidence(
+                    positions=uvc_coco[:, :2],
+                    confidences=uvc_coco[:, 2],
+                    class_ids=int(Coco133AnnotationLayer.RAW_2D),
+                    keypoint_ids=COCO_133_IDS,
+                    show_labels=False,
+                    colors=confidence_rgb_view,
+                ),
+            )
     # triangulate 3d keypoints from all ego views (undistort before solving)
     uvc_coco_stack: Float[ndarray, "n_views n_kpts=133 3"] = np.stack(uvc_coco_list, axis=0)
     pinhole_param_list: list[PinholeParameters] = []
@@ -371,18 +372,19 @@ def single_frame_mv_hands(
     invalid_mask: Bool[ndarray, "n_kpts"] = (~np.isfinite(confidences_for_log)) | (confidences_for_log <= 0.0)
     positions_for_log[invalid_mask, :] = np.nan
 
-    rr.log(
-        f"{parent_log_path}/triangulated_hands/coco133_xyz",
-        Points3DWithConfidence(
-            positions=positions_for_log,
-            confidences=confidences_for_log,
-            class_ids=int(Coco133AnnotationLayer.TRIANGULATED_3D),
-            keypoint_ids=COCO_133_IDS,
-            show_labels=False,
-            colors=tri_conf_rgb,
-        ),
-        static=True,
-    )
+    if debug:
+        rr.log(
+            f"{parent_log_path}/triangulated_hands/coco133_xyz",
+            Points3DWithConfidence(
+                positions=positions_for_log,
+                confidences=confidences_for_log,
+                class_ids=int(Coco133AnnotationLayer.TRIANGULATED_3D),
+                keypoint_ids=COCO_133_IDS,
+                show_labels=False,
+                colors=tri_conf_rgb,
+            ),
+            static=True,
+        )
 
     ## now do umeyama to align the triangulated hands to the gt hands
     gt_xyzc: Float[ndarray, "133 4"] = gt_xyzc_stack_all[ts_idx]
@@ -427,18 +429,19 @@ def single_frame_mv_hands(
     )
     aligned_conf_rgb: UInt8[ndarray, "1 133 3"] = confidence_scores_to_rgb(aligned_conf_full[..., np.newaxis])
     for view_idx, cam_name in enumerate(uvc_cam_names):
-        pinhole_log_path: Path = parent_log_path / "ego" / cam_name / "pinhole"
-        rr.log(
-            f"{pinhole_log_path}/image/aligned_keypoints_2d",
-            Points2DWithConfidence(
-                positions=uv_aligned[0, view_idx],
-                confidences=aligned_conf_full[0],
-                class_ids=int(Coco133AnnotationLayer.TRIANGULATED_3D),
-                keypoint_ids=COCO_133_IDS,
-                show_labels=False,
-                colors=aligned_conf_rgb[0],
-            ),
-        )
+        if debug:
+            pinhole_log_path: Path = parent_log_path / "ego" / cam_name / "pinhole"
+            rr.log(
+                f"{pinhole_log_path}/image/aligned_keypoints_2d",
+                Points2DWithConfidence(
+                    positions=uv_aligned[0, view_idx],
+                    confidences=aligned_conf_full[0],
+                    class_ids=int(Coco133AnnotationLayer.TRIANGULATED_3D),
+                    keypoint_ids=COCO_133_IDS,
+                    show_labels=False,
+                    colors=aligned_conf_rgb[0],
+                ),
+            )
     residuals: Float[ndarray, "n_valid"] = np.linalg.norm(aligned_points - dst_points, axis=1)
     rms_error: float = float(np.sqrt(np.mean(residuals**2)))
 
@@ -456,6 +459,7 @@ def relog_ego_cams(
     timeline: str,
     recording: rr.RecordingStream | None,
     oak_alignment: OakQuestAlignmentConfig = OakQuestAlignmentConfig(),
+    debug: bool = False,
 ) -> None:
     """Relog ego camera intrinsics/extrinsics and log the quest↔oak baseline."""
     ego_cam_dict: dict[str, list[Fisheye62Parameters | PinholeParameters]] = ego_sequence.ego_cam_dict
@@ -492,22 +496,23 @@ def relog_ego_cams(
             ).astype(np.float32, copy=False)
             distance_labels: list[str] = [f"{float(dist):.3f} m" for dist in distances_m]
             durations_dist: Float[ndarray, "n_frames_dist"] = 1e-9 * shortest_ego_timestamp[:n_frames_dist]
-            distance_log_path: Path = parent_log_path / "ego" / "oak_quest_distance"
-            rr.send_columns(
-                f"{distance_log_path}",
-                indexes=[rr.TimeColumn(timeline, duration=durations_dist)],
-                columns=[
-                    *rr.LineStrips3D.columns(
-                        strips=line_strips,
-                        labels=distance_labels,
-                        show_labels=np.ones(n_frames_dist, dtype=bool),
-                    ),
-                ],
-                recording=recording,
-            )
-            dist_min: float = float(np.min(distances_m))
-            dist_max: float = float(np.max(distances_m))
-            dist_span: float = dist_max - dist_min
+            if debug:
+                distance_log_path: Path = parent_log_path / "ego" / "oak_quest_distance"
+                rr.send_columns(
+                    f"{distance_log_path}",
+                    indexes=[rr.TimeColumn(timeline, duration=durations_dist)],
+                    columns=[
+                        *rr.LineStrips3D.columns(
+                            strips=line_strips,
+                            labels=distance_labels,
+                            show_labels=np.ones(n_frames_dist, dtype=bool),
+                        ),
+                    ],
+                    recording=recording,
+                )
+                dist_min: float = float(np.min(distances_m))
+                dist_max: float = float(np.max(distances_m))
+                dist_span: float = dist_max - dist_min
     for cam_name, ego_cam_param_list in tqdm(
         ego_cam_dict.items(),
         desc="Logging ego cameras",
@@ -807,8 +812,8 @@ class RRDPipelineConfig:
     """Enable re-anchoring the Oak rig to the quest reference camera before logging."""
     oak_alignment: OakQuestAlignmentConfig = field(default_factory=OakQuestAlignmentConfig)
     """Name configuration controlling which cameras define the quest and Oak references."""
-    hand_device: Literal["auto", "cuda", "cpu"] = "auto"
-    """Execution device for hand detector/keypoint models: 'auto' (default), 'cuda', or 'cpu'."""
+    debug: bool = False
+    """Enable debug logging and visualizations."""
 
 
 def main(config: RRDPipelineConfig) -> None:
@@ -894,7 +899,7 @@ def run_full_exoego_pipeline(config: RRDPipelineConfig, recording: rr.RecordingS
         timeline=timeline,
         shortest_timestamp=shortest_timestamp,
         ts_nano=calib_ts_nano,
-        hand_device=config.hand_device,
+        debug=config.debug,
     )
 
     if umeyama_result is not None:
@@ -912,6 +917,7 @@ def run_full_exoego_pipeline(config: RRDPipelineConfig, recording: rr.RecordingS
             timeline=timeline,
             recording=recording,
             oak_alignment=config.oak_alignment,
+            debug=config.debug,
         )
         log_reprojected_gt_uv(
             ego_sequence=ego_sequence,
