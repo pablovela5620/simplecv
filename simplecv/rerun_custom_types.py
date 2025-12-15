@@ -401,7 +401,9 @@ class PinholeWithDistortion(rr.AsComponents):
         if include_distortion:
             dist: BrownConradyDistortion | KannalaBrandtDistortion | None = camera.distortion
             if isinstance(dist, BrownConradyDistortion):
-                coeffs = [
+                # Fixed Brown–Conrady ordering for clarity:
+                # [k1, k2, p1, p2, k3, k4, k5, k6, s1, s2, s3, s4, tau_x, tau_y]
+                coeffs: list[float] = [
                     dist.k1,
                     dist.k2,
                     dist.p1,
@@ -417,13 +419,26 @@ class PinholeWithDistortion(rr.AsComponents):
                     dist.tau_x,
                     dist.tau_y,
                 ]
-                while len(coeffs) > 5 and abs(coeffs[-1]) < 1e-9:
-                    coeffs.pop()
                 distortion_obj = CameraDistortion(
                     model="brown_conrady", coefficients=np.array(coeffs, dtype=np.float32)
                 )
-            elif isinstance(dist, KannalaBrandtDistortion) or dist is None:
-                # Fisheye and other non-Brown–Conrady models are currently not emitted as distortion components.
+            elif isinstance(dist, KannalaBrandtDistortion):
+                # Fixed Kannala–Brandt ordering:
+                # [k1, k2, k3, k4, k5, k6, p1, p2]
+                coeffs: list[float] = [
+                    dist.k1,
+                    dist.k2,
+                    dist.k3,
+                    dist.k4,
+                    dist.k5,
+                    dist.k6,
+                    dist.p1,
+                    dist.p2,
+                ]
+                distortion_obj = CameraDistortion(
+                    model="kannala_brandt", coefficients=np.array(coeffs, dtype=np.float32)
+                )
+            else:
                 distortion_obj = None
 
         return cls(pinhole=pinhole, distortion=distortion_obj)

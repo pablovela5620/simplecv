@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 import rerun as rr
 from einops import rearrange
-from jaxtyping import Float32
+from jaxtyping import Float32, Int
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
@@ -15,7 +15,7 @@ from rerun.components.view_coordinates import ViewCoordinates
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.ego_dex import EgoDexSequence as EgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, avp_to_coco_hands
 
@@ -32,14 +32,54 @@ class EgoDexConfig(BaseExoEgoDatasetConfig):
 class EgoDexSequence(BaseExoEgoSequence[EgoDexConfig]):
     """EgoDex dataset adapter with 3D annotations natively in meters."""
 
-    def __getitem__(self, idx):
-        return None
+    def __init__(self, cfg: EgoDexConfig) -> None:
+        self._ego_stream_names: list[str] = []
+        super().__init__(cfg)
+
+    def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
+        canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
+        ego_cam_params_list, ego_bgr_list = self._sample_ego(ts_ns)
+        exo_cam_params_list, exo_bgr_list = (None, None)  # no exo cameras
+        labels: ExoEgoLabels | None = self._sample_labels(canonical_idx, ts_ns)
+
+        return ExoEgoSample(
+            canonical_index=canonical_idx,
+            canonical_timestamp_ns=ts_ns,
+            ego_cam_params_list=ego_cam_params_list,
+            ego_bgr_list=ego_bgr_list,
+            exo_cam_params_list=exo_cam_params_list,
+            exo_bgr_list=exo_bgr_list,
+            labels=labels,
+        )
 
     def _build_ego(self) -> BaseEgoSequence[EgoDexConfig] | None:
         return EgoSequence(cfg=self.config)
 
     def _build_exo(self) -> BaseExoSequence[EgoDexConfig] | None:
         return None
+
+    def load_stream_timestamps_ns(self) -> dict[str, Int[ndarray, "n_frames"]]:
+        """Return per-stream timestamps for ego videos (labels if available)."""
+
+        stream_ts: dict[str, Int[ndarray, "n_frames"]] = {}
+        self._ego_stream_names.clear()
+
+        if self.ego_sequence is not None:
+            for name, video_path in zip(
+                self.ego_sequence.ego_video_names,
+                self.ego_sequence.ego_video_paths,
+                strict=True,
+            ):
+                stream_name: str = f"ego/{name}"
+                timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                stream_ts[stream_name] = timestamps
+                self._ego_stream_names.append(stream_name)
+
+        labels: ExoEgoLabels | None = self.exoego_labels
+        if labels is not None and labels.timestamps_ns is not None:
+            stream_ts["labels"] = labels.timestamps_ns
+
+        return stream_ts
 
     def load_labels(self) -> ExoEgoLabels | None:
         """Load COCO-133 joint stack in meters for the current episode."""

@@ -6,7 +6,7 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32
+from jaxtyping import Float32, Int
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
@@ -18,7 +18,7 @@ from simplecv.data.ego.assembly101_ego import Assembly101EgoSequence
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.assembly101_exo import Assembly101ExoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.video_utils import Resolution
@@ -44,14 +44,67 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
 class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
     """Assembly101 dataset adapter with 3D annotations expressed in meters."""
 
-    def __getitem__(self, idx):
-        return None
+    def __init__(self, cfg: Assembly101Config) -> None:
+        self._ego_stream_names: list[str] = []
+        self._exo_stream_names: list[str] = []
+        super().__init__(cfg)
+
+    def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
+        canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
+        ego_cam_params_list, ego_bgr_list = self._sample_ego(ts_ns)
+        exo_cam_params_list, exo_bgr_list = self._sample_exo(ts_ns)
+        labels: ExoEgoLabels | None = self._sample_labels(canonical_idx, ts_ns)
+
+        return ExoEgoSample(
+            canonical_index=canonical_idx,
+            canonical_timestamp_ns=ts_ns,
+            ego_cam_params_list=ego_cam_params_list,
+            ego_bgr_list=ego_bgr_list,
+            exo_cam_params_list=exo_cam_params_list,
+            exo_bgr_list=exo_bgr_list,
+            labels=labels,
+        )
 
     def _build_ego(self) -> BaseEgoSequence[Assembly101Config] | None:
         return Assembly101EgoSequence(cfg=self.config)
 
     def _build_exo(self) -> BaseExoSequence[Assembly101Config] | None:
         return Assembly101ExoSequence(cfg=self.config)
+
+    def load_stream_timestamps_ns(self) -> dict[str, Int[ndarray, "n_frames"]]:
+        """Return per-stream timestamps for ego/exo videos (and labels if present)."""
+
+        stream_ts: dict[str, Int[ndarray, "n_frames"]] = {}
+        self._ego_stream_names.clear()
+        self._exo_stream_names.clear()
+
+        if self.ego_sequence is not None:
+            for name, video_path in zip(
+                self.ego_sequence.ego_video_names,
+                self.ego_sequence.ego_video_paths,
+                strict=True,
+            ):
+                stream_name: str = f"ego/{name}"
+                timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                stream_ts[stream_name] = timestamps
+                self._ego_stream_names.append(stream_name)
+
+        if self.exo_sequence is not None:
+            for name, video_path in zip(
+                self.exo_sequence.exo_video_names,
+                self.exo_sequence.exo_video_paths,
+                strict=True,
+            ):
+                stream_name = f"exo/{name}"
+                timestamps = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                stream_ts[stream_name] = timestamps
+                self._exo_stream_names.append(stream_name)
+
+        labels: ExoEgoLabels | None = self.exoego_labels
+        if labels is not None and labels.timestamps_ns is not None:
+            stream_ts["labels"] = labels.timestamps_ns
+
+        return stream_ts
 
     def load_labels(self) -> ExoEgoLabels:
         """Load COCO-133 hand keypoints in meters for the current sequence."""
