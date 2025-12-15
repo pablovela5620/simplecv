@@ -1,12 +1,12 @@
 from collections.abc import Generator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, get_args
+from typing import get_args
 
 import numpy as np
 import rerun as rr
 from einops import rearrange
-from jaxtyping import Float32
+from jaxtyping import Float32, Int
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
@@ -17,7 +17,7 @@ from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.hocap_ego import ExoCameraIDs, HocapEgoSequence, HOCapExtrinsicsData
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exo.hocap_exo import HocapExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
 
@@ -38,14 +38,88 @@ class HocapConfig(BaseExoEgoDatasetConfig):
 class HocapSequence(BaseExoEgoSequence[HocapConfig]):
     """HoloCap dataset adapter emitting 3D annotations in meters."""
 
-    def __getitem__(self, idx):
-        return None
+    def __init__(self, cfg: HocapConfig) -> None:
+        self._ego_stream_names: list[str] = []
+        self._exo_stream_names: list[str] = []
+        super().__init__(cfg)
+
+    def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
+        canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
+        ego_cam_params_list, ego_bgr_list = self._sample_ego(ts_ns)
+        exo_cam_params_list, exo_bgr_list = self._sample_exo(ts_ns)
+
+        labels: ExoEgoLabels | None = self.exoego_labels
+        if labels is not None:
+            if labels.timestamps_ns is not None:
+                label_idx: int = self.timestamp_to_frame_index(ts_ns, labels.timestamps_ns)
+            else:
+                max_idx: int = int(labels.xyzc_stack.shape[0] - 1)
+                label_idx = min(canonical_idx, max_idx)
+            xyzc_stack_frame = labels.xyzc_stack[label_idx]
+            mano_stack_frame: ManoStack | None = None
+            if labels.mano_stack is not None:
+                mano_stack_frame = ManoStack(
+                    betas=labels.mano_stack.betas,
+                    so3=labels.mano_stack.so3[label_idx : label_idx + 1],
+                    trans=labels.mano_stack.trans[label_idx : label_idx + 1],
+                )
+            timestamps_ns = labels.timestamps_ns
+            labels = ExoEgoLabels(
+                xyzc_stack=xyzc_stack_frame[np.newaxis, ...],
+                timestamps_ns=timestamps_ns,
+                mano_stack=mano_stack_frame,
+            )
+
+        return ExoEgoSample(
+            canonical_index=canonical_idx,
+            canonical_timestamp_ns=ts_ns,
+            ego_cam_params_list=ego_cam_params_list,
+            ego_bgr_list=ego_bgr_list,
+            exo_cam_params_list=exo_cam_params_list,
+            exo_bgr_list=exo_bgr_list,
+            labels=labels,
+        )
 
     def _build_ego(self) -> BaseEgoSequence | None:
         return HocapEgoSequence(cfg=self.config)
 
     def _build_exo(self) -> BaseExoSequence[HocapConfig] | None:
         return HocapExoSequence(cfg=self.config)
+
+    def load_stream_timestamps_ns(self) -> dict[str, Int[ndarray, "n_frames"]]:
+        """Return per-stream timestamps for ego/exo videos (and labels if present)."""
+
+        stream_ts: dict[str, Int[ndarray, "n_frames"]] = {}
+        self._ego_stream_names.clear()
+        self._exo_stream_names.clear()
+
+        if self.ego_sequence is not None:
+            for name, video_path in zip(
+                self.ego_sequence.ego_video_names,
+                self.ego_sequence.ego_video_paths,
+                strict=True,
+            ):
+                stream_name: str = f"ego/{name}"
+                timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                stream_ts[stream_name] = timestamps
+                self._ego_stream_names.append(stream_name)
+
+        if self.exo_sequence is not None:
+            for name, video_path in zip(
+                self.exo_sequence.exo_video_names,
+                self.exo_sequence.exo_video_paths,
+                strict=True,
+            ):
+                stream_name = f"exo/{name}"
+                timestamps = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                stream_ts[stream_name] = timestamps
+                self._exo_stream_names.append(stream_name)
+
+        labels: ExoEgoLabels | None = self.exoego_labels
+        if labels is not None and labels.timestamps_ns is not None:
+            stream_ts["labels"] = labels.timestamps_ns
+
+        return stream_ts
 
     def load_labels(self) -> ExoEgoLabels:
         """Load COCO-133 joints and MANO parameters in meters for this sequence."""
@@ -62,7 +136,8 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
         assert label_path.exists(), f"Path {label_path} does not exist."
         # hololens does not contain labels, so we need to load the 3d labels from any  other camera
         cam_name: ExoCameraIDs = get_args(ExoCameraIDs)[0]  # Assuming the first camera is the HoloLens
-        world_T_cam: Float32[ndarray, "4 4"] = extri_hocap.world_T_cam_dict.get(cam_name)
+        world_T_cam: Float32[ndarray, "4 4"] | None = extri_hocap.world_T_cam_dict.get(cam_name)
+        assert world_T_cam is not None, f"Extrinsics for camera {cam_name} not found in {extrinsic_yaml}."
         cam_dir: Path = label_path / cam_name  # Assuming the first camera is the HoloLens
 
         npz_paths: list[Path] = sorted(cam_dir.glob("*.npz"))
