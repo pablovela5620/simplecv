@@ -6,7 +6,7 @@ from typing import get_args
 import numpy as np
 import rerun as rr
 from einops import rearrange
-from jaxtyping import Float32, Int
+from jaxtyping import Float32, Int, UInt16
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
@@ -47,6 +47,8 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
         canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
         ego_cam_params_list, ego_bgr_list = self._sample_ego(ts_ns)
         exo_cam_params_list, exo_bgr_list = self._sample_exo(ts_ns)
+        ego_depth_list: list[UInt16[ndarray, "H W"]] | None = self._sample_ego_depths(ts_ns)
+        exo_depth_list: list[UInt16[ndarray, "H W"]] | None = self._sample_exo_depths(ts_ns)
 
         labels: ExoEgoLabels | None = self.exoego_labels
         if labels is not None:
@@ -75,8 +77,10 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
             canonical_timestamp_ns=ts_ns,
             ego_cam_params_list=ego_cam_params_list,
             ego_bgr_list=ego_bgr_list,
+            ego_depth_list=ego_depth_list,
             exo_cam_params_list=exo_cam_params_list,
             exo_bgr_list=exo_bgr_list,
+            exo_depth_list=exo_depth_list,
             labels=labels,
         )
 

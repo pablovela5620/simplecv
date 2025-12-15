@@ -3,8 +3,9 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Generic, Self, TypeVar
 
+import cv2
 import numpy as np
-from jaxtyping import Float, Float32, Int, UInt8
+from jaxtyping import Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
@@ -53,11 +54,13 @@ class ExoEgoSample:
 
     canonical_index: int
     canonical_timestamp_ns: int
-    ego_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None
-    ego_bgr_list: BGRList | None
-    exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None
-    exo_bgr_list: BGRList | None
-    labels: ExoEgoLabels | None
+    ego_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None = None
+    ego_bgr_list: BGRList | None = None
+    ego_depth_list: list[UInt16[ndarray, "H W"]] | None = None
+    exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None = None
+    exo_bgr_list: BGRList | None = None
+    exo_depth_list: list[UInt16[ndarray, "H W"]] | None = None
+    labels: ExoEgoLabels | None = None
 
 
 class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
@@ -143,7 +146,7 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
             clamped: int = int(np.clip(req_ts_ns, lower, upper))
             canonical_idx: int = int(np.searchsorted(canonical_ts, clamped, side="right") - 1)
         else:
-            if not isinstance(idx, (int, np.integer)):
+            if not isinstance(idx, int | np.integer):
                 raise TypeError("idx must be int")
             canonical_idx = int(idx)
         canonical_idx = max(0, min(canonical_idx, len(canonical_ts) - 1))
@@ -187,6 +190,58 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
             cam_params_list.append(cam_params_for_cam)
 
         return cam_params_list, bgr_list
+
+    def _sample_exo_depths(self, ts_ns: int) -> list[UInt16[ndarray, "H W"]] | None:
+        """Fetch exo depth maps aligned to ``ts_ns`` (uint16 millimetres)."""
+        if self.exo_sequence is None:
+            return None
+        depth_paths_seq = getattr(self.exo_sequence, "depth_paths", None)
+        if depth_paths_seq is None:
+            return None
+
+        depth_list: list[UInt16[ndarray, "H W"]] = []
+        for stream_idx, stream_name in enumerate(self._exo_stream_names):
+            stream_ts: Int[ndarray, "n_frames"] = self.stream_timestamps_ns[stream_name]
+            frame_idx: int = self.timestamp_to_frame_index(ts_ns, stream_ts)
+            clamped_idx: int = min(frame_idx, len(depth_paths_seq) - 1)
+
+            cam_name: str = self.exo_sequence.exo_cam_list[stream_idx].name
+            depth_path = depth_paths_seq[clamped_idx].get(cam_name)
+            if depth_path is None or not depth_path.exists():
+                return None
+
+            depth_img: UInt16[ndarray, "H W"] | None = cv2.imread(str(depth_path), cv2.IMREAD_ANYDEPTH)
+            if depth_img is None:
+                return None
+            depth_list.append(depth_img.astype(np.uint16))
+
+        return depth_list
+
+    def _sample_ego_depths(self, ts_ns: int) -> list[UInt16[ndarray, "H W"]] | None:
+        """Fetch ego depth maps aligned to ``ts_ns`` if available."""
+        if self.ego_sequence is None:
+            return None
+        depth_paths_seq = getattr(self.ego_sequence, "depth_paths", None)
+        if depth_paths_seq is None:
+            return None
+
+        depth_list: list[UInt16[ndarray, "H W"]] = []
+        for stream_idx, stream_name in enumerate(self._ego_stream_names):
+            stream_ts: Int[ndarray, "n_frames"] = self.stream_timestamps_ns[stream_name]
+            frame_idx: int = self.timestamp_to_frame_index(ts_ns, stream_ts)
+            clamped_idx: int = min(frame_idx, len(depth_paths_seq) - 1)
+
+            cam_name: str = self.ego_sequence.ego_video_names[stream_idx]
+            depth_path = depth_paths_seq[clamped_idx].get(cam_name)
+            if depth_path is None or not depth_path.exists():
+                return None
+
+            depth_img: UInt16[ndarray, "H W"] | None = cv2.imread(str(depth_path), cv2.IMREAD_ANYDEPTH)
+            if depth_img is None:
+                return None
+            depth_list.append(depth_img.astype(np.uint16))
+
+        return depth_list
 
     def _sample_labels(self, canonical_idx: int, ts_ns: int) -> ExoEgoLabels | None:
         """Clamp label stack to timestamp / canonical index."""
@@ -245,7 +300,7 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
 
     @staticmethod
     def _select_canonical_timeline(
-        stream_ts: dict[str, Int[ndarray, "n_frames"]]
+        stream_ts: dict[str, Int[ndarray, "n_frames"]],
     ) -> tuple[str, Int[ndarray, "n_events"], int]:
         """Choose a canonical timeline (shortest duration) and clip it to its own end."""
         if not stream_ts:

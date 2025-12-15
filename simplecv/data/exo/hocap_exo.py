@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
 import numpy as np
-from einops import rearrange
 from jaxtyping import Float, Float32, Int, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation as R
@@ -135,6 +134,13 @@ def quat_to_mat(quat: Float[ndarray, "batch 7"]) -> Float[ndarray, "batch 4 4"]:
 
 
 class HocapExoSequence(BaseExoSequence[HocapConfig]):
+    def __init__(self, cfg: HocapConfig) -> None:
+        super().__init__(cfg)
+        self._depth_paths: list[dict[ExoCameraIDs, Path]] = self.load_depth_paths(
+            data_path=self.config.root_directory,
+            sequence_name=self.config.sequence_name,
+            subject_id=self.config.subject_id,
+        )
 
     def __len__(self) -> int:
         assert len(self._video_path_list) > 0, "No videos found."
@@ -314,6 +320,10 @@ class HocapExoSequence(BaseExoSequence[HocapConfig]):
     def image_plane_distance(self) -> int | float:
         """Get the image plane distance for the camera."""
         return 0.1
+
+    @property
+    def depth_paths(self) -> list[dict[ExoCameraIDs, Path]]:
+        return self._depth_paths
 
     # @property
     # def depth_paths(self) -> list[dict[ExoCameraIDs, Path]]:

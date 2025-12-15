@@ -10,14 +10,15 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from einops import rearrange
-from jaxtyping import Float, Float32, Int, UInt8
+from jaxtyping import Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
+from tqdm import tqdm
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
     COCO_133_IDS,
@@ -75,6 +76,9 @@ class VisualizeConfig:
     log_env_mesh: bool = True
     """Relog the static environment mesh under ``/world/gt/env_mesh`` when available."""
 
+    log_depths: bool = False
+    """Enable logging of per-camera depth maps when available."""
+
 
 def set_annotation_context() -> None:
     """Register COCO-133 semantic metadata so subsequent logs show names/edges."""
@@ -131,6 +135,29 @@ def log_environment_mesh(exoego_sequence: BaseExoEgoSequence, parent_log_path: P
         ),
         static=True,
     )
+
+
+def log_depths(
+    exoego_sequence: BaseExoEgoSequence,
+    parent_log_path: Path,
+    timeline: str,
+) -> None:
+    """Log depth maps via column API using uint16 buffers (millimetres)."""
+
+    for idx in tqdm(range(len(exoego_sequence))):
+        sample: ExoEgoSample = exoego_sequence[idx]
+        rr.set_time(timeline, duration=sample.canonical_timestamp_ns * 1e-9)
+        exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None = sample.exo_cam_params_list
+        exo_depth_list: list[UInt16[ndarray, "H W"]] | None = sample.exo_depth_list
+        assert exo_cam_params_list is not None and exo_depth_list is not None
+        for idx, exo_cam_param in enumerate(exo_cam_params_list):
+            cam_log_path: Path = parent_log_path / "exo" / exo_cam_param.name
+            pinhole_log_path: Path = cam_log_path / "pinhole"
+            depth_log_path: Path = pinhole_log_path / "depth"
+
+            depth_uint16: UInt16[ndarray, "H W"] = exo_depth_list[idx]
+
+            rr.log(f"{depth_log_path}", rr.DepthImage(depth_uint16, meter=1000))
 
 
 def create_container(
@@ -874,6 +901,15 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
 
     if config.log_env_mesh:
         log_environment_mesh(exoego_sequence, parent_log_path)
+
+    if config.log_depths:
+        log_depths(
+            exoego_sequence=exoego_sequence,
+            parent_log_path=parent_log_path,
+            timeline=timeline,
+            log_ego=config.log_ego,
+            log_exo=config.log_exo,
+        )
 
     container: rrb.ContainerLike = create_container(
         exo_video_log_paths=log_paths.exo_video_log_paths,
