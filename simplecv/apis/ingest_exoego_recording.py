@@ -97,6 +97,11 @@ class VideoIngestEntry:
         return self.camera_log_path / "pinhole"
 
 
+def simplify_camera_name(stem: str) -> str:
+    """Drop everything after the first '-' to strip hardware IDs (e.g., 'Wolf-387E..' -> 'Wolf')."""
+    return stem.split("-", 1)[0]
+
+
 @serde
 class OakIntrinsics:
     """Intrinsics payload emitted by the OAK capture rig."""
@@ -793,10 +798,12 @@ def collect_video_entries(
     all_video_paths: list[Path] = natsorted(selected_by_stem.values())
 
     video_entries: list[VideoIngestEntry] = [
+        # For exo cameras like "Wolf-387E89E1_1764846855763", keep only "Wolf".
+        # Ego stems such as "left" or "quest3_left" are unaffected because they lack '-'.
         VideoIngestEntry(
             source_path=video_path,
-            camera_log_path=log_root / video_path.stem,
-            video_log_path=(log_root / video_path.stem / "pinhole" / "video"),
+            camera_log_path=log_root / simplify_camera_name(video_path.stem),
+            video_log_path=(log_root / simplify_camera_name(video_path.stem) / "pinhole" / "video"),
         )
         for video_path in all_video_paths
     ]
@@ -864,10 +871,23 @@ def ingest_video_directory(
     for idx, entry in enumerate(iterable_entries):
         if perspective == "ego":
             pinhole: PinholeParameters = pinhole_param_list[idx]
-            assert pinhole.name.lower() in entry.camera_log_path.name.lower(), (
-                f"Camera name mismatch: pinhole '{pinhole.name}' vs. entry '{entry.camera_log_path.name}'"
+            simplified_name: str = simplify_camera_name(pinhole.name)
+            assert simplified_name.lower() in entry.camera_log_path.name.lower(), (
+                f"Camera name mismatch: pinhole '{pinhole.name}' (simplified '{simplified_name}') vs. "
+                f"entry '{entry.camera_log_path.name}'"
             )
-            log_pinhole(camera=pinhole, cam_log_path=entry.camera_log_path, static=False, image_plane_distance=0.05)
+            pinhole_for_log: PinholeParameters = PinholeParameters(
+                name=simplified_name,
+                intrinsics=pinhole.intrinsics,
+                distortion=pinhole.distortion,
+                extrinsics=pinhole.extrinsics,
+            )
+            log_pinhole(
+                camera=pinhole_for_log,
+                cam_log_path=entry.camera_log_path,
+                static=False,
+                image_plane_distance=0.05,
+            )
         prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
             video_path=entry.source_path,
             verbose=verbose,
@@ -999,9 +1019,19 @@ def align_oak_to_quest(
             # get the rigid offset from the oak reference camera
             oak_ref_T_cam: Float[ndarray, "4 4"] = oak_ref_T_world @ world_T_cam_raw
             # add a translation offset between the quest and oak rigs
-            offset_T_cam: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
-            offset_T_cam[:3, 3] = np.array([0.0, -0.03, 0.0], dtype=np.float32)
-            cam_T_offset: Float[ndarray, "4 4"] = np.linalg.inv(offset_T_cam)
+            # offset_T_cam: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
+            # offset_T_cam[:3, 3] = np.array([0.0, -0.03, 0.0], dtype=np.float32)
+            # cam_T_offset: Float[ndarray, "4 4"] = np.linalg.inv(offset_T_cam)
+            cam_T_offset: Float[ndarray, "4 4"] = np.array(
+                [
+                    [0.998420, 0.009480, -0.055386, 0.018717],
+                    [0.014402, 0.909571, 0.415298, 0.043993],
+                    [0.054314, -0.415440, 0.907998, -0.049974],
+                    [0.000000, 0.000000, 0.000000, 1.000000],
+                ],
+                dtype=np.float32,
+            )
+
             oak_ref_T_cam = oak_ref_T_cam @ cam_T_offset
             # world_T_cam_aligned: replace the oak reference origin with quest reference pose
             # (world ← quest_ref) @ (quest_ref ≡ oak_ref ← cam)
