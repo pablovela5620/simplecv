@@ -43,18 +43,33 @@ class IngestConfig:
 
 
 def validate_exoego_dir(exoego_dir: Path) -> tuple[Path | None, Path | None]:
+    """
+    Validate the existence and structure of an ExoEgo recording directory.
+
+    Checks if the directory exists and contains 'exo' and/or 'ego' subdirectories.
+
+    Args:
+        exoego_dir: Path to the directory to validate.
+
+    Returns:
+        Tuple of paths to 'exo' and 'ego' subdirs, or None if missing.
+
+    Raises:
+        ValueError: If the directory is invalid or lacks 'exo'/'ego'.
+    """
     if not exoego_dir.exists():
         raise ValueError(f"The provided directory does not exist: {exoego_dir}")
     if not exoego_dir.is_dir():
         raise ValueError(f"The provided path is not a directory: {exoego_dir}")
 
-    # make sure that either "exo" or "ego" subdirectory exists
+    # Ensure at least one of "exo" or "ego" subdirectory exists
     if not (exoego_dir / "exo").exists() and not (exoego_dir / "ego").exists():
         raise ValueError(f"The provided directory does not contain 'exo' or 'ego' subdirectory: {exoego_dir}")
 
-    return (exoego_dir / "exo") if (exoego_dir / "exo").exists() else None, (exoego_dir / "ego") if (
-        exoego_dir / "ego"
-    ).exists() else None
+    exo_dir: Path | None = (exoego_dir / "exo") if (exoego_dir / "exo").exists() else None
+    ego_dir: Path | None = (exoego_dir / "ego") if (exoego_dir / "ego").exists() else None
+
+    return exo_dir, ego_dir
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,11 +110,6 @@ class VideoIngestEntry:
         """Rerun entity path for the camera's pinhole node."""
 
         return self.camera_log_path / "pinhole"
-
-
-def simplify_camera_name(stem: str) -> str:
-    """Drop everything after the first '-' to strip hardware IDs (e.g., 'Wolf-387E..' -> 'Wolf')."""
-    return stem.split("-", 1)[0]
 
 
 @serde
@@ -798,12 +808,10 @@ def collect_video_entries(
     all_video_paths: list[Path] = natsorted(selected_by_stem.values())
 
     video_entries: list[VideoIngestEntry] = [
-        # For exo cameras like "Wolf-387E89E1_1764846855763", keep only "Wolf".
-        # Ego stems such as "left" or "quest3_left" are unaffected because they lack '-'.
         VideoIngestEntry(
             source_path=video_path,
-            camera_log_path=log_root / simplify_camera_name(video_path.stem),
-            video_log_path=(log_root / simplify_camera_name(video_path.stem) / "pinhole" / "video"),
+            camera_log_path=log_root / video_path.stem,
+            video_log_path=(log_root / video_path.stem / "pinhole" / "video"),
         )
         for video_path in all_video_paths
     ]
@@ -833,9 +841,9 @@ def ingest_video_directory(
         None,
     )
     assert perspective is not None, f"Expected 'exo' or 'ego' in parent directories for source video: {source_path}"
-    perspective = cast(str, perspective)
 
     if perspective == "ego":
+        # Load calibration json
         calibration_json_path: Path = video_entries[0].source_path.parent / "calibration.json"
         assert calibration_json_path.exists(), f"Calibration file not found at {calibration_json_path}"
         calibration: OakCalibration = _load_oak_calibration(calibration_json_path)
@@ -864,30 +872,21 @@ def ingest_video_directory(
         pinhole_param_list = []
     expected_resolution: tuple[int, int] | None = None
     logged_video_entities: list[Path] = []
-    iterable_entries: Iterable[VideoIngestEntry] = cast(
-        Iterable[VideoIngestEntry],
-        tqdm(video_entries, desc=progress_label, leave=False),
-    )
+    iterable_entries: Iterable[VideoIngestEntry] = tqdm(video_entries, desc=progress_label, leave=False)
+    #
     for idx, entry in enumerate(iterable_entries):
-        if perspective == "ego":
-            pinhole: PinholeParameters = pinhole_param_list[idx]
-            simplified_name: str = simplify_camera_name(pinhole.name)
-            assert simplified_name.lower() in entry.camera_log_path.name.lower(), (
-                f"Camera name mismatch: pinhole '{pinhole.name}' (simplified '{simplified_name}') vs. "
-                f"entry '{entry.camera_log_path.name}'"
-            )
-            pinhole_for_log: PinholeParameters = PinholeParameters(
-                name=simplified_name,
-                intrinsics=pinhole.intrinsics,
-                distortion=pinhole.distortion,
-                extrinsics=pinhole.extrinsics,
-            )
-            log_pinhole(
-                camera=pinhole_for_log,
-                cam_log_path=entry.camera_log_path,
-                static=False,
-                image_plane_distance=0.05,
-            )
+        match perspective:
+            case "ego":
+                pinhole: PinholeParameters = pinhole_param_list[idx]
+                assert pinhole.name.lower() in entry.camera_log_path.name.lower(), (
+                    f"Camera name mismatch: pinhole '{pinhole.name}' vs. entry '{entry.camera_log_path.name}'"
+                )
+                log_pinhole(camera=pinhole, cam_log_path=entry.camera_log_path, static=False, image_plane_distance=0.05)
+            case "exo":
+                pass  # TODO handel calibration/logging for exo cameras
+            case _:
+                raise ValueError(f"Unexpected perspective value: {perspective}")
+
         prepared_video_result: PrepareVideoForLoggingResult = prepare_video_for_logging(
             video_path=entry.source_path,
             verbose=verbose,
@@ -1055,16 +1054,14 @@ def align_oak_to_quest(
 
 
 def main(config: IngestConfig) -> None:
-    validate_exoego_dir(config.exoego_dir)
+    dir_tuple: tuple[Path | None, Path | None] = validate_exoego_dir(config.exoego_dir)
     print(f"Ingesting data from {config.exoego_dir} to RRD at {config.exoego_dir}")
 
     parent_log_path: Path = Path("/world")
     timeline: str = "video_time"
-    # set the coordinate system for the entire world
     rr.log("/", rr.ViewCoordinates.RUB, static=True)
-    # set time to 0 at the start of the timeline
     rr.set_time(timeline=timeline, duration=0)
-    dir_tuple: tuple[Path | None, Path | None] = validate_exoego_dir(config.exoego_dir)
+
     exo_dir: Path | None = dir_tuple[0]
     ego_dir: Path | None = dir_tuple[1]
 

@@ -175,12 +175,8 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         if not rrd_path.exists():
             return None
 
-        recording_cached: Recording | None = None
-        if self.exo_sequence is not None:
-            recording_cached = getattr(self.exo_sequence, "_recording", None)
-        if recording_cached is None:
-            recording_cached = rr.dataframe.load_recording(str(rrd_path))
-        recording: Recording = recording_cached
+        recording: Recording | None = self._recording
+        assert recording is not None, f"RRD recording at {rrd_path} could not be loaded."
         schema: Any = recording.schema()
         entity_path: str = "world/gt/env_mesh"
 

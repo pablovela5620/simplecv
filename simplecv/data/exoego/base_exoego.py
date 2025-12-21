@@ -80,15 +80,16 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
         self._exo_stream_names: list[str] = []
         self.ego_sequence: BaseEgoSequence[ConfigT] | None = self._build_ego()
         self.exo_sequence: BaseExoSequence[ConfigT] | None = self._build_exo()
-        if self.config.load_labels:
-            self._exoego_labels: ExoEgoLabels | None = self.load_labels()
-        self._environment_mesh: EnvironmentMesh | None = self.load_environment_mesh()
         self.stream_timestamps_ns = self.load_stream_timestamps_ns()
         (
             self.canonical_stream_name,
             self.canonical_timestamps_ns,
             self.canonical_end_ns,
         ) = self._select_canonical_timeline(self.stream_timestamps_ns)
+
+        if self.config.load_labels:
+            self._exoego_labels: ExoEgoLabels | None = self.load_labels()
+        self._environment_mesh: EnvironmentMesh | None = self.load_environment_mesh()
 
     def __len__(self) -> int:
         return int(self.canonical_timestamps_ns.shape[0])
