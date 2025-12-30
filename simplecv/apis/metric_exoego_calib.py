@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import cv2
 import numpy as np
@@ -20,7 +20,6 @@ from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.skeleton.coco133_layers import (
     COCO133_LAYER_COLORS,
     COCO133_LAYER_LABELS,
-    COCO133_PREDICTION_LAYER_TO_PATH,
     COCO133_ROI_COLORS,
     COCO133_ROI_LABELS,
     Coco133AnnotationLayer,
@@ -129,7 +128,7 @@ def create_view_container(
         origin="/",
         contents=contents_3d,
         line_grid=rrb.archetypes.LineGrid3D(visible=True),
-        spatial_information=rrb.SpatialInformation(show_axes=True),
+        spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
     )
 
     if ego_video_log_paths is not None:
@@ -458,10 +457,12 @@ def relog_ego_cams(
     parent_log_path: Path,
     timeline: str,
     recording: rr.RecordingStream | None,
-    oak_alignment: OakQuestAlignmentConfig = OakQuestAlignmentConfig(),
+    oak_alignment: OakQuestAlignmentConfig | None = None,
     debug: bool = False,
 ) -> None:
     """Relog ego camera intrinsics/extrinsics and log the quest↔oak baseline."""
+    if oak_alignment is None:
+        oak_alignment = OakQuestAlignmentConfig()
     ego_cam_dict: dict[str, list[Fisheye62Parameters | PinholeParameters]] = ego_sequence.ego_cam_dict
 
     quest_ref_cam_list: list[Fisheye62Parameters | PinholeParameters] | None = ego_cam_dict.get(
@@ -498,6 +499,7 @@ def relog_ego_cams(
             durations_dist: Float[ndarray, "n_frames_dist"] = 1e-9 * shortest_ego_timestamp[:n_frames_dist]
             if debug:
                 distance_log_path: Path = parent_log_path / "ego" / "oak_quest_distance"
+                show_labels: list[bool] = [True] * n_frames_dist
                 rr.send_columns(
                     f"{distance_log_path}",
                     indexes=[rr.TimeColumn(timeline, duration=durations_dist)],
@@ -505,14 +507,11 @@ def relog_ego_cams(
                         *rr.LineStrips3D.columns(
                             strips=line_strips,
                             labels=distance_labels,
-                            show_labels=np.ones(n_frames_dist, dtype=bool),
+                            show_labels=show_labels,
                         ),
                     ],
                     recording=recording,
                 )
-                dist_min: float = float(np.min(distances_m))
-                dist_max: float = float(np.max(distances_m))
-                dist_span: float = dist_max - dist_min
     for cam_name, ego_cam_param_list in tqdm(
         ego_cam_dict.items(),
         desc="Logging ego cameras",

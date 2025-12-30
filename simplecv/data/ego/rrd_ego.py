@@ -9,14 +9,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
-import rerun as rr
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from pyarrow import Table
-from rerun_bindings import ComponentColumnDescriptor, IndexColumnDescriptor, Recording, RecordingView, Schema
+from rerun.catalog import ComponentColumnDescriptor, IndexColumnDescriptor, Schema
+from rerun.recording import Recording
+from rerun_bindings import RecordingView
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType, EgoData
+from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, CamNameType, EgoData
 from simplecv.rerun_log_utils import (
     get_video_cache,
     write_asset_video_blob,
@@ -58,7 +59,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         assert self._recording is not None, "Recording must be provided by caller"
         recording: Recording = self._recording
         schema: Schema = recording.schema()
-        timelines: list[IndexColumnDescriptor] = schema.index_columns()
+        timelines: list[IndexColumnDescriptor] = list(schema.index_columns())
         # make sure the timeline exsits
         timeline_name = "video_time"
         has_timeline: bool = any(timeline.name == timeline_name for timeline in timelines)
@@ -115,13 +116,13 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         ordered_paths: list[Path] = [video_path_map[cam_name] for cam_name in self.cam_names]
         return ordered_paths
 
-    def load_ego_cams(self) -> dict[CamNameType, list[PinholeParameters]]:
+    def load_ego_cams(self) -> dict[CamNameType, list[CameraParam]]:
         assert self._recording is not None, "Recording must be provided by caller"
         recording: Recording = self._recording
         schema: Schema = recording.schema()
-        timelines: list[IndexColumnDescriptor] = schema.index_columns()
+        timelines: list[IndexColumnDescriptor] = list(schema.index_columns())
         # Component Columns
-        components: list[ComponentColumnDescriptor] = schema.component_columns()
+        components: list[ComponentColumnDescriptor] = list(schema.component_columns())
 
         # make sure the timeline exsits
         timeline_name = "video_time"
@@ -146,7 +147,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         self.cam_names: set[str] = {p.parent.parent.name for p in ego_video_paths}
         print(f"Ego camera names: {self.cam_names}")
 
-        ego_cam_dict: dict[str, list[PinholeParameters]] = {}
+        ego_cam_dict: dict[str, list[CameraParam]] = {}
         for cam_name in self.cam_names:
             pinhole_entity: Path = ego_entity_path / cam_name / "pinhole"
             transform_entity: Path = ego_entity_path / cam_name
@@ -185,7 +186,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 ]
                 continue
 
-            cam_params: list[PinholeParameters] = []
+            cam_params: list[CameraParam] = []
             for idx in range(min_len):
                 rotation_mat: Float32[ndarray, "3 3"] = cam_R_world_batch[idx]
                 translation_vec: Float32[ndarray, "3"] = cam_t_world_batch[idx]
@@ -201,17 +202,17 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
             if cam_params:
                 ego_cam_dict[cam_name] = cam_params
 
-        return cast(dict[CamNameType, list[PinholeParameters]], ego_cam_dict)
+        return cast(dict[CamNameType, list[CameraParam]], ego_cam_dict)
 
     def align_cams_and_videos(
         self,
         video_path_list: list[Path],
-        ego_cam_dict: dict[CamNameType, list[PinholeParameters]],
-    ) -> tuple[dict[CamNameType, list[PinholeParameters]], dict[CamNameType, Path]]:
+        ego_cam_dict: dict[CamNameType, list[CameraParam]],
+    ) -> tuple[dict[CamNameType, list[CameraParam]], dict[CamNameType, Path]]:
         video_by_name: dict[str, Path] = {path.stem: path for path in video_path_list}
         assert video_by_name, "No remuxed ego videos were produced"
 
-        aligned_cam_dict: dict[str, list[PinholeParameters]] = {}
+        aligned_cam_dict: dict[str, list[CameraParam]] = {}
         aligned_video_map: dict[str, Path] = {}
 
         for cam_name, cam_params in ego_cam_dict.items():
@@ -225,7 +226,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 continue
 
             if len(cam_params) < video_len:
-                last_param: PinholeParameters = cam_params[-1]
+                last_param: CameraParam = cam_params[-1]
                 cam_params = cam_params + [last_param] * (video_len - len(cam_params))
             elif len(cam_params) > video_len:
                 cam_params = cam_params[:video_len]
@@ -236,15 +237,15 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         assert aligned_cam_dict, "No ego cameras aligned with the recorded videos"
 
         ordered_names: list[str] = sorted(aligned_video_map.keys())
-        ordered_cam_dict: dict[str, list[PinholeParameters]] = {name: aligned_cam_dict[name] for name in ordered_names}
+        ordered_cam_dict: dict[str, list[CameraParam]] = {name: aligned_cam_dict[name] for name in ordered_names}
         ordered_video_map: dict[str, Path] = {name: aligned_video_map[name] for name in ordered_names}
         return (
-            cast(dict[CamNameType, list[PinholeParameters]], ordered_cam_dict),
+            cast(dict[CamNameType, list[CameraParam]], ordered_cam_dict),
             cast(dict[CamNameType, Path], ordered_video_map),
         )
 
     def __getitem__(self, idx: int) -> EgoData:
-        cam_params_list: list[PinholeParameters] = [cam_list[idx] for cam_list in self._ego_cam_dict.values()]
+        cam_params_list: list[CameraParam] = [cam_list[idx] for cam_list in self._ego_cam_dict.values()]
         return EgoData(
             cam_params_list=cam_params_list,
             bgr_list=self.ego_video_readers[idx],
@@ -263,8 +264,9 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def _load_intrinsics(self, recording: Recording, pinhole_entity: Path, timeline: str) -> Intrinsics:
         view: RecordingView = recording.view(index=timeline, contents=str(pinhole_entity))
+        index_values: Int64[ndarray, "n"] = np.asarray([0], dtype=np.int64)
         table: Table = (
-            view.filter_index_values(values=[0])
+            view.filter_index_values(values=index_values)
             .select(
                 f"{pinhole_entity}:Pinhole:image_from_camera",
                 f"{pinhole_entity}:Pinhole:camera_xyz",

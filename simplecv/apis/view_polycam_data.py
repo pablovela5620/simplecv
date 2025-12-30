@@ -44,9 +44,15 @@ def log_polycam_data(
     # resize images to be half the size
     target_height: int = rgb.shape[0] // rescale_factor
     target_width: int = rgb.shape[1] // rescale_factor
-    rgb_resized = cv2.resize(rgb, (target_width, target_height))
-    depth_resized = cv2.resize(depth, (target_width, target_height))
-    confidence_resized = cv2.resize(confidence, (target_width, target_height))
+    rgb_resized: UInt8[np.ndarray, "h w 3"] = cv2.resize(rgb, (target_width, target_height)).astype(
+        np.uint8, copy=False
+    )
+    depth_resized: UInt16[np.ndarray, "h w"] = cv2.resize(depth, (target_width, target_height)).astype(
+        np.uint16, copy=False
+    )
+    confidence_resized: UInt8[np.ndarray, "h w"] = cv2.resize(confidence, (target_width, target_height)).astype(
+        np.uint8, copy=False
+    )
 
     # rescale intrinsics to match the image size
     rescaled_intrinsics: Intrinsics = rescale_intri(
@@ -92,14 +98,17 @@ def view_polycam_data(config: PolyViewConfig) -> None:
     pbar = tqdm(polycam_dataset, total=len(polycam_dataset))
     polycam_data: PolycamData
     for idx, (polycam_data) in enumerate(pbar):
-        rr.set_time_sequence("timestep", idx)
+        rr.set_time(timeline="timestep", sequence=idx)
 
         # filter depthmaps based on confidence, only keep with max confidence
         polycam_data.depth_hw[polycam_data.confidence_hw != DepthConfidenceLevel.HIGH] = 0
 
+        k_matrix = polycam_data.pinhole_params.intrinsics.k_matrix
+        if k_matrix is None:
+            raise ValueError("Missing camera intrinsics for polycam sample.")
         depth_fuser.fuse_frames(
             polycam_data.depth_hw,
-            polycam_data.pinhole_params.intrinsics.k_matrix,
+            k_matrix,
             polycam_data.pinhole_params.extrinsics.cam_T_world,
             polycam_data.rgb_hw3,
         )

@@ -10,13 +10,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pyarrow as pa
-import rerun as rr
 from jaxtyping import Float32
 from numpy import ndarray
-from rerun_bindings import Recording
+from rerun.recording import Recording
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.data.exo.base_exo import BaseExoSequence, ExoData
 from simplecv.rerun_log_utils import (
     get_video_cache,
     mux_h264_to_mp4,
@@ -50,8 +49,14 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         self._recording = recording
         super().__init__(cfg)
 
-    def __getitem__(self, idx: int) -> None:
-        return None
+    def __getitem__(self, idx: int) -> ExoData:
+        bgr_list = self.exo_video_readers[idx]
+        return ExoData(
+            cam_params_list=self.exo_cam_list,
+            bgr_list=bgr_list,
+            xyz=None,
+            uv_dict=None,
+        )
 
     def __len__(self) -> int:  # type: ignore[override]
         return len(self.exo_video_readers)
@@ -349,12 +354,13 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
 
     def _first_valid_value(
         self,
-        column: pa.ChunkedArray,
+        column: pa.ChunkedArray | pa.Array,
         *,
         allow_none: bool = False,
         component_name: str | None = None,
     ) -> Any:
-        for value in column.combine_chunks().to_pylist():
+        values = column.combine_chunks().to_pylist() if isinstance(column, pa.ChunkedArray) else column.to_pylist()
+        for value in values:
             if value is None and not allow_none:
                 continue
             if value is not None or allow_none:

@@ -14,8 +14,9 @@ import av
 import rerun as rr
 from jaxtyping import Int
 from numpy import ndarray
-from pyarrow import ChunkedArray
-from rerun_bindings import Recording, RecordingView
+from pyarrow import ChunkedArray, LargeListArray, ListArray
+from rerun.recording import Recording, load_recording
+from rerun_bindings import RecordingView
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.rerun_custom_types import PinholeWithDistortion
@@ -79,8 +80,9 @@ class VideoCache:
             try:
                 cached_mp4.unlink(missing_ok=True)
                 metadata_path.unlink(missing_ok=True)
-            finally:
-                return None
+            except OSError:
+                pass
+            return None
         return cached_mp4
 
     def store(self, *, rrd_path: Path, camera_name: str, source_path: Path) -> None:
@@ -148,7 +150,8 @@ class RerunTyroConfig:
         self.rec_stream: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
 
         if self.serve:
-            rr.serve_web()
+            rr.serve_grpc()
+            rr.serve_web_viewer(open_browser=not self.headless)
         elif self.connect:
             # Send logging data to separate `rerun` process.
             # You can omit the argument to connect to the default address,
@@ -242,7 +245,7 @@ def log_video(
 def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) -> tuple[ChunkedArray, ChunkedArray]:
     """Load recording data and query video stream."""
 
-    recording: Recording = rr.dataframe.load_recording(rrd_path)
+    recording: Recording = load_recording(rrd_path)
     normalized_entity: str = video_entity.lstrip("/")
     view: RecordingView = recording.view(index=timeline, contents=normalized_entity)
 
@@ -293,7 +296,7 @@ def write_asset_video_blob(
         ValueError: If no asset video data is present for ``video_entity``.
     """
 
-    view = recording.view(index=timeline, contents=video_entity)
+    view: RecordingView = recording.view(index=timeline, contents=video_entity)
     reader = view.select(f"{video_entity}:AssetVideo:blob")
 
     batch = reader.read_next_batch()
@@ -319,8 +322,13 @@ def mux_h264_to_mp4(times: ChunkedArray, samples: ChunkedArray, output_path: str
     # See https://pyav.basswood-io.com/docs/stable/cookbook/basics.html#remuxing
 
     # Flatten out sample list into a single byte buffer.
-    sample_bytes = samples.combine_chunks().flatten(recursive=True)
-    sample_bytes = io.BytesIO(sample_bytes.buffers()[1])
+    sample_array = samples.combine_chunks()
+    if isinstance(sample_array, ListArray | LargeListArray):
+        sample_array = sample_array.flatten(recursive=True)
+    buffer = sample_array.buffers()[1]
+    if buffer is None:
+        raise ValueError("Missing H.264 sample buffer.")
+    sample_bytes = io.BytesIO(buffer.to_pybytes())
 
     # Setup samples as input container.
     input_container = av.open(sample_bytes, mode="r", format="h264")  # Input is AnnexB H.264 stream.

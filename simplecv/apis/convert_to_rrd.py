@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import h5py
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -10,14 +11,11 @@ from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
 from tqdm import tqdm
 
-from simplecv.apis.view_ego_data import EgoDataSequence, confidence_scores_to_rgb, parse_hdf5_file
+from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, AVP_IDS, AVP_LINKS
 from simplecv.ops.triangulate import projectN3
-from simplecv.rerun_log_utils import (
-    Points2DWithConfidence,
-    Points3DWithConfidence,
-    log_pinhole,
-    log_video,
-)
+from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_log_utils import log_pinhole, log_video
 from simplecv.video_utils import reencode_video_optimal
 
 
@@ -28,6 +26,74 @@ class ConvertEgoConfig:
     save_directory: Path = Path("/home/pablo/0Dev/data/ego-dex/test-rrd/")
     sequence_name: str | Literal["all"] = "wipe_screen"
     send_as_batch: bool = True
+
+
+@dataclass
+class EgoDataSequence:
+    video_path: Path
+    pinhole_list: list[PinholeParameters]
+    llm_description: str
+    xyz_stack: Float32[ndarray, "n_frames 68 3"]
+    conf_stack: Float32[ndarray, "n_frames 68 1"]
+
+
+def parse_hdf5_file(hdf5_path: Path, video_path: Path) -> EgoDataSequence:
+    h5py_file = h5py.File(f"{hdf5_path}", "r")
+    confidences = h5py_file["confidences"]
+    transforms = h5py_file["transforms"]
+
+    world_T_camera: Float32[ndarray, "n_frames 4 4"] = transforms.get("camera")[:]
+    joints_list: list[Float32[ndarray, "n_frames 3"]] = []
+    for joint_name in AVP_ID2NAME.values():
+        joint_transform: Float32[ndarray, "n_frames 4 4"] = transforms.get(joint_name)[:]
+        joint_xyz: Float32[ndarray, "n_frames 3"] = joint_transform[:, :3, 3]
+        joints_list.append(joint_xyz)
+
+    joints_xyz: Float32[ndarray, "n_frames 68 3"] = np.stack(joints_list, axis=1)
+
+    conf_list: list[Float32[ndarray, "n_frames 3"]] = []
+    for joint_name in AVP_ID2NAME.values():
+        conf: Float32[ndarray, "n_frames"] = confidences.get(joint_name)[:]
+        conf_list.append(conf)
+
+    conf_stack: Float32[ndarray, "n_frames 68"] = np.stack(conf_list, axis=1)
+    conf_stack = rearrange(conf_stack, "n_frames n_joints -> n_frames n_joints 1")
+
+    intrinsics: Float32[ndarray, "3 3"] = np.array(
+        [[736.6339, 0.0, 960.0], [0.0, 736.6339, 540.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+
+    fl_x: float = float(intrinsics[0, 0])
+    fl_y: float = float(intrinsics[1, 1])
+    cx: float = float(intrinsics[0, 2])
+    cy: float = float(intrinsics[1, 2])
+
+    pinhole_list: list[PinholeParameters] = []
+    for i in range(world_T_camera.shape[0]):
+        pinhole = PinholeParameters(
+            name="AVP Camera",
+            intrinsics=Intrinsics(
+                fl_x=fl_x,
+                fl_y=fl_y,
+                cx=cx,
+                cy=cy,
+                camera_conventions="RDF",
+                height=int(cy * 2),
+                width=int(cx * 2),
+            ),
+            extrinsics=Extrinsics(world_R_cam=world_T_camera[i][:3, :3], world_t_cam=world_T_camera[i][:3, 3]),
+        )
+        pinhole_list.append(pinhole)
+
+    ego_sequence = EgoDataSequence(
+        video_path=video_path,
+        pinhole_list=pinhole_list,
+        llm_description=h5py_file.attrs["llm_description"],
+        xyz_stack=joints_xyz,
+        conf_stack=conf_stack,
+    )
+    return ego_sequence
 
 
 def set_pose_annotation_context() -> None:
@@ -89,7 +155,7 @@ def convert_ego(config: ConvertEgoConfig) -> None:
                     rrb.Spatial3DView(),
                     rrb.Vertical(
                         rrb.TextDocumentView(origin="llm_description"),
-                        rrb.Spatial2DView(origin=video_log_path),
+                        rrb.Spatial2DView(origin=str(video_log_path)),
                         row_shares=[3, 10],
                     ),
                     column_shares=[2, 1],
@@ -195,7 +261,7 @@ def log_batched(
         desc="Logging pinhole cameras",
         total=len(frame_timestamps_ns),
     ):
-        rr.set_time_nanos(timeline=timeline, nanos=ts)
+        rr.set_time(timeline=timeline, duration=np.timedelta64(int(ts), "ns"))
         cam_log_path: Path = parent_log_path / "camera"
         log_pinhole(
             pinhole,
@@ -227,7 +293,7 @@ def log_incremental(
             total=len(frame_timestamps_ns),
         )
     ):
-        rr.set_time_nanos(timeline=timeline, nanos=ts)
+        rr.set_time(timeline=timeline, duration=np.timedelta64(int(ts), "ns"))
         cam_log_path = parent_log_path / "camera"
         log_pinhole(
             pinhole,

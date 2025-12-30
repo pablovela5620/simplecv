@@ -1,15 +1,17 @@
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import rerun as rr
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
+from pyarrow import Table
+from rerun.catalog import Schema
 from rerun.components.view_coordinates import ViewCoordinates
-from rerun_bindings import Recording, RecordingView
+from rerun.recording import Recording, load_recording
+from rerun_bindings import RecordingView
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.rrd_ego import RRDEgoSequence
@@ -32,7 +34,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     def __init__(self, cfg: RRDExoEgoConfig) -> None:
         # Load once and share with ego/exo/labels.
-        self._recording = rr.dataframe.load_recording(str(cfg.rrd_path))
+        self._recording = load_recording(str(cfg.rrd_path))
         super().__init__(cfg)
 
     def __getitem__(
@@ -124,7 +126,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
         if self._recording is None:
-            self._recording = rr.dataframe.load_recording(str(rrd_path))
+            self._recording = load_recording(str(rrd_path))
         recording: Recording = self._recording
 
         timeline: str = "video_time"
@@ -177,7 +179,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
         recording: Recording | None = self._recording
         assert recording is not None, f"RRD recording at {rrd_path} could not be loaded."
-        schema: Any = recording.schema()
+        schema: Schema = recording.schema()
         entity_path: str = "world/gt/env_mesh"
 
         available_components: set[str] = self._available_mesh_components(schema, entity_path)
@@ -213,7 +215,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
             except ValueError:
                 continue
 
-            samples: list[dict[str, Any]] = self._read_mesh_samples_from_view(
+            samples: list[dict[str, object]] = self._read_mesh_samples_from_view(
                 view=view,
                 timeline=timeline,
                 selectors=selectors,
@@ -243,7 +245,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         return None
 
     @staticmethod
-    def _available_mesh_components(schema: Any, entity_path: str) -> set[str]:
+    def _available_mesh_components(schema: Schema, entity_path: str) -> set[str]:
         components: set[str] = set()
         for descriptor in schema.component_columns():
             entity = getattr(descriptor, "entity_path", None)
@@ -256,7 +258,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         return components
 
     @staticmethod
-    def _parse_vertex_positions(entry: Any) -> Float32[ndarray, "num_vertices 3"] | None:
+    def _parse_vertex_positions(entry: object) -> Float32[ndarray, "num_vertices 3"] | None:
         if entry is None:
             return None
         positions = np.asarray(entry, dtype=np.float32)
@@ -266,7 +268,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         return np.ascontiguousarray(positions.astype(np.float32), dtype=np.float32)
 
     @staticmethod
-    def _parse_triangle_indices(entry: Any) -> Int[ndarray, "num_faces 3"] | None:
+    def _parse_triangle_indices(entry: object) -> Int[ndarray, "num_faces 3"] | None:
         if entry is None:
             return None
         triangles = np.asarray(entry, dtype=np.int32)
@@ -277,7 +279,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     @staticmethod
     def _parse_vertex_normals(
-        entry: Any,
+        entry: object,
         *,
         expected_vertices: int,
     ) -> Float32[ndarray, "num_vertices 3"] | None:
@@ -292,7 +294,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     @staticmethod
     def _parse_vertex_colors(
-        entry: Any,
+        entry: object,
         *,
         expected_vertices: int,
     ) -> UInt8[ndarray, "num_vertices 4"] | None:
@@ -336,11 +338,11 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     @staticmethod
     def _read_mesh_samples_from_view(
         *,
-        view: Any,
+        view: RecordingView,
         timeline: str,
         selectors: list[str],
-    ) -> list[dict[str, Any]]:
-        samples: list[dict[str, Any]] = []
+    ) -> list[dict[str, object]]:
+        samples: list[dict[str, object]] = []
 
         try:
             static_reader = view.select_static(*selectors)
@@ -348,7 +350,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
             static_reader = None
 
         if static_reader is not None:
-            table_static: Any = static_reader.read_all()
+            table_static: Table | None = static_reader.read_all()
             if table_static is not None and table_static.num_rows > 0:
                 column_data = {
                     selector: table_static.column(idx).combine_chunks().to_pylist()
@@ -359,7 +361,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
                 return samples
 
         try:
-            table_dynamic: Any = view.select(timeline, *selectors).read_all()
+            table_dynamic: Table | None = view.select(timeline, *selectors).read_all()
         except ValueError:
             table_dynamic = None
 

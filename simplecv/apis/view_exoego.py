@@ -182,9 +182,7 @@ def create_container(
     main_view = rrb.Spatial3DView(
         origin="/",
         name="3D View",
-        spatial_information=rrb.SpatialInformation(
-            show_axes=True,
-        ),
+        spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
     )
 
     if ego_video_log_paths is not None:
@@ -907,8 +905,6 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
             exoego_sequence=exoego_sequence,
             parent_log_path=parent_log_path,
             timeline=timeline,
-            log_ego=config.log_ego,
-            log_exo=config.log_exo,
         )
 
     container: rrb.ContainerLike = create_container(

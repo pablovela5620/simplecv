@@ -329,15 +329,16 @@ def _oak_intrinsics_from_depthai_doc(doc: DepthAIIntrinsicsEntry) -> OakIntrinsi
     )
 
     lens_info_block: DepthAILensInfo | None = doc.lens_info
-    if lens_info_block is not None and isinstance(lens_info_block.fov_deg, (int, float)):
+    if lens_info_block is not None and isinstance(lens_info_block.fov_deg, int | float):
         fov_deg: float = float(lens_info_block.fov_deg)
     else:
         fov_deg = _fov_from_fx(width, fx)
 
     socket: str = doc.camera_id
+    socket_literal: Literal["CAM_A", "CAM_B", "CAM_C"] = cast(Literal["CAM_A", "CAM_B", "CAM_C"], socket)
 
     return OakIntrinsics(
-        socket=socket,
+        socket=socket_literal,
         width=width,
         height=height,
         intrinsics=k_matrix,
@@ -937,7 +938,7 @@ def create_ingest_view(
     main_view = rrb.Spatial3DView(
         origin="/",
         line_grid=rrb.archetypes.LineGrid3D(visible=True),
-        spatial_information=rrb.SpatialInformation(show_axes=True),
+        spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
     )
 
     combined_ego_paths: list[Path] = []
