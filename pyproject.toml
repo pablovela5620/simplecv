@@ -32,7 +32,7 @@ include = ["simplecv*", "tools*", "tests*"]
 
 [tool.pixi.workspace]
 channels = ["https://prefix.dev/conda-forge"]
-platforms = ["osx-arm64", "linux-64"]
+platforms = ["linux-64"]
 
 [tool.pixi.tasks]
 view-polycam-data = { cmd = "python tools/view_polycam.py --polycam-zip-path data/example-room-scan-poly.zip", depends-on = [
@@ -128,10 +128,11 @@ open3d = ">=0.18.0,<0.19"
 scipy = ">=1.15.2,<2"
 natsort = ">=8.4.0,<9"
 av = "*"
-pytorch = "*"
+pytorch = ">=2.7,<2.8"
 torchvision = "*"
+torchcodec = "*"
 
-hdf5 = ">=1.14.4,<2"
+hdf5 = "*"
 h5py = ">=3.12.1,<4"
 jupyterlab = ">=4.4.9,<5"
 dill = ">=0.3.8,<0.4.1"
@@ -140,15 +141,15 @@ dill = ">=0.3.8,<0.4.1"
 # Overwrite the needed python version only on linux-64
 datasets = ">=4.0.0"
 
-# cuda128 begin
-[tool.pixi.feature.cuda128]
+# cuda129 begin
+[tool.pixi.feature.cuda129]
 platforms = ["linux-64"]
 channels = ["https://prefix.dev/conda-forge"]
 
-[tool.pixi.feature.cuda128.system-requirements]
+[tool.pixi.feature.cuda129.system-requirements]
 cuda = "12.9"
 
-[tool.pixi.feature.cuda128.dependencies]
+[tool.pixi.feature.cuda129.dependencies]
 # CUDA Build Tools
 cuda-compiler = "*"
 cuda-version = "12.9.*"
@@ -173,11 +174,12 @@ libcurand-dev = "*"
 libcusolver-dev = "*"
 cusparselt = "*"
 libnvjitlink = "*"
-# cuda128 end
-pytorch-gpu = "*"
+# cuda129 end
+pytorch-gpu = ">=2.7,<2.8"
 torchvision = "*"
+torchcodec = "*"
 
-[tool.pixi.feature.cuda128.pypi-dependencies]
+[tool.pixi.feature.cuda129.pypi-dependencies]
 jax = ">=0.6.0,<0.7"
 jaxopt = ">=0.8.5,<0.9"
 lovely-jax = "*"
@@ -240,12 +242,12 @@ pyrealsense2 = "==2.53.1.4623"
 t265-enum = { cmd = "rs-enumerate-devices", description = "List RealSense devices using librealsense CLI" }
 
 [tool.pixi.environments]
-cuda128 = { features = [
-    "cuda128",
-], solve-group = "cuda128", no-default-feature = true }
+cuda129 = { features = [
+    "cuda129",
+], solve-group = "cuda129", no-default-feature = true }
 t265 = { features = ["t265"], no-default-feature = true }
-gpu = { features = ["cuda128"], solve-group = "cuda128" }
-dev = { features = ["dev", "cuda128"], solve-group = "cuda128" }
+gpu = { features = ["cuda129"], solve-group = "cuda129" }
+dev = { features = ["dev", "cuda129"], solve-group = "cuda129" }
 
 
 [tool.ruff]
