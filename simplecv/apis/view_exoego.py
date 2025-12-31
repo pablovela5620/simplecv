@@ -42,7 +42,6 @@ from simplecv.sensors.camera.brown_conrady import (
     project_brown_conrady_grid,
 )
 from simplecv.sensors.camera.fisheye62 import project_kannala_brandt_diagonal
-from simplecv.video_io import MultiVideoReader
 
 # Improve console readability when inspecting numeric debugging output.
 np.set_printoptions(suppress=True)
@@ -757,9 +756,10 @@ def setup_scene(
     exo_timestamp_list: list[Int[ndarray, "n_frames"]] = []
     exo_video_log_paths: list[Path] | None = None
     if exo_sequence is not None and log_exo:
-        exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
-        exo_video_files: list[Path] = exo_video_readers.video_paths
         exo_video_names: list[str] = exo_sequence.exo_video_names
+        # Get video blobs if available (RRD sequences), otherwise use paths
+        exo_video_blobs: dict[str, bytes] | None = getattr(exo_sequence, "_video_blobs", None)
+        exo_video_files: list[Path] = exo_sequence.exo_video_paths
         assert len(exo_video_files) == len(exo_video_names), (
             f"Mismatched exo video assets ({len(exo_video_files)}) and names ({len(exo_video_names)})."
         )
@@ -782,10 +782,17 @@ def setup_scene(
 
             video_log_path: Path = cam_log_path / "pinhole" / "video"
             exo_video_log_path_list.append(video_log_path)
-            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+            # Use blob if available, otherwise use file path
+            video_source: bytes | Path = (
+                exo_video_blobs[stream_name]
+                if exo_video_blobs and stream_name in exo_video_blobs
+                else video_file
+            )
+            if isinstance(video_source, Path):
+                assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.
             exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
-                video_file, video_log_path, timeline=timeline, recording=recording
+                video_source, video_log_path, timeline=timeline, recording=recording
             )
             exo_timestamp_list.append(exo_timestamps_ns)
         exo_video_log_paths = exo_video_log_path_list
@@ -793,9 +800,10 @@ def setup_scene(
     ego_timestamp_list: list[Int[ndarray, "n_frames"]] = []
     ego_video_log_paths: list[Path] | None = None
     if ego_sequence is not None and log_ego:
-        ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
-        ego_video_files: list[Path] = ego_video_readers.video_paths
         ego_video_names: list[str] = ego_sequence.ego_video_names
+        # Get video blobs if available (RRD sequences), otherwise use paths
+        ego_video_blobs: dict[str, bytes] | None = getattr(ego_sequence, "_video_blobs", None)
+        ego_video_files: list[Path] = ego_sequence.ego_video_paths
         assert len(ego_video_files) == len(ego_video_names), (
             f"Mismatched ego video assets ({len(ego_video_files)}) and names ({len(ego_video_names)})."
         )
@@ -805,10 +813,17 @@ def setup_scene(
             cam_log_path: Path = parent_log_path / "ego" / stream_name
             ego_video_log_path: Path = cam_log_path / "pinhole" / "video"
             ego_video_log_path_list.append(ego_video_log_path)
-            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+            # Use blob if available, otherwise use file path
+            video_source: bytes | Path = (
+                ego_video_blobs[stream_name]
+                if ego_video_blobs and stream_name in ego_video_blobs
+                else video_file
+            )
+            if isinstance(video_source, Path):
+                assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.
             ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
-                video_file, ego_video_log_path, timeline=timeline, recording=recording
+                video_source, ego_video_log_path, timeline=timeline, recording=recording
             )
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list

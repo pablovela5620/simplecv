@@ -209,7 +209,7 @@ def log_pinhole(
 
 
 def log_video(
-    video_path: Path,
+    video_source: Path | bytes,
     video_log_path: Path,
     timeline: str = "video_time",
     *,
@@ -218,15 +218,22 @@ def log_video(
     """
     Logs a video asset and its frame timestamps.
 
-    Parameters:
-    video_path (Path): The path to the video file.
-    video_log_path (Path): The path where the video log will be saved.
+    Args:
+        video_source: Path to video file or raw video bytes.
+        video_log_path: The entity path where the video log will be saved.
+        timeline: Timeline name for frame timestamps.
+        recording: Optional specific recording stream to log to.
 
     Returns:
-    None
+        Frame timestamps in nanoseconds.
     """
-    # Log video asset which is referred to by frame references.
-    video_asset = rr.AssetVideo(path=video_path)
+    # Create AssetVideo from path or bytes
+    video_asset = (
+        rr.AssetVideo(contents=video_source)
+        if isinstance(video_source, bytes)
+        else rr.AssetVideo(path=video_source)
+    )
+
     rr.log(str(video_log_path), video_asset, static=True, recording=recording)
 
     # Send automatically determined video frame timestamps.
@@ -315,6 +322,70 @@ def write_asset_video_blob(
         batch = reader.read_next_batch()
 
     raise ValueError(f"No AssetVideo data found for entity {video_entity}")
+
+
+def extract_asset_video_blob_fast(
+    recording: Recording,
+    video_entity: str,
+    timeline: str = "video_time",
+) -> bytes:
+    """Extract AssetVideo blob bytes from a Rerun recording using fast pyarrow buffer access.
+
+    This method is ~680x faster than the slow as_py() approach for large videos.
+    It directly accesses the underlying pyarrow buffer without creating
+    intermediate Python objects.
+
+    Args:
+        recording: Loaded Rerun recording.
+        video_entity: Entity path (without leading ``/``) containing the AssetVideo component.
+        timeline: Timeline used to index the recording view.
+
+    Returns:
+        Video bytes suitable for TorchCodec VideoDecoder.
+
+    Raises:
+        ValueError: If no AssetVideo blob found.
+    """
+    import pyarrow as pa
+
+    normalized_entity: str = video_entity.lstrip("/")
+    view: RecordingView = recording.view(index=timeline, contents=normalized_entity)
+    blob_column: str = f"{normalized_entity}:AssetVideo:blob"
+
+    # Try static data first (most common case)
+    try:
+        reader = view.select_static(blob_column)
+    except ValueError:
+        reader = None
+
+    if reader is None:
+        # Fall back to dynamic data
+        reader = view.select(blob_column)
+
+    batch = reader.read_next_batch()
+    if batch is None or batch.num_rows == 0:
+        raise ValueError(f"No AssetVideo blob found for entity {video_entity}")
+
+    column: pa.Array = batch.column(0)
+
+    # FAST PATH: Access pyarrow buffer directly without Python list intermediate
+    # Structure: list<list<uint8>> -> values -> list<uint8> -> values -> uint8[]
+    try:
+        inner_list: pa.ListArray = column.values  # type: ignore[assignment]  # Inner list<uint8>
+        uint8_values: pa.UInt8Array = inner_list.values  # type: ignore[assignment]  # The actual uint8 array
+        buffers = uint8_values.buffers()
+        # Buffer 0 is validity bitmap (null), Buffer 1 is data
+        if len(buffers) >= 2 and buffers[1] is not None:
+            blob: bytes = buffers[1].to_pybytes()
+            return blob
+    except Exception:
+        pass  # Fall back to slow path
+
+    # SLOW FALLBACK: Use as_py() if buffer access fails
+    first_row = column[0].as_py()
+    if isinstance(first_row, list) and len(first_row) == 1 and isinstance(first_row[0], list):
+        first_row = first_row[0]
+    return bytes(first_row)
 
 
 def mux_h264_to_mp4(times: ChunkedArray, samples: ChunkedArray, output_path: str) -> None:

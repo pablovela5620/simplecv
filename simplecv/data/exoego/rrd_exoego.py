@@ -93,24 +93,36 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         self._exo_stream_names.clear()
 
         if self.ego_sequence is not None:
-            for name, video_path in zip(
-                self.ego_sequence.ego_video_names,
-                self.ego_sequence.ego_video_paths,
-                strict=True,
-            ):
+            # Get video blobs if available (RRD sequences), otherwise use paths
+            ego_blobs: dict[str, bytes] | None = getattr(self.ego_sequence, "_video_blobs", None)
+            for name in self.ego_sequence.ego_video_names:
                 stream_name: str = f"ego/{name}"
-                timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                if ego_blobs and name in ego_blobs:
+                    # Use blob directly for RRD sequences
+                    timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(
+                        contents=ego_blobs[name]
+                    ).read_frame_timestamps_nanos()
+                else:
+                    # Fall back to path for non-RRD sequences
+                    idx: int = self.ego_sequence.ego_video_names.index(name)
+                    video_path = self.ego_sequence.ego_video_paths[idx]
+                    timestamps = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
                 stream_ts[stream_name] = timestamps
                 self._ego_stream_names.append(stream_name)
 
         if self.exo_sequence is not None:
-            for name, video_path in zip(
-                self.exo_sequence.exo_video_names,
-                self.exo_sequence.exo_video_paths,
-                strict=True,
-            ):
+            # Get video blobs if available (RRD sequences), otherwise use paths
+            exo_blobs: dict[str, bytes] | None = getattr(self.exo_sequence, "_video_blobs", None)
+            for name in self.exo_sequence.exo_video_names:
                 stream_name = f"exo/{name}"
-                timestamps = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
+                if exo_blobs and name in exo_blobs:
+                    # Use blob directly for RRD sequences
+                    timestamps = rr.AssetVideo(contents=exo_blobs[name]).read_frame_timestamps_nanos()
+                else:
+                    # Fall back to path for non-RRD sequences
+                    idx = self.exo_sequence.exo_video_names.index(name)
+                    video_path = self.exo_sequence.exo_video_paths[idx]
+                    timestamps = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
                 stream_ts[stream_name] = timestamps
                 self._exo_stream_names.append(stream_name)
 

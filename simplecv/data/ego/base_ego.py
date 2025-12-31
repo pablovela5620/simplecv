@@ -69,9 +69,11 @@ class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
             fallback_names: list[str] = [video_path.stem for video_path in self._video_path_list]
             self._ego_video_name_list = fallback_names
 
-        self.ego_video_readers: MultiVideoReader = MultiVideoReader(
-            video_paths=[video_path for video_path in self._video_path_list]
-        )
+        # Only create MultiVideoReader if not already set by subclass (e.g., RRD sequences)
+        if not hasattr(self, "ego_video_readers") or self.ego_video_readers is None:
+            self.ego_video_readers: MultiVideoReader = MultiVideoReader(
+                video_paths=[video_path for video_path in self._video_path_list]
+            )
         # if self.config.load_labels:
         #     self._ego_labels: EgoLabels = self.load_labels()
 
