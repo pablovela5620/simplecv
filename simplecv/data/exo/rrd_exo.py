@@ -153,7 +153,12 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
 
         return video_paths
 
-    def load_exo_cams(self) -> list[PinholeParameters]:
+    def load_exo_cams(self) -> list[PinholeParameters | None]:
+        """Load camera parameters for each stream, returning None for uncalibrated cameras.
+
+        Returns a list aligned with `exo_video_names` - cameras without valid
+        intrinsics/extrinsics get `None` so the list stays synchronized with video readers.
+        """
         assert self._recording is not None, "Recording must be provided by caller"
         recording: Recording = self._recording
         schema = recording.schema()
@@ -165,18 +170,18 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         )
         assert camera_streams, "No exo camera streams found in recording"
 
-        exo_cams: list[PinholeParameters] = []
+        exo_cams: list[PinholeParameters | None] = []
         for camera_stream in camera_streams:
             try:
                 intrinsics = self._load_intrinsics(recording, camera_stream.pinhole_entity, timeline)
                 extrinsics = self._load_extrinsics(recording, camera_stream.transform_entity, timeline)
+                exo_cams.append(PinholeParameters(name=camera_stream.name, intrinsics=intrinsics, extrinsics=extrinsics))
             except ValueError as exc:
                 warnings.warn(
-                    f"Skipping camera '{camera_stream.name}' due to missing metadata: {exc}",
+                    f"Camera '{camera_stream.name}' has no calibration data: {exc}",
                     stacklevel=2,
                 )
-                continue
-            exo_cams.append(PinholeParameters(name=camera_stream.name, intrinsics=intrinsics, extrinsics=extrinsics))
+                exo_cams.append(None)  # Keep slot for sync with video readers
         return exo_cams
 
     def _discover_camera_streams(self, schema: Any) -> list[_RRDCameraStream]:

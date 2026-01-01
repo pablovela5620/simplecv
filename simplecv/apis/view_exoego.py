@@ -298,8 +298,8 @@ def log_mano_batch(
         return
 
     mano_mesh_color_rgba_map: dict[Literal["left", "right"], tuple[int, int, int, int]] = {
-        "right": (255, 0, 0, 255),
-        "left": (0, 0, 255, 255),
+        "right": (255, 0, 0, 90),
+        "left": (0, 0, 255, 90),
     }
 
     mano_stack: ManoStack | None = exoego_labels.mano_stack
@@ -528,7 +528,9 @@ def log_exoego_batch(
     # batch send all exo cams #
     ###########################
     if exoego_sequence.exo_sequence is not None and log_exo:
-        exo_cam_param_list: list[PinholeParameters] = exoego_sequence.exo_sequence.exo_cam_list
+        exo_cam_param_list: list[PinholeParameters] = [
+            c for c in exoego_sequence.exo_sequence.exo_cam_list if c is not None
+        ]
         if not exo_cam_param_list:
             warnings.warn(
                 "Skipping exo camera projections; no exo camera metadata available.",
@@ -763,7 +765,10 @@ def setup_scene(
         assert len(exo_video_files) == len(exo_video_names), (
             f"Mismatched exo video assets ({len(exo_video_files)}) and names ({len(exo_video_names)})."
         )
-        exo_cam_by_name: dict[str, PinholeParameters] = {exo_cam.name: exo_cam for exo_cam in exo_sequence.exo_cam_list}
+        # Build name→cam dict using video names as keys (handles None cam params for uncalibrated cameras)
+        exo_cam_by_name: dict[str, PinholeParameters | None] = dict(
+            zip(exo_sequence.exo_video_names, exo_sequence.exo_cam_list, strict=True)
+        )
         exo_video_log_path_list: list[Path] = []
         logged_exo_cameras: set[str] = set()
         for stream_name, video_file in zip(exo_video_names, exo_video_files, strict=True):

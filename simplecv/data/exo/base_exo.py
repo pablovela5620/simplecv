@@ -59,7 +59,7 @@ class BaseExoSequence(ABC, Generic[ConfigT]):
     ) -> None:
         self.config: ConfigT = cfg
         self._video_path_list: list[Path] = self.load_video_paths()
-        self._exo_cam_list: list[PinholeParameters] = self.load_exo_cams()
+        self._exo_cam_list: list[PinholeParameters | None] = self.load_exo_cams()
         # Only create MultiVideoReader if not already set by subclass (e.g., RRD sequences)
         if not hasattr(self, "exo_video_readers") or self.exo_video_readers is None:
             self.exo_video_readers: MultiVideoReader = MultiVideoReader(
@@ -84,12 +84,12 @@ class BaseExoSequence(ABC, Generic[ConfigT]):
         pass
 
     @abstractmethod
-    def load_exo_cams(self) -> list[PinholeParameters]:
-        pass
+    def load_exo_cams(self) -> list[PinholeParameters | None]:
+        """Load camera parameters, returning None for uncalibrated cameras."""
 
     @property
-    def exo_cam_list(self) -> list[PinholeParameters]:
-        """Get the dictionary of egocentric cameras."""
+    def exo_cam_list(self) -> list[PinholeParameters | None]:
+        """Get the list of exo camera parameters (None for uncalibrated cameras)."""
         return self._exo_cam_list
 
     @property
@@ -99,12 +99,16 @@ class BaseExoSequence(ABC, Generic[ConfigT]):
 
     @property
     def exo_video_names(self) -> list[str]:
-        """Stable stream names aligned with ``exo_video_paths``."""
-        video_names: list[str]
-        if self._exo_cam_list and len(self._exo_cam_list) == len(self._video_path_list):
-            video_names = [exo_cam.name for exo_cam in self._exo_cam_list]
-        else:
-            video_names = [video_path.stem for video_path in self._video_path_list]
+        """Stable stream names aligned with ``exo_video_paths``.
+
+        Uses camera name if available, otherwise falls back to video path stem.
+        """
+        video_names: list[str] = []
+        for i, video_path in enumerate(self._video_path_list):
+            if i < len(self._exo_cam_list) and self._exo_cam_list[i] is not None:
+                video_names.append(self._exo_cam_list[i].name)  # type: ignore[union-attr]
+            else:
+                video_names.append(video_path.stem)
         return video_names
 
     @property

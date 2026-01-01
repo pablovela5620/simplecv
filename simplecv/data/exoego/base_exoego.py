@@ -57,7 +57,7 @@ class ExoEgoSample:
     ego_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None = None
     ego_bgr_list: BGRList | None = None
     ego_depth_list: list[UInt16[ndarray, "H W"]] | None = None
-    exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None = None
+    exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters | None] | None = None
     exo_bgr_list: BGRList | None = None
     exo_depth_list: list[UInt16[ndarray, "H W"]] | None = None
     labels: ExoEgoLabels | None = None
@@ -174,11 +174,14 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
 
         return cam_params_list, bgr_list
 
-    def _sample_exo(self, ts_ns: int) -> tuple[list[PinholeParameters | Fisheye62Parameters] | None, BGRList | None]:
-        """Fetch exo frames + cam params at timestamp ``ts_ns`` (static transforms assumed)."""
+    def _sample_exo(self, ts_ns: int) -> tuple[list[PinholeParameters | Fisheye62Parameters | None] | None, BGRList | None]:
+        """Fetch exo frames + cam params at timestamp ``ts_ns`` (static transforms assumed).
+
+        Returns None for uncalibrated cameras' cam_params while still returning their frames.
+        """
         if self.exo_sequence is None:
             return None, None
-        cam_params_list: list[PinholeParameters | Fisheye62Parameters] = []
+        cam_params_list: list[PinholeParameters | Fisheye62Parameters | None] = []
         bgr_list: list = []
         for stream_idx, stream_name in enumerate(self._exo_stream_names):
             stream_ts: Int[ndarray, "n_frames"] = self.stream_timestamps_ns[stream_name]
@@ -187,8 +190,8 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
             bgr_frame = reader.get_frame(frame_idx)
             bgr_list.append(bgr_frame)
 
-            cam_params_for_cam = self.exo_sequence.exo_cam_list[stream_idx]
-            cam_params_list.append(cam_params_for_cam)
+            cam_params_for_cam: PinholeParameters | None = self.exo_sequence.exo_cam_list[stream_idx]
+            cam_params_list.append(cam_params_for_cam)  # May be None for uncalibrated cameras
 
         return cam_params_list, bgr_list
 
@@ -206,7 +209,8 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
             frame_idx: int = self.timestamp_to_frame_index(ts_ns, stream_ts)
             clamped_idx: int = min(frame_idx, len(depth_paths_seq) - 1)
 
-            cam_name: str = self.exo_sequence.exo_cam_list[stream_idx].name
+            # Use video name (works even if cam_params is None for uncalibrated cameras)
+            cam_name: str = self.exo_sequence.exo_video_names[stream_idx]
             depth_path = depth_paths_seq[clamped_idx].get(cam_name)
             if depth_path is None or not depth_path.exists():
                 return None
