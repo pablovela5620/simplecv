@@ -413,7 +413,7 @@ def main(config: UmeTrackVisualizeConfig) -> None:
     timestamps_ns_list: list[Int[ndarray, "num_frames"]] = []
     for video_path, video_log_path in zip(video_paths, video_log_paths, strict=True):
         timestamps_ns: Int[ndarray, "num_frames"] = log_video(
-            video_path=video_path, video_log_path=video_log_path, timeline=timeline
+            video_source=video_path, video_log_path=video_log_path, timeline=timeline
         )
         timestamps_ns_list.append(timestamps_ns)
 

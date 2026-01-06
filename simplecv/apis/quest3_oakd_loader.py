@@ -1576,12 +1576,12 @@ def load_and_log_quest_data(
     _log_annotation_context()
 
     _left_video_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
-        video_path=left_video_path,
+        video_source=left_video_path,
         video_log_path=quest_left_cam_path / "pinhole" / "video",
         timeline=timeline,
     )
     _right_video_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
-        video_path=right_video_path,
+        video_source=right_video_path,
         video_log_path=quest_right_cam_path / "pinhole" / "video",
         timeline=timeline,
     )

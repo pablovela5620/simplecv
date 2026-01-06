@@ -910,7 +910,7 @@ def ingest_video_directory(
                 )
 
         log_video(
-            video_path=prepared_path,
+            video_source=prepared_path,
             video_log_path=entry.video_log_path,
             timeline=timeline,
         )
