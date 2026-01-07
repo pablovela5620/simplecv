@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
-from jaxtyping import Float32, Int64, UInt8
+from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from pyarrow import Table
 from rerun.catalog import ComponentColumnDescriptor, IndexColumnDescriptor, Schema
@@ -274,10 +274,10 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def _load_intrinsics(self, recording: Recording, pinhole_entity: Path, timeline: str) -> Intrinsics:
         view: RecordingView = recording.view(index=timeline, contents=str(pinhole_entity))
-        index_values: Int64[ndarray, "n"] = np.asarray([0], dtype=np.int64)
+
+        # First try timeline-indexed data (non-static)
         table: Table = (
-            view.filter_index_values(values=index_values)
-            .select(
+            view.select(
                 f"{pinhole_entity}:Pinhole:image_from_camera",
                 f"{pinhole_entity}:Pinhole:camera_xyz",
                 f"{pinhole_entity}:Pinhole:resolution",
@@ -285,6 +285,21 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
             .read_all()
         )
 
+        # If empty, try static data
+        if table.num_rows == 0:
+            table = (
+                view.select_static(
+                    f"{pinhole_entity}:Pinhole:image_from_camera",
+                    f"{pinhole_entity}:Pinhole:camera_xyz",
+                    f"{pinhole_entity}:Pinhole:resolution",
+                )
+                .read_all()
+            )
+
+        if table.num_rows == 0:
+            raise ValueError(f"No intrinsics found for {pinhole_entity}")
+
+        # Take first available row (not necessarily index 0)
         k_list = table.column(0).to_pylist()[0]
         xyz_list = table.column(1).to_pylist()[0]
         res_list = table.column(2).to_pylist()[0]
@@ -316,6 +331,10 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
         # Read all rows for the two custom components and pick the first non-null entry.
         table: Table = view.select(model_path, coeff_path).read_all()
+
+        # Return None if no distortion data was logged
+        if table.num_rows == 0:
+            return None
 
         # we assume distortion model and coeffs are constant over time, so just pick the first non-null entry
         model_raw: list[Literal["brown_conrady"]] | None = table.column(0).to_pylist()[0]
