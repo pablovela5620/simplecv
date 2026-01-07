@@ -1112,23 +1112,29 @@ def align_oak_to_quest_batched(
 
         # cam_T_world for projection (inverse of world_T_cam)
         # Efficient batched SE(3) inverse: R^T, -R^T @ t
-        rotations: Float[ndarray, "n 3 3"] = world_T_cam_aligned[:, :3, :3]
-        translations: Float[ndarray, "n 3"] = world_T_cam_aligned[:, :3, 3]
-        rotations_T: Float[ndarray, "n 3 3"] = np.transpose(rotations, axes=(0, 2, 1))
-        translations_inv: Float[ndarray, "n 3"] = -np.einsum("nij,nj->ni", rotations_T, translations)
+        world_R_cam: Float[ndarray, "n 3 3"] = world_T_cam_aligned[:, :3, :3]
+        world_t_cam: Float[ndarray, "n 3"] = world_T_cam_aligned[:, :3, 3]
+        cam_R_world: Float[ndarray, "n 3 3"] = np.transpose(world_R_cam, axes=(0, 2, 1))
+        cam_t_world: Float[ndarray, "n 3"] = -np.einsum("nij,nj->ni", cam_R_world, world_t_cam)
         cam_T_world_aligned: Float[ndarray, "n 4 4"] = np.zeros((n_frames, 4, 4), dtype=np.float32)
-        cam_T_world_aligned[:, :3, :3] = rotations_T
-        cam_T_world_aligned[:, :3, 3] = translations_inv
+        cam_T_world_aligned[:, :3, :3] = cam_R_world
+        cam_T_world_aligned[:, :3, 3] = cam_t_world
         cam_T_world_aligned[:, 3, 3] = 1.0
 
         # Batch log transforms using send_columns
+        # Use cam_T_world (child from parent) to match log_pinhole convention
         cam_log_path: Path = Path(f"/world/ego/{oak_pinhole.name}")
+        # relation must be broadcast to match the number of frames
+        relation_array: list[rr.components.TransformRelation] = [
+            rr.components.TransformRelation.ChildFromParent
+        ] * n_frames
         rr.send_columns(
             str(cam_log_path),
             indexes=[rr.TimeColumn(timeline, duration=timestamps_seconds)],
             columns=rr.Transform3D.columns(
-                translation=translations,
-                mat3x3=rotations,
+                translation=cam_t_world,
+                mat3x3=cam_R_world,
+                relation=relation_array,
             ),
         )
 

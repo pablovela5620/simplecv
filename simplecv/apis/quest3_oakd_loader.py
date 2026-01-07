@@ -1826,25 +1826,39 @@ def _log_head_cameras(
         static=True,
     )
 
-    # Extract batched translations and rotations from world_T_cam
-    # Transform3D.columns() doesn't support from_parent, so we use world_T_cam directly
-    # (this is equivalent to logging cam_T_world with from_parent=True)
-    left_translations: Float32[ndarray, "n 3"] = extrinsics_seq.left_world_T_cam[:, :3, 3]
-    left_rotations: Float32[ndarray, "n 3 3"] = extrinsics_seq.left_world_T_cam[:, :3, :3]
+    # === Extract cam_T_world (inverse of world_T_cam) ===
+    # log_pinhole uses cam_T_world with from_parent=True (ChildFromParent)
+    # So we need to invert world_T_cam to cam_T_world and specify ChildFromParent
+    
+    # Left camera: compute cam_T_world from world_T_cam
+    left_world_R_cam: Float32[ndarray, "n 3 3"] = extrinsics_seq.left_world_T_cam[:, :3, :3]
+    left_world_t_cam: Float32[ndarray, "n 3"] = extrinsics_seq.left_world_T_cam[:, :3, 3]
+    left_cam_R_world: Float32[ndarray, "n 3 3"] = np.transpose(left_world_R_cam, axes=(0, 2, 1))
+    left_cam_t_world: Float32[ndarray, "n 3"] = -np.einsum("nij,nj->ni", left_cam_R_world, left_world_t_cam)
 
-    right_translations: Float32[ndarray, "n 3"] = extrinsics_seq.right_world_T_cam[:, :3, 3]
-    right_rotations: Float32[ndarray, "n 3 3"] = extrinsics_seq.right_world_T_cam[:, :3, :3]
+    # Right camera: compute cam_T_world from world_T_cam
+    right_world_R_cam: Float32[ndarray, "n 3 3"] = extrinsics_seq.right_world_T_cam[:, :3, :3]
+    right_world_t_cam: Float32[ndarray, "n 3"] = extrinsics_seq.right_world_T_cam[:, :3, 3]
+    right_cam_R_world: Float32[ndarray, "n 3 3"] = np.transpose(right_world_R_cam, axes=(0, 2, 1))
+    right_cam_t_world: Float32[ndarray, "n 3"] = -np.einsum("nij,nj->ni", right_cam_R_world, right_world_t_cam)
 
     # Convert timestamps to TimeColumn
     timestamps_seconds: Float64[ndarray, "n"] = extrinsics_seq.timestamps_ns.astype(np.float64) * 1e-9
+    n_frames: int = len(timestamps_seconds)
+
+    # Relation must be broadcast to match number of frames
+    relation_array: list[rr.components.TransformRelation] = [
+        rr.components.TransformRelation.ChildFromParent
+    ] * n_frames
 
     # Batch log left camera transforms using send_columns
     rr.send_columns(
         str(left_cam_path),
         indexes=[rr.TimeColumn(timeline, duration=timestamps_seconds)],
         columns=rr.Transform3D.columns(
-            translation=left_translations,
-            mat3x3=left_rotations,
+            translation=left_cam_t_world,
+            mat3x3=left_cam_R_world,
+            relation=relation_array,
         ),
     )
 
@@ -1853,8 +1867,9 @@ def _log_head_cameras(
         str(right_cam_path),
         indexes=[rr.TimeColumn(timeline, duration=timestamps_seconds)],
         columns=rr.Transform3D.columns(
-            translation=right_translations,
-            mat3x3=right_rotations,
+            translation=right_cam_t_world,
+            mat3x3=right_cam_R_world,
+            relation=relation_array,
         ),
     )
 

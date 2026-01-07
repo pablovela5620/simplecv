@@ -17,9 +17,9 @@ from tqdm.auto import tqdm
 class SessionBounds:
     """Time bounds for the entire session."""
 
-    start_time_s: float
+    start_time_s: int | float
     """Start time in seconds."""
-    end_time_s: float
+    end_time_s: int | float
     """End time in seconds."""
 
 
@@ -29,9 +29,9 @@ class Episode:
 
     episode_number: int
     """1-indexed episode number."""
-    start_time_s: float
+    start_time_s: int | float
     """Start time in seconds."""
-    end_time_s: float
+    end_time_s: int | float
     """End time in seconds."""
 
 
@@ -200,7 +200,7 @@ def cut_episode(
     end_s: float = episode.end_time_s
     ep_name: str = f"episode-{episode.episode_number:03d}"
 
-    ep_output: Path = output_dir / session_id / "episodes" / ep_name / "synced"
+    ep_output: Path = output_dir / session_id / "episodes" / ep_name
 
     if dry_run:
         print(f"[DRY RUN] Would create: {ep_output}")
