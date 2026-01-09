@@ -22,6 +22,20 @@ from simplecv.apis.ingest_exoego_recording import main as ingest_main
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 # =============================================================================
+# Time Estimation Constants (empirical averages)
+# =============================================================================
+
+# Ingestion: ~10 seconds per episode (measured: 9.3s avg for AssetVideo + CSV)
+INGEST_SECONDS_PER_EPISODE: float = 10.0
+
+# Cutting: ~8 seconds per video (GPU re-encode), ~7 videos per episode
+CUT_SECONDS_PER_VIDEO: float = 8.0
+VIDEOS_PER_EPISODE: int = 8  # 3 ego + 3 exo + 2 quest (average)
+
+# Download: ~30 seconds per GB, average episode ~500MB synced
+DOWNLOAD_SECONDS_PER_EPISODE: float = 15.0
+
+# =============================================================================
 # Type Aliases & Constants
 # =============================================================================
 
@@ -152,6 +166,111 @@ def print_summary(manifest: ProgressManifest) -> None:
     failed: int = sum(1 for s in manifest.sequences.values() if s.status == "failed")
     pending: int = len(manifest.sequences) - complete - cut_complete - failed
     print(f"  Complete: {complete} | Cut Complete: {cut_complete} | Failed: {failed} | Pending: {pending}")
+
+
+def format_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration string.
+
+    Args:
+        seconds: Duration in seconds.
+
+    Returns:
+        Human-readable duration string (e.g., "2h 30m" or "45m 12s").
+    """
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    elif seconds < 3600:
+        minutes: int = int(seconds // 60)
+        secs: int = int(seconds % 60)
+        return f"{minutes}m {secs}s"
+    else:
+        hours: int = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
+
+
+def count_episodes_for_sequences(
+    sequences: list[str],
+    manifest: ProgressManifest,
+    output_dir: Path,
+) -> int:
+    """Count total episodes across a list of sequences.
+
+    Args:
+        sequences: List of sequence IDs.
+        manifest: Progress manifest with episode info.
+        output_dir: Base output directory.
+
+    Returns:
+        Total episode count.
+    """
+    total: int = 0
+    for seq_id in sequences:
+        seq_status: SequenceStatus = manifest.sequences[seq_id]
+        # Count from manifest if available
+        if seq_status.episodes:
+            total += len(seq_status.episodes)
+        else:
+            # Count from filesystem
+            episodes_dir: Path = output_dir / seq_status.date_prefix / seq_id / "episodes"
+            if episodes_dir.exists():
+                total += len(list(episodes_dir.glob("episode-*")))
+            else:
+                # Estimate: average ~8 episodes per sequence
+                total += 8
+    return total
+
+
+def print_time_estimate(
+    sequences: list[str],
+    manifest: ProgressManifest,
+    output_dir: Path,
+    mode: "ProcessMode",
+) -> None:
+    """Print estimated processing time for dry-run mode.
+
+    Args:
+        sequences: List of sequence IDs to process.
+        manifest: Progress manifest with episode info.
+        output_dir: Base output directory.
+        mode: Processing mode (normal, cut_only, reingest).
+    """
+    total_episodes: int = count_episodes_for_sequences(sequences, manifest, output_dir)
+
+    print(f"\n{'='*60}")
+    print("TIME ESTIMATE (based on empirical averages)")
+    print(f"{'='*60}")
+    print(f"  Sequences: {len(sequences)}")
+    print(f"  Episodes:  {total_episodes}")
+
+    if mode == ProcessMode.REINGEST:
+        # Reingest: only ingestion time
+        ingest_time: float = total_episodes * INGEST_SECONDS_PER_EPISODE
+        print(f"\n  Ingest time: ~{INGEST_SECONDS_PER_EPISODE:.0f}s per episode")
+        print(f"  Total estimate: {format_duration(ingest_time)}")
+
+    elif mode == ProcessMode.CUT_ONLY:
+        # Cut only: download + cut
+        cut_time: float = total_episodes * VIDEOS_PER_EPISODE * CUT_SECONDS_PER_VIDEO
+        download_time: float = total_episodes * DOWNLOAD_SECONDS_PER_EPISODE
+        total_time: float = download_time + cut_time
+        print(f"\n  Download time: ~{format_duration(download_time)}")
+        print(f"  Cut time: ~{format_duration(cut_time)} ({VIDEOS_PER_EPISODE} videos × {CUT_SECONDS_PER_VIDEO:.0f}s each)")
+        print(f"  Total estimate: {format_duration(total_time)}")
+
+    else:  # NORMAL
+        # Full pipeline: download + cut + ingest
+        download_time = total_episodes * DOWNLOAD_SECONDS_PER_EPISODE
+        cut_time = total_episodes * VIDEOS_PER_EPISODE * CUT_SECONDS_PER_VIDEO
+        ingest_time = total_episodes * INGEST_SECONDS_PER_EPISODE
+        total_time = download_time + cut_time + ingest_time
+        print(f"\n  Download: ~{format_duration(download_time)}")
+        print(f"  Cut:      ~{format_duration(cut_time)}")
+        print(f"  Ingest:   ~{format_duration(ingest_time)}")
+        print(f"  Total estimate: {format_duration(total_time)}")
+
+    print(f"{'='*60}\n")
+
 
 
 # =============================================================================
@@ -305,16 +424,23 @@ def ingest_episode(
         manifest: Progress manifest for tracking.
         force: If True, delete existing RRD first (for reingest mode).
     """
+    import time
+
     rrd_path: Path = ep_dir / f"{ep_name}.rrd"
 
     if force and rrd_path.exists():
         rrd_path.unlink()
+
+    start_time: float = time.perf_counter()
 
     ingest_config: IngestConfig = IngestConfig(
         exoego_dir=ep_dir,
         rr_config=RerunTyroConfig(save=rrd_path),
     )
     ingest_main(ingest_config)
+
+    elapsed: float = time.perf_counter() - start_time
+    print(f"    ⏱ {ep_name}: {elapsed:.1f}s")
 
     # Update episode status
     if ep_name not in seq_status.episodes:
@@ -637,8 +763,7 @@ def main(config: Config) -> None:
     # Dry run
     if config.dry_run:
         print(f"\n[DRY RUN] Would process {len(sequences)} sequences")
-        for _ in tqdm(sequences, desc="Sequences", leave=True):
-            pass
+        print_time_estimate(sequences, manifest, config.output_dir, mode)
         return
 
     # Process
