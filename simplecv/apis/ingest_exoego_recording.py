@@ -115,6 +115,106 @@ class VideoIngestEntry:
         return self.camera_log_path / "pinhole"
 
 
+# Participant lookup table (collector_name -> anonymized demographics)
+PARTICIPANT_INFO: dict[str, dict[str, str | float | None]] = {
+    "adil": {"sex": "male", "height_cm": 170.0},
+    "amina": {"sex": "female", "height_cm": 154.0},
+}
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class RecordingMetadata:
+    """Privacy-safe recording metadata for RRD logging.
+
+    Contains only the 4 required fields from the data criteria:
+    - time_collected
+    - task
+    - participant_sex
+    - participant_height_cm
+    """
+
+    time_collected: str
+    """ISO 8601 timestamp when the recording was captured."""
+    task: str
+    """Descriptive label for the recorded task."""
+    participant_sex: str | None = None
+    """Participant sex (derived from collector name lookup)."""
+    participant_height_cm: float | None = None
+    """Participant height in centimeters."""
+
+@serde
+@dataclass
+class RawSessionMetadata:
+    """Raw metadata.json structure for deserialization.
+
+    We only extract the fields we need, pyserde ignores extra fields by default.
+    """
+
+    time_collected: str
+    """ISO 8601 timestamp when the recording was captured."""
+    task: str
+    """Descriptive label for the recorded task."""
+    collector_name: str = ""
+    """Name of the data collector (used to lookup participant info, not logged)."""
+
+
+def load_recording_metadata(episode_dir: Path) -> RecordingMetadata | None:
+    """Load and transform metadata.json into privacy-safe RecordingMetadata.
+
+    Args:
+        episode_dir: Path to the episode directory (e.g., .../episodes/episode-001).
+
+    Returns:
+        RecordingMetadata if successful, None if metadata.json is missing.
+
+    Raises:
+        SerdeError: If required fields (time_collected, task) are missing.
+    """
+    # metadata.json is at sequence level (parent of episodes/)
+    # Fallback: also check synced/metadata.json for older data
+    sequence_dir: Path = episode_dir.parent.parent
+    metadata_path: Path = sequence_dir / "metadata.json"
+    if not metadata_path.exists():
+        metadata_path = sequence_dir / "synced" / "metadata.json"
+
+    if not metadata_path.exists():
+        return None
+
+    raw: RawSessionMetadata = from_json(RawSessionMetadata, metadata_path.read_text())
+
+    # Lookup participant info from collector_name (case-insensitive)
+    collector_name: str = raw.collector_name.lower()
+    participant_info: dict[str, str | float | None] = PARTICIPANT_INFO.get(collector_name, {})
+
+    sex_value: str | float | None = participant_info.get("sex")
+    participant_sex: str | None = sex_value if isinstance(sex_value, str) else None
+    height_value: str | float | None = participant_info.get("height_cm")
+    participant_height_cm: float | None = height_value if isinstance(height_value, float) else None
+
+    return RecordingMetadata(
+        time_collected=raw.time_collected,
+        task=raw.task,
+        participant_sex=participant_sex,
+        participant_height_cm=participant_height_cm,
+    )
+
+
+def log_recording_metadata(metadata: RecordingMetadata) -> None:
+    """Log recording metadata to Rerun as JSON TextDocument.
+
+    Args:
+        metadata: Privacy-safe recording metadata to log.
+    """
+    from serde.json import to_json
+
+    rr.log(
+        "/metadata",
+        rr.TextDocument(to_json(metadata, indent=2), media_type="application/json"),
+        static=True,
+    )
+
+
 @serde
 class OakIntrinsics:
     """Intrinsics payload emitted by the OAK capture rig."""
@@ -938,10 +1038,14 @@ def create_ingest_view(
     Paths should point to the `.../pinhole` entities that contain the actual video nodes.
     """
 
-    main_view = rrb.Spatial3DView(
-        origin="/",
-        line_grid=rrb.archetypes.LineGrid3D(visible=True),
-        spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
+    # Main 3D view with metadata in tabs
+    main_view = rrb.Tabs(
+        rrb.Spatial3DView(
+            origin="/",
+            line_grid=rrb.archetypes.LineGrid3D(visible=True),
+            spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
+        ),
+        rrb.TextDocumentView(origin="/metadata", name="Metadata"),
     )
 
     combined_ego_paths: list[Path] = []
@@ -1207,6 +1311,13 @@ def main(config: IngestConfig) -> None:
     timeline: str = "video_time"
     rr.log("/", rr.ViewCoordinates.RUB, static=True)
     rr.set_time(timeline=timeline, duration=0)
+
+    # Load and log recording metadata (time_collected, task, participant info)
+    recording_metadata: RecordingMetadata | None = load_recording_metadata(config.exoego_dir)
+    if recording_metadata is not None:
+        log_recording_metadata(recording_metadata)
+    else:
+        print("Warning: metadata.json not found, skipping metadata logging")
 
     exo_dir: Path | None = dir_tuple[0]
     ego_dir: Path | None = dir_tuple[1]

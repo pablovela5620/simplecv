@@ -122,6 +122,10 @@ _QUEST_BODY_TO_COCO_ID: dict[str, int] = {
     "right_foot_ankle": 16,  # ankle
 }
 
+# Wrist joint indices in the Quest body skeleton for 6DOF extraction
+LEFT_WRIST_BODY_IDX: int = 12  # left_hand_wrist_twist
+RIGHT_WRIST_BODY_IDX: int = 17  # right_hand_wrist_twist
+
 
 class QuestHandLandmark(IntEnum):
     """Quest 3 + Oak-D hand keypoint indices following the CSV column ordering."""
@@ -1031,6 +1035,81 @@ def _resample_body_sequence(
         joint_positions_m=positions_resampled.astype(np.float32, copy=False),
         joint_rotations_xyzw=rotations_resampled.astype(np.float32, copy=False),
     )
+
+
+def extract_wrist_6dof(
+    body_sequence: QuestBodyPoseSequence,
+    left_hand_sequence: QuestHandPoseSequence,
+    right_hand_sequence: QuestHandPoseSequence,
+) -> tuple[
+    Float32[ndarray, "n 3"],
+    Float32[ndarray, "n 4"],
+    Float32[ndarray, "n 3"],
+    Float32[ndarray, "n 4"],
+]:
+    """Extract wrist position and rotation from hand and body sequences.
+
+    Position is taken from the hand CSV (anatomically correct wrist joint),
+    rotation is taken from the body CSV (only source with quaternion data).
+
+    Args:
+        body_sequence: Resampled Quest body pose sequence for rotation.
+        left_hand_sequence: Resampled left hand sequence for position.
+        right_hand_sequence: Resampled right hand sequence for position.
+
+    Returns:
+        Tuple of (left_pos, left_quat, right_pos, right_quat) where:
+        - left_pos: Left wrist positions in meters, shape (n, 3)
+        - left_quat: Left wrist quaternions (xyzw), shape (n, 4)
+        - right_pos: Right wrist positions in meters, shape (n, 3)
+        - right_quat: Right wrist quaternions (xyzw), shape (n, 4)
+    """
+    # Position from hand CSV (wrist joint = index 1)
+    wrist_idx: int = QuestHandLandmark.WRIST
+    left_pos: Float32[ndarray, "n 3"] = left_hand_sequence.keypoints_m[:, wrist_idx, :]
+    right_pos: Float32[ndarray, "n 3"] = right_hand_sequence.keypoints_m[:, wrist_idx, :]
+
+    # Rotation from body CSV
+    left_quat: Float32[ndarray, "n 4"] = body_sequence.joint_rotations_xyzw[:, LEFT_WRIST_BODY_IDX, :]
+    right_quat: Float32[ndarray, "n 4"] = body_sequence.joint_rotations_xyzw[:, RIGHT_WRIST_BODY_IDX, :]
+
+    return left_pos, left_quat, right_pos, right_quat
+
+
+def log_wrist_6dof_batched(
+    timestamps_s: Float32[ndarray, "n"] | Float64[ndarray, "n"],
+    left_pos: Float32[ndarray, "n 3"],
+    left_quat: Float32[ndarray, "n 4"],
+    right_pos: Float32[ndarray, "n 3"],
+    right_quat: Float32[ndarray, "n 4"],
+    timeline: str = "video_time",
+    axis_length: float = 0.05,
+) -> None:
+    """Log wrist 6DOF transforms to Rerun as Transform3D entities.
+
+    Args:
+        timestamps_s: Timestamps in seconds for each frame.
+        left_pos: Left wrist positions in meters, shape (n, 3).
+        left_quat: Left wrist quaternions (xyzw), shape (n, 4).
+        right_pos: Right wrist positions in meters, shape (n, 3).
+        right_quat: Right wrist quaternions (xyzw), shape (n, 4).
+        timeline: Name of the Rerun timeline to log on.
+        axis_length: Length of the RGB coordinate axes in meters (default 5cm).
+    """
+    for path, pos, quat in [
+        ("world/gt/left_wrist", left_pos, left_quat),
+        ("world/gt/right_wrist", right_pos, right_quat),
+    ]:
+        rr.send_columns(
+            path,
+            indexes=[rr.TimeColumn(timeline, duration=timestamps_s)],
+            columns=rr.Transform3D.columns(
+                translation=pos,
+                quaternion=quat,
+            ),
+        )
+        # Log axis visualization (RGB arrows showing orientation)
+        rr.log(path, rr.TransformAxes3D(axis_length=axis_length), static=True)
 
 
 @dataclass(slots=True)
@@ -1998,6 +2077,22 @@ def load_and_log_quest_data(
         quest_right_cam_path=quest_right_cam_path,
         timeline=timeline,
         log_2d_keypoints=log_2d_keypoints,
+    )
+
+    # Log wrist 6DOF transforms
+    left_wrist_pos, left_wrist_quat, right_wrist_pos, right_wrist_quat = extract_wrist_6dof(
+        body_sequence,
+        left_hand_sequence=sequence_map[QuestHandSide.LEFT],
+        right_hand_sequence=sequence_map[QuestHandSide.RIGHT],
+    )
+    timestamps_s: Float64[ndarray, "n"] = quest_video_timestamps_ns.astype(np.float64) * 1e-9
+    log_wrist_6dof_batched(
+        timestamps_s=timestamps_s,
+        left_pos=left_wrist_pos,
+        left_quat=left_wrist_quat,
+        right_pos=right_wrist_pos,
+        right_quat=right_wrist_quat,
+        timeline=timeline,
     )
 
     quest_pinhole_paths: list[Path] = [

@@ -93,6 +93,19 @@ Notes:
 - These arrays are deterministic projections of `/world/gt/coco133_xyz`; log them if you want to avoid recomputation at view time, or derive them on the fly.
 - Any auxiliary depth map should use metres for range values; point clouds derived from depth must therefore align with the COCO-133 metric scale.
 
+### 2.4 Wrist 6DOF Transforms *(required)*
+
+```
+/world/gt/left_wrist
+/world/gt/right_wrist
+  Transform3D: translation (3) + quaternion (xyzw, 4)
+```
+
+- Source: `body_poses.csv`, joints `left_hand_wrist_twist` and `right_hand_wrist_twist`
+- Quaternions use xyzw convention (Rerun default)
+- Logged per video frame (resampled from high-rate Quest body tracker)
+- Provides 6 degrees of freedom for wrist pose tracking
+
 ## 3. Predictions *(optional)*
 
 Predicted outputs mirror the ground-truth layout under `/world/pred/...`. This keeps GT and inference artefacts aligned and allows side-by-side visualization.

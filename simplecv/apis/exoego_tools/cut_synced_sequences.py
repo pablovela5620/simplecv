@@ -86,8 +86,8 @@ class Config:
 def cut_video_ffmpeg_nvenc(
     input_path: Path,
     output_path: Path,
-    start_s: float,
-    end_s: float,
+    start_s: int | float,
+    end_s: int | float,
 ) -> None:
     """Cut video using FFmpeg with NVENC for GPU-accelerated AV1 re-encoding.
 
@@ -131,8 +131,8 @@ def cut_video_ffmpeg_nvenc(
 def cut_csv_by_timestamp(
     input_path: Path,
     output_path: Path,
-    start_s: float,
-    end_s: float,
+    start_s: int | float,
+    end_s: int | float,
 ) -> None:
     """Filter CSV rows by timestamp range and normalize to start at 0.
 
@@ -196,8 +196,8 @@ def cut_episode(
     Returns:
         Path to the created episode directory.
     """
-    start_s: float = episode.start_time_s
-    end_s: float = episode.end_time_s
+    start_s: int | float = episode.start_time_s
+    end_s: int | float = episode.end_time_s
     ep_name: str = f"episode-{episode.episode_number:03d}"
 
     ep_output: Path = output_dir / session_id / "episodes" / ep_name
@@ -210,7 +210,7 @@ def cut_episode(
     ep_output.mkdir(parents=True, exist_ok=True)
 
     # Collect all video cut tasks: (input_path, output_path, start_s, end_s)
-    video_tasks: list[tuple[Path, Path, float, float]] = []
+    video_tasks: list[tuple[Path, Path, int | float, int | float]] = []
     exo_cameras: list[Path] = []  # Track for calibration copy later
 
     # === Setup directories and collect video tasks ===
@@ -253,7 +253,7 @@ def cut_episode(
                 video_tasks.append((video_in, video_out, start_s, end_s))
 
     # === Execute video cuts in parallel ===
-    def _cut_video_task(task: tuple[Path, Path, float, float]) -> str:
+    def _cut_video_task(task: tuple[Path, Path, int | float, int | float]) -> str:
         """Worker function for parallel video cutting."""
         input_path, output_path, start, end = task
         cut_video_ffmpeg_nvenc(input_path, output_path, start, end)

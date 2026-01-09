@@ -49,6 +49,47 @@ Visualizing RRD-based exo/ego datasets remuxes the embedded video streams once a
 - Set `SIMPLECV_VIDEO_CACHE_DISABLE=1` to opt out entirely; the remux step will run every time.
 - The cache auto-invalidates if the source `.rrd` changes (mtime or size). To reclaim disk space manually, delete the directory shown above.
 
+### Batch Processing ExoEgo from S3
+
+Process multiple ExoEgo sequences from S3 in batch. The pipeline downloads, cuts, and optionally ingests recordings.
+
+**Environments:**
+- Use `gpu` environment for NVENC AV1 encoding (requires RTX 40+ GPU)
+- Never use `dev` for batch (beartype slows processing)
+
+**Cut Only (download + cut videos):**
+```bash
+pixi run -e gpu python tools/exoego_tools/batch_process_s3.py \
+    --s3-bucket YOUR_BUCKET_ID \
+    --profile YOUR_AWS_PROFILE \
+    --output-dir /path/to/output \
+    --parallel-workers 4 \
+    --cut-only
+```
+
+**Full Pipeline (cut + ingest to RRD):**
+```bash
+pixi run -e gpu python tools/exoego_tools/batch_process_s3.py \
+    --s3-bucket YOUR_BUCKET_ID \
+    --profile YOUR_AWS_PROFILE \
+    --output-dir /path/to/output \
+    --parallel-workers 4
+```
+
+**Re-ingest Only (regenerate RRDs from cut data):**
+```bash
+pixi run -e gpu python tools/exoego_tools/batch_process_s3.py \
+    --s3-bucket YOUR_BUCKET_ID \
+    --profile YOUR_AWS_PROFILE \
+    --output-dir /path/to/output \
+    --reingest-only
+```
+
+**State Management:**
+- Progress tracked in `manifest.json` in output directory
+- Ctrl+C is safe - restart resumes from last checkpoint
+- Completed sequences are skipped on restart
+
 
 ## T265 SLAM
 - **Env:** `t265` feature includes `librealsense==2.53.1` and `pyrealsense2==2.53.1.4623` (see `pyproject.toml`).
