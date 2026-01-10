@@ -398,6 +398,15 @@ def ensure_downloaded(
         seq_status.downloaded_at = datetime.now().isoformat()
         save_manifest(manifest, config.output_dir)
 
+    # Always ensure metadata.json exists (may have been missed in earlier runs)
+    metadata_local: Path = sequence_dir / "metadata.json"
+    if not metadata_local.exists():
+        base_s3: UPath = UPath(f"s3://{config.s3_bucket}", profile=config.profile)
+        metadata_s3: UPath = base_s3 / seq_status.date_prefix / seq_id / "metadata.json"
+        if metadata_s3.exists():
+            sequence_dir.mkdir(parents=True, exist_ok=True)
+            metadata_local.write_bytes(metadata_s3.read_bytes())
+
     return sequence_dir
 
 
