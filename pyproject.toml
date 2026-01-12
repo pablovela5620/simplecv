@@ -114,6 +114,7 @@ description = "Downloads an example assembly101 720p dataset from huggingface"
 simplecv = { path = ".", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }
+timm = "<1.0"  # Pin for wilor-nano compatibility (RotaryEmbedding import moved in 1.0)
 
 
 [tool.pixi.dependencies]
