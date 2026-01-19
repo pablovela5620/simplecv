@@ -21,6 +21,9 @@ dependencies = [
     "universal_pathlib>=0.3.7",
     "s3fs>=2025.3.0",
     "fsspec[s3]",                # Add the filesystems you need
+    # Required for Rerun 0.28 Catalog API data extraction. Versions 49-50 are compatible;
+    # 44 and 51+ are known to be incompatible with rerun-sdk 0.28.x
+    "datafusion>=49.0.0,<51",
 ]
 
 [project.scripts]
@@ -140,6 +143,7 @@ hdf5 = "*"
 h5py = ">=3.12.1,<4"
 jupyterlab = ">=4.4.9,<5"
 dill = ">=0.3.8,<0.4.1"
+oss2 = ">=2.19.0,<3"
 
 [tool.pixi.target.linux-64.dependencies]
 # Overwrite the needed python version only on linux-64
@@ -252,6 +256,29 @@ cuda129 = { features = [
 t265 = { features = ["t265"], no-default-feature = true }
 gpu = { features = ["cuda129"], solve-group = "cuda129" }
 dev = { features = ["dev", "cuda129"], solve-group = "cuda129" }
+notebook = { features = ["notebook"], no-default-feature = true }
+
+
+# Minimal environment for running data extraction notebooks without heavy ML deps
+[tool.pixi.feature.notebook]
+platforms = ["linux-64"]
+channels = ["https://prefix.dev/conda-forge"]
+
+[tool.pixi.feature.notebook.dependencies]
+python = "==3.12"
+jupyterlab = ">=4.4.9,<5"
+av = "*"
+numpy = ">=2.0"
+pandas = ">=2.3"
+jaxtyping = ">=0.2.33,<0.3"
+pytorch = ">=2.7,<2.8"
+torchcodec = "*"
+
+[tool.pixi.feature.notebook.pypi-dependencies]
+rerun-sdk = ">=0.28.1"
+
+[tool.pixi.feature.notebook.tasks]
+extraction-notebook = { cmd = "jupyter lab notebooks/exoego_data_extraction.ipynb", description = "Run the data extraction notebook" }
 
 
 [tool.ruff]
