@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from jaxtyping import Float32
 from numpy import ndarray
-from serde import from_dict, serde
+from serde import serde
 from serde.yaml import from_yaml
 
 from simplecv.camera_parameters import (
@@ -106,15 +106,15 @@ class KalibrCamWithExtrinsic:
 
 
 def _load_kalibr_camchain_imucam(yaml_path: Path) -> dict[str, KalibrCamWithExtrinsic]:
-    """Load a Kalibr camchain-imucam YAML file and return camera dict."""
-    import yaml
+    """Load a Kalibr camchain-imucam YAML file and return camera dict.
 
-    with yaml_path.open() as f:
-        raw: dict[str, dict] = yaml.safe_load(f)
-
-    result: dict[str, KalibrCamWithExtrinsic] = {}
-    for cam_key, cam_data in raw.items():
-        result[cam_key] = from_dict(KalibrCamWithExtrinsic, cam_data)
+    Uses pyserde's from_yaml with dict[str, KalibrCamWithExtrinsic] to directly
+    deserialize the dynamic camera keys (cam0, cam1, etc.).
+    """
+    yaml_content: str = yaml_path.read_text()
+    result: dict[str, KalibrCamWithExtrinsic] = from_yaml(
+        dict[str, KalibrCamWithExtrinsic], yaml_content
+    )
     return result
 
 
