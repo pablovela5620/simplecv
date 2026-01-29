@@ -127,9 +127,10 @@ PARTICIPANT_INFO: dict[str, dict[str, str | float | None]] = {
 class RecordingMetadata:
     """Privacy-safe recording metadata for RRD logging.
 
-    Contains only the 4 required fields from the data criteria:
+    Contains the following fields from the data criteria:
     - time_collected
     - task
+    - environment
     - participant_sex
     - participant_height_cm
     """
@@ -142,6 +143,8 @@ class RecordingMetadata:
     """Participant sex (derived from collector name lookup)."""
     participant_height_cm: float | None = None
     """Participant height in centimeters."""
+    environment: str | None = None
+    """Environment identifier where recording was captured (optional)."""
 
 @serde
 @dataclass
@@ -157,6 +160,8 @@ class RawSessionMetadata:
     """Descriptive label for the recorded task."""
     collector_name: str = ""
     """Name of the data collector (used to lookup participant info, not logged)."""
+    environment: str = ""
+    """Environment identifier where recording was captured."""
 
 
 def load_recording_metadata(episode_dir: Path) -> RecordingMetadata | None:
@@ -197,6 +202,7 @@ def load_recording_metadata(episode_dir: Path) -> RecordingMetadata | None:
         task=raw.task,
         participant_sex=participant_sex,
         participant_height_cm=participant_height_cm,
+        environment=raw.environment if raw.environment else None,
     )
 
 

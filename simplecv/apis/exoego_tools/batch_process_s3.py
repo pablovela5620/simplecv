@@ -109,8 +109,8 @@ class Config:
     """S3 bucket containing ExoEgo sequences."""
     output_dir: Path
     """Local directory for downloaded and processed data."""
-    profile: str = "pablo-sso"
-    """AWS profile name for S3 access."""
+    profile: str = ""
+    """AWS profile name for S3 access. Leave empty to use default credentials."""
     parallel_workers: int = 4
     """Number of parallel FFmpeg processes for video cutting."""
     dry_run: bool = False
@@ -274,6 +274,46 @@ def print_time_estimate(
 
 
 # =============================================================================
+# Data Validation
+# =============================================================================
+
+
+def validate_exoego_data(data_dir: Path) -> bool:
+    """Validate that a directory contains actual ExoEgo video files.
+
+    Works for both synced/ directories and cut episode directories,
+    since they have the same structure (ego/, exo/, quest/).
+
+    Args:
+        data_dir: Path to the directory (synced/ or episodes/episode-XXX/).
+
+    Returns:
+        True if directory has videos in ego/, exo/, and quest/ subdirectories.
+    """
+    if not data_dir.exists():
+        return False
+
+    # Check for ego videos
+    ego_dir: Path = data_dir / "ego"
+    has_ego: bool = ego_dir.exists() and len(list(ego_dir.glob("*.mp4"))) > 0
+
+    # Check for exo videos (in subdirectories like OAK-* or camera name)
+    exo_dir: Path = data_dir / "exo"
+    has_exo: bool = exo_dir.exists() and len(list(exo_dir.glob("*/*.mp4"))) > 0
+
+    # Check for quest videos
+    quest_dir: Path = data_dir / "quest"
+    has_quest: bool = quest_dir.exists() and len(list(quest_dir.glob("*.mp4"))) > 0
+
+    return has_ego and has_exo and has_quest
+
+
+# Aliases for backwards compatibility and semantic clarity
+validate_synced_data = validate_exoego_data
+validate_cut_episode = validate_exoego_data
+
+
+# =============================================================================
 # S3 Operations
 # =============================================================================
 
@@ -288,7 +328,7 @@ def discover_sequences(s3_bucket: str, profile: str) -> dict[str, str]:
     Returns:
         Dict mapping sequence_id to date prefix (e.g., {"a8e0...": "2025-11-24"}).
     """
-    base_path: UPath = UPath(f"s3://{s3_bucket}", profile=profile)
+    base_path: UPath = UPath(f"s3://{s3_bucket}", profile=profile if profile else None)
     episode_info_paths: list[UPath] = list(base_path.glob("**/episode_info.json"))
 
     sequences: dict[str, str] = {}
@@ -320,7 +360,7 @@ def download_sequence(
     Returns:
         Path to the downloaded sequence directory.
     """
-    base_s3: UPath = UPath(f"s3://{s3_bucket}", profile=profile)
+    base_s3: UPath = UPath(f"s3://{s3_bucket}", profile=profile if profile else None)
 
     # Find the sequence path
     episode_info_paths: list[UPath] = list(base_s3.glob(f"**/{sequence_id}/episode_info.json"))
@@ -352,9 +392,10 @@ def download_sequence(
     cmd: list[str] = [
         "aws", "s3", "sync",
         synced_s3, str(synced_local),
-        "--profile", profile,
         "--quiet",
     ]
+    if profile:
+        cmd.extend(["--profile", profile])
     result: subprocess.CompletedProcess[str] = subprocess.run(
         cmd, check=True, capture_output=True, text=True
     )
@@ -370,7 +411,10 @@ def ensure_downloaded(
     seq_id: str,
     seq_status: SequenceStatus,
 ) -> Path:
-    """Download sequence if synced/ doesn't exist.
+    """Download sequence if synced/ doesn't exist or is invalid.
+
+    If cut episodes already exist and are valid, synced data is not needed.
+    Only downloads if BOTH synced data AND cut episodes are missing/invalid.
 
     Args:
         config: Batch processing configuration.
@@ -380,11 +424,45 @@ def ensure_downloaded(
 
     Returns:
         Path to the sequence directory.
+
+    Raises:
+        RuntimeError: If download fails validation after re-download.
     """
     sequence_dir: Path = config.output_dir / seq_status.date_prefix / seq_id
+    synced_dir: Path = sequence_dir / "synced"
+    episodes_dir: Path = sequence_dir / "episodes"
 
-    if not (sequence_dir / "synced").exists():
-        print(f"\nDownloading {seq_id}...")
+    # Check if we have valid cut episodes already (synced not needed)
+    has_valid_cut_episodes: bool = False
+    if episodes_dir.exists():
+        for ep_dir in episodes_dir.glob("episode-*"):
+            if validate_cut_episode(ep_dir):
+                has_valid_cut_episodes = True
+                break
+
+    # If we have valid cut data, we don't need synced
+    if has_valid_cut_episodes:
+        # Still ensure metadata.json exists
+        metadata_local: Path = sequence_dir / "metadata.json"
+        if not metadata_local.exists():
+            base_s3: UPath = UPath(f"s3://{config.s3_bucket}", profile=config.profile if config.profile else None)
+            metadata_s3: UPath = base_s3 / seq_status.date_prefix / seq_id / "metadata.json"
+            if metadata_s3.exists():
+                sequence_dir.mkdir(parents=True, exist_ok=True)
+                metadata_local.write_bytes(metadata_s3.read_bytes())
+        return sequence_dir
+
+    # Check if synced data is valid (not just existence, but actual video files)
+    needs_download: bool = not validate_synced_data(synced_dir)
+
+    if needs_download:
+        # If directory exists but is invalid, remove it first
+        if synced_dir.exists():
+            print(f"\n  Synced data invalid for {seq_id[:8]}, re-downloading...")
+            shutil.rmtree(synced_dir)
+        else:
+            print(f"\nDownloading {seq_id}...")
+
         seq_status.status = "downloading"
         save_manifest(manifest, config.output_dir)
 
@@ -395,13 +473,21 @@ def ensure_downloaded(
             output_dir=config.output_dir,
             profile=config.profile,
         )
+
+        # Validate after download
+        if not validate_synced_data(synced_dir):
+            seq_status.status = "failed"
+            seq_status.error = "Download completed but synced data validation failed"
+            save_manifest(manifest, config.output_dir)
+            raise RuntimeError(f"Synced data validation failed for {seq_id}")
+
         seq_status.downloaded_at = datetime.now().isoformat()
         save_manifest(manifest, config.output_dir)
 
     # Always ensure metadata.json exists (may have been missed in earlier runs)
     metadata_local: Path = sequence_dir / "metadata.json"
     if not metadata_local.exists():
-        base_s3: UPath = UPath(f"s3://{config.s3_bucket}", profile=config.profile)
+        base_s3: UPath = UPath(f"s3://{config.s3_bucket}", profile=config.profile if config.profile else None)
         metadata_s3: UPath = base_s3 / seq_status.date_prefix / seq_id / "metadata.json"
         if metadata_s3.exists():
             sequence_dir.mkdir(parents=True, exist_ok=True)
@@ -502,6 +588,16 @@ def cut_sequence(
     for episode in tqdm(episode_info.episodes, desc=f"Cutting {sequence_id[:8]}"):
         ep_name: str = f"episode-{episode.episode_number:03d}"
         ep_status: EpisodeStatus = seq_status.episodes[ep_name]
+        ep_dir: Path = output_dir / date_prefix / sequence_id / "episodes" / ep_name
+
+        # Check if already cut AND valid (not just the flag)
+        if ep_status.cut and validate_cut_episode(ep_dir):
+            continue
+
+        # Reset flag if validation failed
+        if ep_status.cut and not validate_cut_episode(ep_dir):
+            print(f"  Episode {ep_name} marked cut but invalid, re-cutting...")
+            ep_status.cut = False
 
         if not ep_status.cut:
             cut_episode(
@@ -511,7 +607,13 @@ def cut_sequence(
                 episode=episode,
                 parallel_workers=parallel_workers,
             )
-            ep_status.cut = True
+
+            # Validate after cutting
+            if validate_cut_episode(ep_dir):
+                ep_status.cut = True
+            else:
+                print(f"  Warning: {ep_name} cut but validation failed")
+
             save_manifest(manifest, output_dir)
 
     # Cleanup synced folder

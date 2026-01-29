@@ -78,6 +78,9 @@ class VisualizeConfig:
     log_depths: bool = False
     """Enable logging of per-camera depth maps when available."""
 
+    skip_camera_names: str = ""
+    """Comma-separated camera names to exclude from 2D video panel tabs (e.g. 'quest3_right,rgb')."""
+
 
 def set_annotation_context() -> None:
     """Register COCO-133 semantic metadata so subsequent logs show names/edges."""
@@ -146,10 +149,12 @@ def log_depths(
     for idx in tqdm(range(len(exoego_sequence))):
         sample: ExoEgoSample = exoego_sequence[idx]
         rr.set_time(timeline, duration=sample.canonical_timestamp_ns * 1e-9)
-        exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters] | None = sample.exo_cam_params_list
+        exo_cam_params_list: list[PinholeParameters | Fisheye62Parameters | None] | None = sample.exo_cam_params_list
         exo_depth_list: list[UInt16[ndarray, "H W"]] | None = sample.exo_depth_list
         assert exo_cam_params_list is not None and exo_depth_list is not None
         for idx, exo_cam_param in enumerate(exo_cam_params_list):
+            if exo_cam_param is None:
+                continue
             cam_log_path: Path = parent_log_path / "exo" / exo_cam_param.name
             pinhole_log_path: Path = cam_log_path / "pinhole"
             depth_log_path: Path = pinhole_log_path / "depth"
@@ -164,6 +169,7 @@ def create_container(
     ego_video_log_paths: list[Path] | None = None,
     exo_video_log_paths: list[Path] | None = None,
     max_exo_videos_to_log: Literal[4, 8] = 8,
+    skip_camera_names: frozenset[str] = frozenset(),
 ) -> rrb.ContainerLike:
     """Create a Rerun container for visualizing ego- and exo-centric streams.
 
@@ -178,13 +184,34 @@ def create_container(
     Returns:
         rrb.Blueprint: Assembled layout containing the configured views.
     """
+    def _should_include(path: Path) -> bool:
+        """Check if camera should be included based on skip list."""
+        # Path structure: /world/{ego|exo}/{cam_name}/pinhole/video
+        # path.parent = pinhole, path.parent.parent = cam_name
+        cam_name: str = path.parent.parent.name
+        return cam_name not in skip_camera_names
+
+    # Build exclusion patterns for 3D view (exclude both ego and exo paths for skipped cameras)
+    exclusion_patterns: list[str] = []
+    for cam_name in skip_camera_names:
+        exclusion_patterns.append(f"- /world/ego/{cam_name}/**")
+        exclusion_patterns.append(f"- /world/exo/{cam_name}/**")
+
+    # Include everything except excluded cameras
+    contents_filter: str | list[str] = (
+        ["+ /**"] + exclusion_patterns if exclusion_patterns else "/**"
+    )
+
     main_view = rrb.Spatial3DView(
         origin="/",
         name="3D View",
+        contents=contents_filter,
         spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
     )
 
     if ego_video_log_paths is not None:
+        ego_video_log_paths = [p for p in ego_video_log_paths if _should_include(p)]
+    if ego_video_log_paths:
         ego_view = rrb.Vertical(
             contents=[
                 rrb.Tabs(
@@ -199,6 +226,8 @@ def create_container(
         )
 
     if exo_video_log_paths is not None:
+        exo_video_log_paths = [p for p in exo_video_log_paths if _should_include(p)]
+    if exo_video_log_paths:
         exo_view = rrb.Horizontal(
             contents=[
                 rrb.Tabs(
@@ -927,9 +956,15 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
             timeline=timeline,
         )
 
+    skip_set: frozenset[str] = (
+        frozenset(name.strip() for name in config.skip_camera_names.split(",") if name.strip())
+        if config.skip_camera_names
+        else frozenset()
+    )
     container: rrb.ContainerLike = create_container(
         exo_video_log_paths=log_paths.exo_video_log_paths,
         ego_video_log_paths=log_paths.ego_video_log_paths,
+        skip_camera_names=skip_set,
     )
     blueprint = rrb.Blueprint(
         rrb.Horizontal(
