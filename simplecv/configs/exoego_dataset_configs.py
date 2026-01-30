@@ -9,6 +9,7 @@ from simplecv.data.exoego.base_exoego import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.ego100k import Egocentric100KConfig
 from simplecv.data.exoego.ego_dex import EgoDexConfig
 from simplecv.data.exoego.hocap import HocapConfig
+from simplecv.data.exoego.robocap import RobocapConfig
 from simplecv.data.exoego.rrd_exoego import RRDExoEgoConfig
 from simplecv.data.exoego.umetrack import UmeTrackConfig
 
@@ -18,9 +19,11 @@ dataset_defaults = {
     "ego100k": Egocentric100KConfig(),
     "hocap": HocapConfig(),
     "ego-dex": EgoDexConfig(),
+    "robocap": RobocapConfig(),
     "rrd": RRDExoEgoConfig(),
     "umetrack": UmeTrackConfig(),
 }
+
 
 if TYPE_CHECKING:  # for IDEs / mypy
     EgoDatasetUnion = BaseExoEgoDatasetConfig
