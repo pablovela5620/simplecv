@@ -28,6 +28,7 @@ dependencies = [
 
 [project.scripts]
 simplecv-ingest-exoego = "simplecv.apis.ingest_exoego_recording:entrypoint"
+simplecv-view-exoego = "simplecv.apis.view_exoego:entrypoint"
 
 [build-system]
 requires = ["setuptools"]

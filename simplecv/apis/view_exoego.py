@@ -1000,3 +1000,19 @@ def main(config: VisualizeConfig) -> None:
     """
     exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
     visualize_exo_ego(exoego_sequence, config)
+
+
+def entrypoint() -> None:
+    """CLI entrypoint for viewing ExoEgo data with Rerun."""
+    import tyro
+
+    tyro.extras.set_accent_color("bright_cyan")
+    config: VisualizeConfig = tyro.cli(
+        VisualizeConfig,
+        description="Visualize ExoEgo dataset sequences with Rerun.",
+    )
+    main(config=config)
+
+
+if __name__ == "__main__":
+    entrypoint()
