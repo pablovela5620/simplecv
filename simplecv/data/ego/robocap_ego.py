@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,7 +16,7 @@ from simplecv.camera_parameters import (
     Intrinsics,
     KannalaBrandtDistortion,
 )
-from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, CamNameType, EgoData
+from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, EgoData
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.robocap import RobocapConfig
@@ -57,27 +57,6 @@ CAM_TO_CALIB_INFO: dict[str, tuple[str, int]] = {
 # ─────────────────────────────────────────────────────────────────────────────
 # Kalibr YAML serde dataclasses
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-@serde
-class KalibrCamIntrinsic:
-    """Single camera entry in a Kalibr camchain YAML (intrinsic-only file)."""
-
-    camera_model: str
-    """Camera model, e.g. 'pinhole'."""
-    distortion_model: str
-    """Distortion model, e.g. 'equidistant' (Kannala-Brandt)."""
-    intrinsics: list[float]
-    """Intrinsics as [fx, fy, cx, cy]."""
-    distortion_coeffs: list[float]
-    """Distortion coefficients, 4 for equidistant."""
-    resolution: list[int]
-    """Resolution as [width, height]."""
-    cam_overlaps: list[int] = field(default_factory=list)
-    """Overlapping camera indices."""
-    rostopic: str = ""
-    """ROS topic name (optional)."""
-
 
 @serde
 class KalibrCamWithExtrinsic:
