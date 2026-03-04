@@ -5,7 +5,7 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal
+from typing import Literal, TypeAlias
 
 
 def create_temp_video_from_img_dir(
@@ -131,7 +131,7 @@ def create_temp_video_from_img_dir(
     return output_path
 
 
-type Resolution = Literal["1080p", "720p", "480p", "360p"]  # noqa: N815  (type alias)
+Resolution: TypeAlias = Literal["1080p", "720p", "480p", "360p"]
 
 RESOLUTION_MAP: dict[Resolution, tuple[int, int]] = {
     "1080p": (1920, 1080),

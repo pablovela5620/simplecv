@@ -2,7 +2,7 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, TypeAlias, TypedDict
 
 import jax
 import jax.numpy as npj
@@ -72,13 +72,13 @@ class HandSide(enum.IntEnum):
     RIGHT = 1
 
 
-type FwdKinematics = Callable[
+FwdKinematics: TypeAlias = Callable[
     [Float[Array, "b 48"], Float[Array, "b 10"], Float[Array, "b 3"]],
     tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]],
 ]
 
 # The residual you’ll hand to jaxopt
-type ResidualFn = Callable[
+ResidualFn: TypeAlias = Callable[
     [
         Float[Array, "_"],  # flattened params + scale
         Float[Array, "b 3 4"],  # Pall

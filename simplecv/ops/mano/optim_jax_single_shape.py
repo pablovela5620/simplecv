@@ -2,7 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal, TypedDict
+from typing import Literal, TypeAlias, TypedDict
 
 import jax.numpy as npj
 import numpy as np
@@ -55,13 +55,13 @@ def proj_3d_vectorized(
     return uv
 
 
-type FwdKinematics = Callable[
+FwdKinematics: TypeAlias = Callable[
     [Float[Array, "b 48"], Float[Array, "b 10"], Float[Array, "b 3"]],
     tuple[Float[Array, "b n_verts=778 3"], Float[Array, "b joints_and_tips=21 3"]],
 ]
 
 # jaxopt residual signature
-type ResidualFn = Callable[
+ResidualFn: TypeAlias = Callable[
     [
         Float[Array, "_"],  # flattened params (51)
         Float[Array, "b 10"],  # betas

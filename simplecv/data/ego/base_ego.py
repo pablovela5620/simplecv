@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import Generic, TypeVar
 
 from jaxtyping import Float
 from numpy import ndarray
@@ -31,7 +31,7 @@ class EgoLabels:
     # uvc_stack: Float[ndarray, "n_frames n_views 68 3"] | None = None  # 2D landmarks for each view and frame
 
 
-class BaseEgoSequence[ConfigT: BaseExoEgoDatasetConfig](ABC):
+class BaseEgoSequence(Generic[ConfigT], ABC):
     config: ConfigT
 
     def __init__(
