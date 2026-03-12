@@ -11,7 +11,7 @@ dependencies = [
     "icecream>=2.1.3",
     "opencv-python>=4.10.0",
     "pyserde>=0.20.0",
-    "rerun-sdk>=0.28.1,<0.29",
+    "rerun-sdk[datafusion]>=0.30",
     "tyro>=0.9.1",
     "tqdm",
     "hf-transfer>=0.1.9",
@@ -20,10 +20,6 @@ dependencies = [
     "onnxruntime>=1.22.0,<2",
     "universal_pathlib>=0.3.7",
     "s3fs>=2025.3.0",
-    "fsspec[s3]",                # Add the filesystems you need
-    # Required for Rerun 0.28 Catalog API data extraction. Versions 49-50 are compatible;
-    # 44 and 51+ are known to be incompatible with rerun-sdk 0.28.x
-    "datafusion>=49.0.0,<51",
 ]
 
 [project.scripts]
@@ -250,13 +246,14 @@ pyrealsense2 = "==2.53.1.4623"
 t265-enum = { cmd = "rs-enumerate-devices", description = "List RealSense devices using librealsense CLI" }
 
 [tool.pixi.environments]
+default = { features = [] }
 cuda129 = { features = [
     "cuda129",
 ], solve-group = "cuda129", no-default-feature = true }
 t265 = { features = ["t265"], no-default-feature = true }
 gpu = { features = ["cuda129"], solve-group = "cuda129" }
 dev = { features = ["dev", "cuda129"], solve-group = "cuda129" }
-notebook = { features = ["notebook"], no-default-feature = true }
+notebook = { features = ["notebook"] }
 
 
 # Minimal environment for running data extraction notebooks without heavy ML deps
@@ -273,9 +270,6 @@ pandas = ">=2.3"
 jaxtyping = ">=0.3.7,<0.3.8"
 pytorch = ">=2.7,<2.8"
 torchcodec = "*"
-
-[tool.pixi.feature.notebook.pypi-dependencies]
-rerun-sdk = ">=0.28.1"
 
 [tool.pixi.feature.notebook.tasks]
 extraction-notebook = { cmd = "jupyter lab notebooks/exoego_data_extraction.ipynb", description = "Run the data extraction notebook" }

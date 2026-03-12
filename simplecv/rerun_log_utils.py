@@ -15,10 +15,9 @@ import rerun as rr
 from jaxtyping import Int
 from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray
-from rerun.recording import Recording, load_recording
-from rerun_bindings import RecordingView
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value, unwrap_singleton_lists
 from simplecv.rerun_custom_types import PinholeWithDistortion
 
 
@@ -252,17 +251,33 @@ def log_video(
 def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) -> tuple[ChunkedArray, ChunkedArray]:
     """Load recording data and query video stream."""
 
-    recording: Recording = load_recording(rrd_path)
     normalized_entity: str = video_entity.lstrip("/")
-    view: RecordingView = recording.view(index=timeline, contents=normalized_entity)
+    query_session = RRDQuerySession(Path(rrd_path))
 
     # Make sure this is H.264 encoded.
-    # For that we just read out the first codec value batch and check whether it's H.264.
-    codec = view.select(f"{normalized_entity}:VideoStream:codec")
-    first_codec_batch = codec.read_next_batch()
-    if first_codec_batch is None:
+    codec_table = query_session.read_arrow(
+        contents=normalized_entity,
+        selectors=[f"{normalized_entity}:VideoStream:codec"],
+        index=None,
+    )
+    if codec_table.num_rows == 0:
+        codec_table = query_session.read_arrow(
+            contents=normalized_entity,
+            selectors=[f"{normalized_entity}:VideoStream:codec"],
+            index=timeline,
+        )
+        codec_column = codec_table.column(1) if codec_table.num_columns > 1 else codec_table.column(0)
+    else:
+        codec_column = codec_table.column(0)
+
+    if codec_table.num_rows == 0:
         raise ValueError(f"There's no video stream codec specified at {video_entity} for timeline {timeline}.")
-    codec_value = first_codec_batch.column(0)[0][0].as_py()
+
+    codec_value_raw = first_valid_value(
+        codec_column,
+        component_name=f"{normalized_entity}:VideoStream:codec",
+    )
+    codec_value = int(np.asarray(codec_value_raw).reshape(-1)[0])
     if codec_value != rr.VideoCodec.H264.value:
         raise ValueError(
             f"Video stream codec is not H.264 at {video_entity} for timeline {timeline}. "
@@ -272,62 +287,27 @@ def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) 
         print(f"Video stream codec is H.264 at {video_entity} for timeline {timeline}.")
 
     # Get the video stream
-    timestamps_and_samples = view.select(timeline, f"{normalized_entity}:VideoStream:sample").read_all()
-    times = timestamps_and_samples[0]
-    samples = timestamps_and_samples[1]
+    timestamps_and_samples = query_session.read_arrow(
+        contents=normalized_entity,
+        selectors=[f"{normalized_entity}:VideoStream:sample"],
+        index=timeline,
+    )
+    if timestamps_and_samples.num_rows == 0:
+        raise ValueError(f"No H.264 samples found at {video_entity} for timeline {timeline}.")
+
+    times = timestamps_and_samples.column(0)
+    samples = timestamps_and_samples.column(1)
 
     print(f"Retrieved {len(samples)} video samples.")
 
     return times, samples
 
-
-def write_asset_video_blob(
-    recording: Recording,
-    *,
-    timeline: str,
-    video_entity: str,
-    output_path: Path,
-) -> Path:
-    """Persist an AssetVideo blob from ``recording`` to ``output_path``.
-
-    Args:
-        recording: Loaded Rerun recording containing the asset.
-        timeline: Timeline used to index the recording view.
-        video_entity: Entity path (without a leading ``/``) holding the ``AssetVideo`` component.
-        output_path: Destination path to write the extracted video bytes.
-
-    Returns:
-        Path: The provided ``output_path`` after writing the bytes.
-
-    Raises:
-        ValueError: If no asset video data is present for ``video_entity``.
-    """
-
-    view: RecordingView = recording.view(index=timeline, contents=video_entity)
-    reader = view.select(f"{video_entity}:AssetVideo:blob")
-
-    batch = reader.read_next_batch()
-    while batch is not None:
-        column = batch.column(0)
-        for row_idx in range(batch.num_rows):
-            value = column[row_idx]
-            if value is None:
-                continue
-            data_list = value.as_py()
-            if isinstance(data_list, list) and len(data_list) == 1 and isinstance(data_list[0], list):
-                data_list = data_list[0]
-            video_bytes = bytes(data_list)
-            output_path.write_bytes(video_bytes)
-            return output_path
-        batch = reader.read_next_batch()
-
-    raise ValueError(f"No AssetVideo data found for entity {video_entity}")
-
-
 def extract_asset_video_blob_fast(
-    recording: Recording,
     video_entity: str,
     timeline: str = "video_time",
+    *,
+    query_session: RRDQuerySession | None = None,
+    rrd_path: Path | str | None = None,
 ) -> bytes:
     """Extract AssetVideo blob bytes from a Rerun recording using fast pyarrow buffer access.
 
@@ -336,9 +316,10 @@ def extract_asset_video_blob_fast(
     intermediate Python objects.
 
     Args:
-        recording: Loaded Rerun recording.
         video_entity: Entity path (without leading ``/``) containing the AssetVideo component.
         timeline: Timeline used to index the recording view.
+        query_session: Optional shared RRD query session for catalog reads.
+        rrd_path: Optional RRD path used to create a temporary query session.
 
     Returns:
         Video bytes suitable for TorchCodec VideoDecoder.
@@ -349,24 +330,33 @@ def extract_asset_video_blob_fast(
     import pyarrow as pa
 
     normalized_entity: str = video_entity.lstrip("/")
-    view: RecordingView = recording.view(index=timeline, contents=normalized_entity)
     blob_column: str = f"{normalized_entity}:AssetVideo:blob"
 
-    # Try static data first (most common case)
-    try:
-        reader = view.select_static(blob_column)
-    except ValueError:
-        reader = None
+    active_session = query_session
+    if active_session is None and rrd_path is not None:
+        active_session = RRDQuerySession(Path(rrd_path))
+    if active_session is None:
+        raise ValueError("extract_asset_video_blob_fast requires either query_session or rrd_path.")
 
-    if reader is None:
-        # Fall back to dynamic data
-        reader = view.select(blob_column)
-
-    batch = reader.read_next_batch()
-    if batch is None or batch.num_rows == 0:
+    table = active_session.read_arrow(
+        contents=normalized_entity,
+        selectors=[blob_column],
+        index=None,
+    )
+    blob_column_idx = 0
+    if table.num_rows == 0:
+        table = active_session.read_arrow(
+            contents=normalized_entity,
+            selectors=[blob_column],
+            index=timeline,
+        )
+        blob_column_idx = 1
+    if table.num_rows == 0:
         raise ValueError(f"No AssetVideo blob found for entity {video_entity}")
+    column: pa.Array | pa.ChunkedArray = table.column(blob_column_idx)
 
-    column: pa.Array = batch.column(0)
+    if isinstance(column, pa.ChunkedArray):
+        column = column.combine_chunks()
 
     # FAST PATH: Access pyarrow buffer directly without Python list intermediate
     # Structure: list<list<uint8>> -> values -> list<uint8> -> values -> uint8[]
@@ -383,8 +373,7 @@ def extract_asset_video_blob_fast(
 
     # SLOW FALLBACK: Use as_py() if buffer access fails
     first_row = column[0].as_py()
-    if isinstance(first_row, list) and len(first_row) == 1 and isinstance(first_row[0], list):
-        first_row = first_row[0]
+    first_row = unwrap_singleton_lists(first_row)
     return bytes(first_row)
 
 
