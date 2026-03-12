@@ -1,16 +1,20 @@
 [project]
 name = "simplecv"
-version = "0.7.1"
+version = "0.7.2"
 description = "CV Utilities for Python"
 authors = [{ name = "pablovela5620", email = "pablovela5620@gmail.com" }]
 requires-python = ">= 3.10"
 dependencies = [
-    "jaxtyping>=0.3.7,<0.3.8",
+    # pyserde + jaxtyping breaks on jaxtyping>=0.3.0; upstream tracked this in
+    # https://github.com/yukinarit/pyserde/issues/643 and fixed their own pins in
+    # https://github.com/yukinarit/pyserde/pull/644.
+    "jaxtyping>=0.2.36,<0.3.0",
     "numpy>=2.0",
     "einops>=0.8.0",
     "icecream>=2.1.3",
     "opencv-python>=4.10.0",
-    "pyserde>=0.20.0",
+    "pyserde>=0.20.0,<0.30",
+    "typing-extensions>=4.1.0,<4.13.0",
     "rerun-sdk[datafusion]>=0.30",
     "tyro>=0.9.1",
     "tqdm",
@@ -119,12 +123,14 @@ timm = "<1.0"  # Pin for wilor-nano compatibility (RotaryEmbedding import moved 
 
 [tool.pixi.dependencies]
 python = ">=3.10,<3.13"
-jaxtyping = ">=0.3.7,<0.3.8"
+# pyserde + jaxtyping compatibility is tracked in yukinarit/pyserde#643 and #644.
+jaxtyping = ">=0.2.36,<0.3.0"
 numpy = ">=2.0"
 einops = ">=0.8.0,<0.9"
 icecream = ">=2.1.3,<3"
 py-opencv = ">=4.10.0,<5"
-pyserde = ">=0.20.0,<0.21"
+pyserde = ">=0.20.0,<0.30"
+typing_extensions = ">=4.1.0,<4.13.0"
 tyro = ">=0.9.1,<0.10"
 tqdm = ">=4.67.1,<5"
 huggingface_hub = ">=0.27.1,<0.28"
@@ -229,8 +235,9 @@ channels = ["https://prefix.dev/conda-forge"]
 python = "==3.10"
 tyro = ">=0.9.1,<0.10"
 beartype = ">=0.21.0,<0.22"
-jaxtyping = ">=0.3.7,<0.3.8"
-pyserde = ">=0.23.0,<0.24"
+jaxtyping = ">=0.2.36,<0.3.0"
+pyserde = ">=0.23.0,<0.30"
+typing_extensions = ">=4.1.0,<4.13.0"
 librealsense = "==2.53.1"
 # rerun-sdk = ">=0.25.1"
 numpy = ">=2.0"
@@ -267,7 +274,8 @@ jupyterlab = ">=4.4.9,<5"
 av = "*"
 numpy = ">=2.0"
 pandas = ">=2.3"
-jaxtyping = ">=0.3.7,<0.3.8"
+jaxtyping = ">=0.2.36,<0.3.0"
+typing_extensions = ">=4.1.0,<4.13.0"
 pytorch = ">=2.7,<2.8"
 torchcodec = "*"
 
