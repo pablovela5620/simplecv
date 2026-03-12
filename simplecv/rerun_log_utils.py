@@ -138,6 +138,10 @@ class RerunTyroConfig:
     """Serve the rerun data"""
     headless: bool = False
     """Run rerun in headless mode"""
+    executable_name: str = "rerun"
+    """Executable name passed to ``rerun.spawn`` when launching the viewer."""
+    executable_path: str | None = None
+    """Optional absolute or relative path to the Rerun executable."""
 
     def __post_init__(self):
         rr.init(
@@ -159,7 +163,10 @@ class RerunTyroConfig:
         elif self.save is not None:
             rr.save(self.save)
         elif not self.headless:
-            rr.spawn()
+            rr.spawn(
+                executable_name=self.executable_name,
+                executable_path=self.executable_path,
+            )
 
 
 def log_pinhole(

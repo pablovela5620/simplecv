@@ -16236,8 +16236,8 @@ packages:
   timestamp: 1763470677024
 - pypi: ./
   name: simplecv
-  version: 0.7.0
-  sha256: 9f205003c572b7a48da3c5f8d047dfb6ddde48699152c837f3a252545a39584e
+  version: 0.7.1
+  sha256: d052eae3e7256fcddf9306df0a900143ea6fe47f52a222de43f3393fbb979545
   requires_dist:
   - jaxtyping>=0.3.7,<0.3.8
   - numpy>=2.0
