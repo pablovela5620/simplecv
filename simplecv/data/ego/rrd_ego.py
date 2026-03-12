@@ -8,13 +8,12 @@ from typing import TYPE_CHECKING, Literal, cast
 import numpy as np
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
-from pyarrow import Table
 from rerun.catalog import ComponentColumnDescriptor, IndexColumnDescriptor, Schema
 from rerun.recording import Recording
-from rerun_bindings import RecordingView
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, CamNameType, EgoData
+from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 from simplecv.rerun_log_utils import extract_asset_video_blob_fast
 from simplecv.video_io import TorchCodecMultiVideoReader, TorchCodecVideoReader
 
@@ -50,9 +49,15 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
     _recording: Recording | None = None
     _video_blobs: dict[str, bytes] | None = None
 
-    def __init__(self, cfg: RRDExoEgoConfig, recording: Recording | None = None) -> None:
+    def __init__(
+        self,
+        cfg: RRDExoEgoConfig,
+        recording: Recording | None = None,
+        query_session: RRDQuerySession | None = None,
+    ) -> None:
         self._recording = recording
         self._video_blobs = {}
+        self._query_session = query_session or RRDQuerySession(cfg.rrd_path)
         super().__init__(cfg)
 
     def load_video_paths(self) -> list[Path]:
@@ -80,9 +85,9 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         for cam_name in self.cam_names:
             video_entity: str = f"world/ego/{cam_name}/pinhole/video"
             video_bytes: bytes = extract_asset_video_blob_fast(
-                recording,
                 video_entity=video_entity,
                 timeline=timeline_name,
+                query_session=self._query_session,
             )
             self._video_blobs[cam_name] = video_bytes
             video_sources.append(video_bytes)
@@ -135,8 +140,8 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
             pinhole_entity: Path = ego_entity_path / cam_name / "pinhole"
             transform_entity: Path = ego_entity_path / cam_name
             try:
-                intrinsics: Intrinsics = self._load_intrinsics(recording, pinhole_entity, timeline_name)
-                distortion: BrownConradyDistortion | None = self._load_distortion(recording, pinhole_entity, timeline_name)
+                intrinsics: Intrinsics = self._load_intrinsics(pinhole_entity, timeline_name)
+                distortion: BrownConradyDistortion | None = self._load_distortion(pinhole_entity, timeline_name)
             except ValueError as exc:
                 warnings.warn(
                     (
@@ -148,11 +153,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 continue
 
             # this was cam_R_world ect before, for hocap it changed. We need to revalidate
-            world_R_cam_batch, world_t_cam_batch = self._load_extrinsics_series(
-                recording,
-                str(transform_entity),
-                timeline_name,
-            )
+            world_R_cam_batch, world_t_cam_batch = self._load_extrinsics_series(str(transform_entity), timeline_name)
             min_len: int = min(len(world_R_cam_batch), len(world_t_cam_batch))
             if min_len == 0:
                 translation_default: Float32[ndarray, "3"] = np.zeros(3, dtype=np.float32)
@@ -273,30 +274,41 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
     def image_plane_distance(self) -> int | float:
         return 0.02
 
-    def _load_intrinsics(self, recording: Recording, pinhole_entity: Path, timeline: str) -> Intrinsics:
-        view: RecordingView = recording.view(index=timeline, contents=str(pinhole_entity))
-
-        # Prefer static intrinsics to avoid timeline queries on static-only pinholes.
-        table: Table = view.select_static(
+    def _load_intrinsics(self, pinhole_entity: Path, timeline: str) -> Intrinsics:
+        selectors = [
             f"{pinhole_entity}:Pinhole:image_from_camera",
             f"{pinhole_entity}:Pinhole:camera_xyz",
             f"{pinhole_entity}:Pinhole:resolution",
-        ).read_all()
-
+        ]
+        table = self._query_session.read_arrow(
+            contents=str(pinhole_entity),
+            selectors=selectors,
+            index=None,
+        )
+        value_offset = 0
         if table.num_rows == 0:
-            table = view.select(
-                f"{pinhole_entity}:Pinhole:image_from_camera",
-                f"{pinhole_entity}:Pinhole:camera_xyz",
-                f"{pinhole_entity}:Pinhole:resolution",
-            ).read_all()
+            table = self._query_session.read_arrow(
+                contents=str(pinhole_entity),
+                selectors=selectors,
+                index=timeline,
+            )
+            value_offset = 1
 
         if table.num_rows == 0:
             raise ValueError(f"No intrinsics found for {pinhole_entity}")
 
-        # Take first available row (not necessarily index 0)
-        k_list = table.column(0).to_pylist()[0]
-        xyz_list = table.column(1).to_pylist()[0]
-        res_list = table.column(2).to_pylist()[0]
+        k_list = first_valid_value(
+            table.column(value_offset),
+            component_name=f"{pinhole_entity}:Pinhole:image_from_camera",
+        )
+        xyz_list = first_valid_value(
+            table.column(value_offset + 1),
+            component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
+        )
+        res_list = first_valid_value(
+            table.column(value_offset + 2),
+            component_name=f"{pinhole_entity}:Pinhole:resolution",
+        )
 
         image_from_camera: Float32[ndarray, "3 3"] = np.asarray(k_list, dtype=np.float32).reshape(3, 3, order="F")
         camera_xyz: UInt8[ndarray, "3"] = np.asarray(xyz_list, dtype=np.uint8).reshape(3)
@@ -314,36 +326,50 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def _load_distortion(
         self,
-        recording: Recording,
         pinhole_entity: Path,
         timeline: str,
     ) -> BrownConradyDistortion | None:
         """Load optional Brown–Conrady distortion components if present."""
-        view: RecordingView = recording.view(index=timeline, contents=str(pinhole_entity))
         model_path: str = f"{pinhole_entity}:{_DISTORTION_MODEL_COMPONENT}"
         coeff_path: str = f"{pinhole_entity}:{_DISTORTION_COEFF_COMPONENT}"
 
-        # Read all rows for the two custom components and pick the first non-null entry.
-        table: Table = view.select(model_path, coeff_path).read_all()
+        table = self._query_session.read_arrow(
+            contents=str(pinhole_entity),
+            selectors=[model_path, coeff_path],
+            index=None,
+            allow_missing=True,
+        )
+        value_offset = 0
+        if table.num_rows == 0:
+            table = self._query_session.read_arrow(
+                contents=str(pinhole_entity),
+                selectors=[model_path, coeff_path],
+                index=timeline,
+                allow_missing=True,
+            )
+            value_offset = 1
 
-        # Return None if no distortion data was logged
         if table.num_rows == 0:
             return None
 
-        # we assume distortion model and coeffs are constant over time, so just pick the first non-null entry
-        model_raw: list[Literal["brown_conrady"]] | None = table.column(0).to_pylist()[0]
-        coeffs_raw: list[list[float]] | None = table.column(1).to_pylist()[0]
+        model_raw: Literal["brown_conrady"] | None = first_valid_value(
+            table.column(value_offset),
+            allow_none=True,
+            component_name=model_path,
+        )
+        coeffs_raw: list[float] | None = first_valid_value(
+            table.column(value_offset + 1),
+            allow_none=True,
+            component_name=coeff_path,
+        )
 
         if model_raw is None and coeffs_raw is None:
             return None
         else:
             assert model_raw is not None, "Distortion model is missing though coefficients are present"
             assert coeffs_raw is not None, "Distortion coefficients are missing though model is present"
-            # wrapped in a list for both model and coeffs
-
-            model: Literal["brown_conrady"] = model_raw[0]
-            coeffs_arr: Float32[ndarray, "14"] = np.asarray(coeffs_raw[0], dtype=np.float32).flatten()
-            assert model == "brown_conrady", f"Unsupported distortion model: {model}"
+            coeffs_arr: Float32[ndarray, "14"] = np.asarray(coeffs_raw, dtype=np.float32).flatten()
+            assert model_raw == "brown_conrady", f"Unsupported distortion model: {model_raw}"
 
             # Helper to guard missing trailing coefficients.
             def _safe(idx: int) -> float:
@@ -368,25 +394,27 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def _load_extrinsics_series(
         self,
-        recording: Recording,
         entity: str,
         timeline: str,
     ) -> tuple[Float32[ndarray, "n 3 3"], Float32[ndarray, "n 3"]]:
-        view: RecordingView = recording.view(index=timeline, contents=entity)
-        table = view.select(
-            timeline,
-            f"{entity}:Transform3D:mat3x3",
-            f"{entity}:Transform3D:translation",
-        ).read_all()
-
-        def unwrap(value):
-            return value[0] if isinstance(value, list) and len(value) == 1 else value
+        table = self._query_session.read_arrow(
+            contents=entity,
+            selectors=[
+                f"{entity}:Transform3D:mat3x3",
+                f"{entity}:Transform3D:translation",
+            ],
+            index=timeline,
+        )
 
         cam_R_world_list: list[Float32[ndarray, "3 3"]] = [
-            np.asarray(unwrap(mat), np.float32).reshape(3, 3, order="F") for mat in table.column(1).to_pylist()
+            np.asarray(mat, np.float32).reshape(3, 3, order="F")
+            for mat in table.column(1).to_pylist()
+            if mat is not None
         ]
         cam_t_world_list: list[Float32[ndarray, "3"]] = [
-            np.asarray(unwrap(translation), np.float32).reshape(-1)[:3] for translation in table.column(2).to_pylist()
+            np.asarray(translation, np.float32).reshape(-1)[:3]
+            for translation in table.column(2).to_pylist()
+            if translation is not None
         ]
 
         if not cam_R_world_list or not cam_t_world_list:

@@ -8,13 +8,13 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-import pyarrow as pa
 from jaxtyping import Float32
 from numpy import ndarray
 from rerun.recording import Recording
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.exo.base_exo import BaseExoSequence, ExoData
+from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 from simplecv.rerun_log_utils import (
     extract_asset_video_blob_fast,
     mux_h264_to_mp4,
@@ -49,9 +49,15 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
     _recording: Recording | None = None
     _video_blobs: dict[str, bytes] | None = None
 
-    def __init__(self, cfg: RRDExoEgoConfig, recording: Recording | None = None) -> None:
+    def __init__(
+        self,
+        cfg: RRDExoEgoConfig,
+        recording: Recording | None = None,
+        query_session: RRDQuerySession | None = None,
+    ) -> None:
         self._recording = recording
         self._video_blobs = {}
+        self._query_session = query_session or RRDQuerySession(cfg.rrd_path)
         # Call base class __init__ but we'll override the video reader setup
         super().__init__(cfg)
 
@@ -105,9 +111,9 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
             # FAST PATH: Extract blobs directly without writing to disk
             for camera_stream in self._camera_streams:
                 video_bytes: bytes = extract_asset_video_blob_fast(
-                    self._recording,
                     video_entity=camera_stream.video_entity,
                     timeline=self._video_timeline,
+                    query_session=self._query_session,
                 )
                 self._video_blobs[camera_stream.name] = video_bytes
                 video_sources.append(video_bytes)
@@ -128,15 +134,17 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
                 match camera_stream.data_kind:
                     case "video_stream":
                         times, samples = read_h264_samples_from_rrd(
-                            str(rrd_path), camera_stream.video_entity, self._video_timeline
+                            str(rrd_path),
+                            camera_stream.video_entity,
+                            self._video_timeline,
                         )
                         mux_h264_to_mp4(times, samples, str(mp4_path))
                     case "asset_video":
                         # Still use fast extraction, but write to disk for mixed mode
                         video_bytes = extract_asset_video_blob_fast(
-                            self._recording,
                             video_entity=camera_stream.video_entity,
                             timeline=self._video_timeline,
+                            query_session=self._query_session,
                         )
                         mp4_path.write_bytes(video_bytes)
                     case _:
@@ -173,8 +181,8 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         exo_cams: list[PinholeParameters | None] = []
         for camera_stream in camera_streams:
             try:
-                intrinsics = self._load_intrinsics(recording, camera_stream.pinhole_entity, timeline)
-                extrinsics = self._load_extrinsics(recording, camera_stream.transform_entity, timeline)
+                intrinsics = self._load_intrinsics(camera_stream.pinhole_entity, timeline)
+                extrinsics = self._load_extrinsics(camera_stream.transform_entity, timeline)
                 exo_cams.append(PinholeParameters(name=camera_stream.name, intrinsics=intrinsics, extrinsics=extrinsics))
             except ValueError as exc:
                 warnings.warn(
@@ -257,57 +265,61 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
             return timeline_names[0]
         raise AssertionError("No timeline columns found in recording schema")
 
-    def _load_intrinsics(self, recording: Recording, pinhole_entity: str, timeline: str) -> Intrinsics:
-        view = recording.view(index=timeline, contents=pinhole_entity)
-        try:
-            reader = view.select_static(
-                f"{pinhole_entity}:Pinhole:image_from_camera",
-                f"{pinhole_entity}:Pinhole:camera_xyz",
-                f"{pinhole_entity}:Pinhole:resolution",
-            )
-        except ValueError:
-            reader = None
+    def _load_intrinsics(self, pinhole_entity: str, timeline: str) -> Intrinsics:
+        selectors = [
+            f"{pinhole_entity}:Pinhole:image_from_camera",
+            f"{pinhole_entity}:Pinhole:camera_xyz",
+            f"{pinhole_entity}:Pinhole:resolution",
+        ]
+        table = self._query_session.read_arrow(
+            contents=pinhole_entity,
+            selectors=selectors,
+            index=None,
+        )
+        value_offset = 0
 
         k_value: Any | None = None
         camera_xyz_value: Any | None = None
         resolution_value: Any | None = None
 
-        if reader is not None:
-            batch = reader.read_next_batch()
-            if batch is not None and batch.num_rows > 0:
-                k_value = self._first_valid_value(
-                    batch.column(0),
-                    component_name=f"{pinhole_entity}:Pinhole:image_from_camera",
-                )
-                camera_xyz_value = self._first_valid_value(
-                    batch.column(1),
-                    allow_none=True,
-                    component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
-                )
-                resolution_value = self._first_valid_value(
-                    batch.column(2),
-                    allow_none=True,
-                    component_name=f"{pinhole_entity}:Pinhole:resolution",
-                )
-
-        if k_value is None:
-            _, k_col_dyn, camera_xyz_col_dyn, resolution_col_dyn = view.select(
-                timeline,
-                f"{pinhole_entity}:Pinhole:image_from_camera",
-                f"{pinhole_entity}:Pinhole:camera_xyz",
-                f"{pinhole_entity}:Pinhole:resolution",
-            ).read_all()
-            k_value = self._first_valid_value(k_col_dyn, component_name=f"{pinhole_entity}:Pinhole:image_from_camera")
-            camera_xyz_value = self._first_valid_value(
-                camera_xyz_col_dyn,
+        if table.num_rows > 0:
+            k_value = first_valid_value(
+                table.column(value_offset),
+                component_name=f"{pinhole_entity}:Pinhole:image_from_camera",
+            )
+            camera_xyz_value = first_valid_value(
+                table.column(value_offset + 1),
                 allow_none=True,
                 component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
             )
-            resolution_value = self._first_valid_value(
-                resolution_col_dyn,
+            resolution_value = first_valid_value(
+                table.column(value_offset + 2),
                 allow_none=True,
                 component_name=f"{pinhole_entity}:Pinhole:resolution",
             )
+
+        if k_value is None:
+            table = self._query_session.read_arrow(
+                contents=pinhole_entity,
+                selectors=selectors,
+                index=timeline,
+            )
+            value_offset = 1
+            if table.num_rows > 0:
+                k_value = first_valid_value(
+                    table.column(value_offset),
+                    component_name=f"{pinhole_entity}:Pinhole:image_from_camera",
+                )
+                camera_xyz_value = first_valid_value(
+                    table.column(value_offset + 1),
+                    allow_none=True,
+                    component_name=f"{pinhole_entity}:Pinhole:camera_xyz",
+                )
+                resolution_value = first_valid_value(
+                    table.column(value_offset + 2),
+                    allow_none=True,
+                    component_name=f"{pinhole_entity}:Pinhole:resolution",
+                )
 
         if k_value is None:
             raise ValueError(f"Missing image_from_camera for {pinhole_entity}")
@@ -346,42 +358,44 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
             height=height,
         )
 
-    def _load_extrinsics(self, recording: Recording, entity: str, timeline: str) -> Extrinsics:
-        view = recording.view(index=timeline, contents=entity)
+    def _load_extrinsics(self, entity: str, timeline: str) -> Extrinsics:
         translation_value: list[float] | None = None
         rotation_value: list[float] | None = None
 
-        try:
-            static_reader = view.select_static(
+        table = self._query_session.read_arrow(
+            contents=entity,
+            selectors=[
                 f"{entity}:Transform3D:translation",
                 f"{entity}:Transform3D:mat3x3",
-            )
-        except ValueError:
-            static_reader = None
+            ],
+            index=None,
+        )
 
-        if static_reader is not None:
-            batch = static_reader.read_next_batch()
-            if batch is not None:
-                t_col_static = batch.column(0)
-                R_col_static = batch.column(1)
-                if t_col_static.null_count != len(t_col_static):
-                    translation_value = t_col_static[0].as_py()
-                if R_col_static.null_count != len(R_col_static):
-                    rotation_scalar = R_col_static[0].as_py()
-                    rotation_value = rotation_scalar if isinstance(rotation_scalar, list) else None
-
-        if translation_value is None or rotation_value is None:
-            _, t_col, R_col = view.select(
-                timeline,
-                f"{entity}:Transform3D:translation",
-                f"{entity}:Transform3D:mat3x3",
-            ).read_all()
-            translation_value = translation_value or self._first_valid_value(
-                t_col,
+        if table.num_rows > 0:
+            translation_value = first_valid_value(
+                table.column(0),
                 component_name=f"{entity}:Transform3D:translation",
             )
-            rotation_value = rotation_value or self._first_valid_value(
-                R_col,
+            rotation_value = first_valid_value(
+                table.column(1),
+                component_name=f"{entity}:Transform3D:mat3x3",
+            )
+
+        if translation_value is None or rotation_value is None:
+            table = self._query_session.read_arrow(
+                contents=entity,
+                selectors=[
+                    f"{entity}:Transform3D:translation",
+                    f"{entity}:Transform3D:mat3x3",
+                ],
+                index=timeline,
+            )
+            translation_value = translation_value or first_valid_value(
+                table.column(1),
+                component_name=f"{entity}:Transform3D:translation",
+            )
+            rotation_value = rotation_value or first_valid_value(
+                table.column(2),
                 component_name=f"{entity}:Transform3D:mat3x3",
             )
 
@@ -395,24 +409,6 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
             rotation_arr = rotation_arr.reshape(-1)
         rotation: Float32[ndarray, "3 3"] = rotation_arr.reshape(3, 3, order="F")
         return Extrinsics(cam_R_world=rotation, cam_t_world=translation)
-
-    def _first_valid_value(
-        self,
-        column: pa.ChunkedArray | pa.Array,
-        *,
-        allow_none: bool = False,
-        component_name: str | None = None,
-    ) -> Any:
-        values = column.combine_chunks().to_pylist() if isinstance(column, pa.ChunkedArray) else column.to_pylist()
-        for value in values:
-            if value is None and not allow_none:
-                continue
-            if value is not None or allow_none:
-                return value
-        if allow_none:
-            return None
-        column_name = component_name or "(unknown component)"
-        raise ValueError(f"Expected at least one non-null value in column '{column_name}'")
 
     @property
     def image_plane_distance(self) -> int | float:

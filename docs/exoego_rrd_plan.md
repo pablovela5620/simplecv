@@ -21,7 +21,7 @@
 2. **Make sure COCO-133 3D logging fires** ✅
    - Corrected the loader to read `/world/gt/coco133_xyz`; every frame now carries valid keypoints.
 3. **Regression test** ✅
-   - `pixi run -e dev python tools/view_exoego.py rrd --rrd-path <rrd>` completes successfully (only expected metadata warnings remain).
+   - `pixi run python tools/view_exoego.py rrd --rrd-path <rrd>` completes successfully (only expected metadata warnings remain).
 
 ## TODO
 
@@ -32,6 +32,6 @@
 
 - **Loader wiring:** Added an `EnvironmentMesh` adapter to `RRDSequence` so `/world/gt/env_mesh` is decoded on ingest. It fetches vertex positions + triangles, promotes optional normals, and unpacks packed `uint32` RGBA colors into `uint8[*,4]`.
 - **Viewer relogging:** `visualize_exo_ego` now replays the mesh (guarded by a `log_env_mesh` toggle) before blueprint setup so the static environment is visible alongside cameras.
-- **Validation:** Running `pixi run -e dev view-exoego-data rrd --rrd-path /mnt/8tb/data/exoego-self-collected/gus/17600630913N_staticRandomCupStack-annotated.rrd` now relogs the mesh without warnings. Directly instantiating `RRDSequence` confirms a non-empty mesh with `vertex_positions.shape == (136188, 3)` and the first vertex `[0.13119504, 1.27617, -0.45922568]`, matching the viewer screenshot.
+- **Validation:** Running `pixi run view-exoego-data rrd --rrd-path /mnt/8tb/data/exoego-self-collected/gus/17600630913N_staticRandomCupStack-annotated.rrd` now relogs the mesh without warnings. Directly instantiating `RRDSequence` confirms a non-empty mesh with `vertex_positions.shape == (136188, 3)` and the first vertex `[0.13119504, 1.27617, -0.45922568]`, matching the viewer screenshot.
 - **Follow-ups:** Once we confirm with live data, expand the doc with a note on expected timeline (`video_time` vs. static) and add a regression task in `pixi` to smoke-test mesh extraction.
 We can revisit mesh logging (and any colour decoding) after those two fundamentals are solid.

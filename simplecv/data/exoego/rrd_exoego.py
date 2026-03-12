@@ -7,11 +7,9 @@ import pandas as pd
 import rerun as rr
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
-from pyarrow import Table
 from rerun.catalog import Schema
 from rerun.components.view_coordinates import ViewCoordinates
 from rerun.recording import Recording, load_recording
-from rerun_bindings import RecordingView
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.rrd_ego import RRDEgoSequence
@@ -19,6 +17,7 @@ from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exo.rrd_exo import RRDExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.rrd_query_utils import RRDQuerySession, series_to_int64_ns
 
 
 @dataclass
@@ -35,6 +34,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     def __init__(self, cfg: RRDExoEgoConfig) -> None:
         # Load once and share with ego/exo/labels.
         self._recording = load_recording(str(cfg.rrd_path))
+        self._query_session = RRDQuerySession(cfg.rrd_path)
         super().__init__(cfg)
 
     def __getitem__(
@@ -69,7 +69,11 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     def _build_ego(self) -> BaseEgoSequence[RRDExoEgoConfig] | None:
         try:
-            ego_seq = RRDEgoSequence(self.config, recording=self._recording)
+            ego_seq = RRDEgoSequence(
+                self.config,
+                recording=self._recording,
+                query_session=self._query_session,
+            )
             return ego_seq
         except AssertionError as exc:
             if "No ego camera streams" in str(exc):
@@ -78,7 +82,11 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
     def _build_exo(self) -> BaseExoSequence[RRDExoEgoConfig] | None:
         try:
-            exo_seq = RRDExoSequence(self.config, recording=self._recording)
+            exo_seq = RRDExoSequence(
+                self.config,
+                recording=self._recording,
+                query_session=self._query_session,
+            )
             return exo_seq
         except AssertionError as exc:
             if "No exo camera streams" in str(exc):
@@ -139,17 +147,17 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
         if self._recording is None:
             self._recording = load_recording(str(rrd_path))
-        recording: Recording = self._recording
 
         timeline: str = "video_time"
         entity_path: str = "world/gt/coco133_xyz"
-        view: RecordingView = recording.view(index=timeline, contents=entity_path)
-        # Pull both the positions and confidences so we can keep their timestamp alignment.
-        df: pd.DataFrame = view.select(
-            timeline,
-            f"{entity_path}:Points3D:positions",
-            f"{entity_path}:simplecv.KeypointConfidence3D:confidences",
-        ).read_pandas()
+        df: pd.DataFrame = self._query_session.read_pandas(
+            contents=entity_path,
+            selectors=[
+                f"{entity_path}:Points3D:positions",
+                f"{entity_path}:simplecv.KeypointConfidence3D:confidences",
+            ],
+            index=timeline,
+        )
 
         positions_series: pd.DataFrame | pd.Series | None = df[f"/{entity_path}:Points3D:positions"]
         confidences_series: pd.DataFrame | pd.Series | None = df[
@@ -172,7 +180,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
 
         timestamps_ns: Int[ndarray, "num_frames"] | None = None
         if timestamps_series is not None:
-            timestamps_ns = np.asarray(timestamps_series.to_numpy(), dtype=np.int64)
+            timestamps_ns = np.asarray(series_to_int64_ns(timestamps_series), dtype=np.int64)
 
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.concatenate(
             [xyz_stack, conf_stack[..., np.newaxis]],
@@ -222,15 +230,11 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
             if timeline is None or timeline in examined:
                 continue
             examined.add(timeline)
-            try:
-                view = recording.view(index=timeline, contents=entity_path)
-            except ValueError:
-                continue
-
             samples: list[dict[str, object]] = self._read_mesh_samples_from_view(
-                view=view,
                 timeline=timeline,
                 selectors=selectors,
+                query_session=self._query_session,
+                entity_path=entity_path,
             )
 
             for sample in samples:
@@ -350,34 +354,33 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     @staticmethod
     def _read_mesh_samples_from_view(
         *,
-        view: RecordingView,
         timeline: str,
         selectors: list[str],
+        query_session: RRDQuerySession,
+        entity_path: str,
     ) -> list[dict[str, object]]:
         samples: list[dict[str, object]] = []
 
-        try:
-            static_reader = view.select_static(*selectors)
-        except ValueError:
-            static_reader = None
+        table_static = query_session.read_arrow(
+            contents=entity_path,
+            selectors=selectors,
+            index=None,
+        )
+        if table_static.num_rows > 0:
+            column_data = {
+                selector: table_static.column(idx).combine_chunks().to_pylist()
+                for idx, selector in enumerate(selectors)
+            }
+            for row_idx in range(table_static.num_rows):
+                samples.append({selector: column_data[selector][row_idx] for selector in selectors})
+            return samples
 
-        if static_reader is not None:
-            table_static: Table | None = static_reader.read_all()
-            if table_static is not None and table_static.num_rows > 0:
-                column_data = {
-                    selector: table_static.column(idx).combine_chunks().to_pylist()
-                    for idx, selector in enumerate(selectors)
-                }
-                for row_idx in range(table_static.num_rows):
-                    samples.append({selector: column_data[selector][row_idx] for selector in selectors})
-                return samples
-
-        try:
-            table_dynamic: Table | None = view.select(timeline, *selectors).read_all()
-        except ValueError:
-            table_dynamic = None
-
-        if table_dynamic is None or table_dynamic.num_rows == 0:
+        table_dynamic = query_session.read_arrow(
+            contents=entity_path,
+            selectors=selectors,
+            index=timeline,
+        )
+        if table_dynamic.num_rows == 0:
             return samples
 
         column_data = {
