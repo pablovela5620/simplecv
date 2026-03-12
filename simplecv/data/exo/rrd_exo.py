@@ -311,21 +311,25 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
 
         if k_value is None:
             raise ValueError(f"Missing image_from_camera for {pinhole_entity}")
-        if isinstance(k_value, list) and len(k_value) == 1 and isinstance(k_value[0], list):
-            k_value = k_value[0]
-        k_matrix: Float32[ndarray, "3 3"] = np.array(k_value, dtype=np.float32).reshape(3, 3, order="F")
+        k_matrix: Float32[ndarray, "3 3"] = np.asarray(k_value, dtype=np.float32).reshape(3, 3, order="F")
 
         camera_conventions = "RDF"
-        if isinstance(camera_xyz_value, list) and len(camera_xyz_value) == 3:
-            axis_tuple = tuple(int(v) for v in camera_xyz_value)
+        camera_xyz: ndarray | None = None
+        if camera_xyz_value is not None:
+            camera_xyz = np.asarray(camera_xyz_value, dtype=np.int32).reshape(-1)
+        if camera_xyz is not None and camera_xyz.size == 3:
+            axis_tuple = tuple(int(v) for v in camera_xyz)
             if axis_tuple == (3, 5, 2):
                 camera_conventions = "RUB"
 
         width: int | None = None
         height: int | None = None
-        if isinstance(resolution_value, list) and len(resolution_value) == 2:
-            width = int(round(resolution_value[0]))
-            height = int(round(resolution_value[1]))
+        resolution: ndarray | None = None
+        if resolution_value is not None:
+            resolution = np.asarray(resolution_value, dtype=np.float32).reshape(-1)
+        if resolution is not None and resolution.size >= 2:
+            width = int(round(float(resolution[0])))
+            height = int(round(float(resolution[1])))
 
         if width is None:
             width = int(round(2 * float(k_matrix[0, 2])))

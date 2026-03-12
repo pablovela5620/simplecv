@@ -136,9 +136,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
             transform_entity: Path = ego_entity_path / cam_name
             try:
                 intrinsics: Intrinsics = self._load_intrinsics(recording, pinhole_entity, timeline_name)
-                distortion: BrownConradyDistortion | None = self._load_distortion(
-                    recording, pinhole_entity, timeline_name
-                )
+                distortion: BrownConradyDistortion | None = self._load_distortion(recording, pinhole_entity, timeline_name)
             except ValueError as exc:
                 warnings.warn(
                     (
@@ -149,12 +147,13 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 )
                 continue
 
-            cam_R_world_batch, cam_t_world_batch = self._load_extrinsics_series(
+            # this was cam_R_world ect before, for hocap it changed. We need to revalidate
+            world_R_cam_batch, world_t_cam_batch = self._load_extrinsics_series(
                 recording,
                 str(transform_entity),
                 timeline_name,
             )
-            min_len: int = min(len(cam_R_world_batch), len(cam_t_world_batch))
+            min_len: int = min(len(world_R_cam_batch), len(world_t_cam_batch))
             if min_len == 0:
                 translation_default: Float32[ndarray, "3"] = np.zeros(3, dtype=np.float32)
                 rotation_default: Float32[ndarray, "3 3"] = np.eye(3, dtype=np.float32)
@@ -171,9 +170,13 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
             cam_params: list[CameraParam] = []
             for idx in range(min_len):
-                rotation_mat: Float32[ndarray, "3 3"] = cam_R_world_batch[idx]
-                translation_vec: Float32[ndarray, "3"] = cam_t_world_batch[idx]
-                extrinsics = Extrinsics(cam_R_world=rotation_mat, cam_t_world=translation_vec)
+                rotation_mat: Float32[ndarray, "3 3"] = world_R_cam_batch[idx]
+                translation_vec: Float32[ndarray, "3"] = world_t_cam_batch[idx]
+                # NOTE: This legacy ego RRD path assumes the logged transform is world_T_cam
+                # (parent-from-child / world_from_cam), which matches the HOCAP recording we tested.
+                # If another RRD encodes cam_T_world instead (child-from-parent / cam_from_world),
+                # this is the constructor to flip to Extrinsics(cam_R_world=..., cam_t_world=...).
+                extrinsics = Extrinsics(world_R_cam=rotation_mat, world_t_cam=translation_vec)
                 cam_params.append(
                     PinholeParameters(
                         name=cam_name,
@@ -243,9 +246,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         ordered_video_map: dict[str, Path] = {name: aligned_video_map[name] for name in ordered_names}
 
         # Create TorchCodec reader with aligned sources
-        ordered_sources: list[bytes] = [
-            self._video_blobs[name] for name in ordered_names if self._video_blobs and name in self._video_blobs
-        ]
+        ordered_sources: list[bytes] = [self._video_blobs[name] for name in ordered_names if self._video_blobs and name in self._video_blobs]
         if ordered_sources:
             self.ego_video_readers = TorchCodecMultiVideoReader(ordered_sources)
 
@@ -275,26 +276,19 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
     def _load_intrinsics(self, recording: Recording, pinhole_entity: Path, timeline: str) -> Intrinsics:
         view: RecordingView = recording.view(index=timeline, contents=str(pinhole_entity))
 
-        # First try timeline-indexed data (non-static)
-        table: Table = (
-            view.select(
+        # Prefer static intrinsics to avoid timeline queries on static-only pinholes.
+        table: Table = view.select_static(
+            f"{pinhole_entity}:Pinhole:image_from_camera",
+            f"{pinhole_entity}:Pinhole:camera_xyz",
+            f"{pinhole_entity}:Pinhole:resolution",
+        ).read_all()
+
+        if table.num_rows == 0:
+            table = view.select(
                 f"{pinhole_entity}:Pinhole:image_from_camera",
                 f"{pinhole_entity}:Pinhole:camera_xyz",
                 f"{pinhole_entity}:Pinhole:resolution",
-            )
-            .read_all()
-        )
-
-        # If empty, try static data
-        if table.num_rows == 0:
-            table = (
-                view.select_static(
-                    f"{pinhole_entity}:Pinhole:image_from_camera",
-                    f"{pinhole_entity}:Pinhole:camera_xyz",
-                    f"{pinhole_entity}:Pinhole:resolution",
-                )
-                .read_all()
-            )
+            ).read_all()
 
         if table.num_rows == 0:
             raise ValueError(f"No intrinsics found for {pinhole_entity}")

@@ -30,7 +30,7 @@ class CalibratedMano:
 @dataclass
 class HocapConfig(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: HocapSequence)
-    root_directory: Path = Path("/mnt/8tb/data/hocap/datasets")
+    root_directory: Path = Path("data/hocap/sample")
     subject_id: str = "8"
     sequence_name: str = "20231024_180733"
 
