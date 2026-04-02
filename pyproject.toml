@@ -53,6 +53,14 @@ cmd = "python tools/view_exoego.py"
 description = "View example hocap data"
 depends-on = ["_download-hocap-sample"]
 
+[tool.pixi.tasks.download-hot3d]
+cmd = "python tools/download_hot3d.py"
+description = "Download HOT3D Aria sequences from CDN URLs"
+
+[tool.pixi.tasks.preprocess-hot3d]
+cmd = "python tools/preprocess_hot3d.py"
+description = "Convert HOT3D VRS files to AV1 MP4 for simplecv"
+
 [tool.pixi.tasks._download-example-polycam-data]
 cmd = """
     test -e data/example-room-scan-poly.zip
@@ -119,6 +127,8 @@ simplecv = { path = ".", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 wilor-nano = { git = "https://github.com/pablovela5620/wilor-nano.git", rev = "70d01f333960113f825d2f7994a85fce5c51d61a" }
 timm = "<1.0"  # Pin for wilor-nano compatibility (RotaryEmbedding import moved in 1.0)
+vrs = ">=1.1.0"                # pyvrs for raw VRS stream access (HOT3D preprocessing)
+PyTurboJPEG = ">=1.7.0"       # Fast parallel JPEG decoding (HOT3D VRS preprocessing)
 
 
 [tool.pixi.dependencies]
@@ -138,6 +148,7 @@ open3d = ">=0.18.0,<0.19"
 scipy = ">=1.15.2,<2"
 natsort = ">=8.4.0,<9"
 av = "*"
+libjpeg-turbo = "*"  # C library required by PyTurboJPEG (HOT3D VRS preprocessing)
 pytorch = ">=2.7,<2.8"
 torchvision = "*"
 torchcodec = "*"
