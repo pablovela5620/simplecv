@@ -355,10 +355,3 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         if self.ego_sequence is not None:
             return self.ego_sequence.world_coordinate_system
         return rr.ViewCoordinates.RIGHT_HAND_Z_UP
-
-    @property
-    def image_plane_distance(self) -> int | float:
-        """Delegate to ego sequence (which is what view_exoego.py actually uses)."""
-        if self.ego_sequence is not None:
-            return self.ego_sequence.image_plane_distance
-        return 0.3

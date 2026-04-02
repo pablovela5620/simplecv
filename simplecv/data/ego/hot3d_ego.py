@@ -270,4 +270,4 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
     @property
     def image_plane_distance(self) -> int | float:
         """Image plane distance for camera visualization in meters."""
-        return 0.3
+        return 0.03
