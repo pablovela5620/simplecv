@@ -351,10 +351,14 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
-        """Aria MPS world frame: gravity = [0,0,-9.81] so +Z is up."""
+        """Headset-aware world frame. Aria: +Z up, Quest: +Y up."""
+        if self.ego_sequence is not None:
+            return self.ego_sequence.world_coordinate_system
         return rr.ViewCoordinates.RIGHT_HAND_Z_UP
 
     @property
     def image_plane_distance(self) -> int | float:
-        """Image plane distance for camera visualization in meters."""
-        return 0.035
+        """Delegate to ego sequence (which is what view_exoego.py actually uses)."""
+        if self.ego_sequence is not None:
+            return self.ego_sequence.image_plane_distance
+        return 0.3

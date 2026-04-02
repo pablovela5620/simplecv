@@ -258,10 +258,16 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
-        """Aria MPS world frame: gravity = [0,0,-9.81] so +Z is up."""
+        """Headset-aware world frame.
+
+        Aria: gravity = [0,0,-9.81] → +Z is up.
+        Quest 3: Y ≈ 1.0m (head height) → +Y is up (OpenXR convention).
+        """
+        if self._headset == "Quest3":
+            return rr.ViewCoordinates.RIGHT_HAND_Y_UP
         return rr.ViewCoordinates.RIGHT_HAND_Z_UP
 
     @property
     def image_plane_distance(self) -> int | float:
         """Image plane distance for camera visualization in meters."""
-        return 0.035
+        return 0.3
