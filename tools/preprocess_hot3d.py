@@ -55,7 +55,7 @@ class PreprocessConfig:
     """Root directory containing sequence folders."""
     sequence: str = ""
     """Process a single sequence (empty = all sequences with recording.vrs)."""
-    num_decode_workers: int = 4
+    num_decode_workers: int = 8
     """Number of parallel JPEG decode threads."""
     skip_existing: bool = True
     """Skip sequences that already have _simplecv/ output."""
@@ -114,22 +114,11 @@ def extract_stream_to_mp4(
         print(f"  [WARN] No image frames found in stream {stream_id}")
         return []
 
-    # ── Phase 2: Parallel JPEG → YUV decode ─────────────────────────────
-    t_decode_start: float = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        yuv_frames: list[list[np.ndarray]] = list(
-            tqdm(
-                pool.map(decode_jpeg_to_yuv, jpeg_frames),
-                total=len(jpeg_frames),
-                desc=f"Decoding {label}",
-                leave=False,
-            )
-        )
-
-    t_decode_elapsed: float = time.perf_counter() - t_decode_start
-
-    # ── Phase 3: Encode to MP4 via MP4Writer (NVENC auto-selected) ────
-    t_encode_start: float = time.perf_counter()
+    # ── Phase 2+3: Overlapped decode + encode ───────────────────────────
+    # Parallel JPEG→YUV decode feeds directly into NVENC encode.
+    # ThreadPoolExecutor.map() returns a lazy iterator — decode runs ahead
+    # while the main thread encodes, overlapping CPU decode with GPU encode.
+    t_pipeline_start: float = time.perf_counter()
 
     # Calculate FPS from timestamps
     if len(timestamps_ns) > 1:
@@ -138,24 +127,27 @@ def extract_stream_to_mp4(
     else:
         fps = 30.0
 
+    n_frames: int = len(jpeg_frames)
+    width: int = 0
+    height: int = 0
     writer: MP4Writer = MP4Writer(output_path, codec=VideoCodecChoice.AV1, fps=fps)
-    for planes in tqdm(yuv_frames, desc=f"Encoding {label}", leave=False):
-        if len(planes) >= 3:
-            writer.write_yuv_planes(planes[0], planes[1], planes[2])
-        else:
-            writer.write_yuv_planes(planes[0])
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        for planes in tqdm(pool.map(decode_jpeg_to_yuv, jpeg_frames), total=n_frames, desc=f"Decode+Encode {label}", leave=False):
+            if width == 0:
+                height, width = planes[0].shape
+            if len(planes) >= 3:
+                writer.write_yuv_planes(planes[0], planes[1], planes[2])
+            else:
+                writer.write_yuv_planes(planes[0])
     writer.close()
 
-    width: int = yuv_frames[0][0].shape[1]
-    height: int = yuv_frames[0][0].shape[0]
-
-    t_encode_elapsed: float = time.perf_counter() - t_encode_start
-    t_total: float = t_read_elapsed + t_decode_elapsed + t_encode_elapsed
+    t_pipeline_elapsed: float = time.perf_counter() - t_pipeline_start
+    t_total: float = t_read_elapsed + t_pipeline_elapsed
 
     encoder_name: str = writer.encoder_name
     print(
-        f"  {label}: {len(yuv_frames)} frames, {width}x{height}, {fps:.1f}fps → {output_path.name} "
-        f"[{encoder_name}] ({t_total:.1f}s total: read {t_read_elapsed:.1f}s, decode {t_decode_elapsed:.1f}s, encode {t_encode_elapsed:.1f}s)"
+        f"  {label}: {n_frames} frames, {width}x{height}, {fps:.1f}fps → {output_path.name} "
+        f"[{encoder_name}] ({t_total:.1f}s total: read {t_read_elapsed:.1f}s, decode+encode {t_pipeline_elapsed:.1f}s)"
     )
     return timestamps_ns
 
