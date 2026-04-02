@@ -149,10 +149,10 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
             landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
             hand_confidences: Float32[ndarray, "2"] = np.zeros(2, dtype=np.float32)
 
-            # HOT3D Handedness enum: Right=0, Left=1
-            # simplecv hand indices: LEFT_HAND_INDEX=0, RIGHT_HAND_INDEX=1
-            # Map: HOT3D key "0" (Right) → hand_idx 1, key "1" (Left) → hand_idx 0
-            for hand_key, hand_idx in [("0", 1), ("1", 0)]:
+            # HOT3D JSONL key "0" = Left hand, "1" = Right hand
+            # (verified by comparing wrist positions against HOT3D clips GT)
+            # simplecv: LEFT_HAND_INDEX=0, RIGHT_HAND_INDEX=1
+            for hand_key, hand_idx in [("0", 0), ("1", 1)]:
                 if hand_key not in hand_poses:
                     continue
 
