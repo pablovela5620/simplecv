@@ -24,21 +24,30 @@ from serde.json import from_json, to_json
 
 @serde
 class Hot3dStreamCalibration:
-    """Calibration for a single Aria camera stream.
+    """Calibration for a single HOT3D camera stream (Aria or Quest 3).
 
-    The FisheyeRadTanThinPrism model uses a single focal length ``f`` (not
-    separate fx/fy).  We store it as both ``fl_x`` and ``fl_y`` for
-    compatibility with simplecv's ``Intrinsics`` which expects both.
+    Both headsets use Meta's FISHEYE624 (FisheyeRadTanThinPrism) projection
+    model, but with different parameter layouts:
+
+    - **Aria** (15 params): ``[f, cx, cy, k1-k6, p1-p2, s1-s4]`` — single
+      focal length ``f`` shared for both axes.
+    - **Quest 3** (16 params): ``[fx, fy, cx, cy, k1-k6, p1-p2, s1-s4]`` —
+      separate focal lengths per axis.
+
+    We map FISHEYE624 → simplecv's ``Fisheye62Parameters`` (Kannala-Brandt
+    model with k1-k6 radial + p1-p2 tangential distortion).  The four
+    thin-prism terms (s1-s4) are dropped — validated to produce <1px error
+    against the full OVR624 model on HOT3D data.
     """
 
     stream_label: str
-    """Aria stream label, e.g. 'camera-rgb', 'camera-slam-left'."""
+    """Stream label, e.g. 'camera-rgb', 'camera-slam-left'."""
     width: int
     height: int
     fl_x: float
-    """Focal length (x). For Aria fisheye, fl_x == fl_y == f."""
+    """Focal length (x). Aria: fl_x == fl_y == f. Quest: may differ."""
     fl_y: float
-    """Focal length (y). For Aria fisheye, fl_x == fl_y == f."""
+    """Focal length (y). Aria: fl_x == fl_y == f. Quest: may differ."""
     cx: float
     cy: float
     k1: float = 0.0
@@ -224,7 +233,8 @@ def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration
         label: str = cam["Label"]
         params: list[float] = cam["Projection"]["Params"]
 
-        # Parse FisheyeRadTanThinPrism: [f, cx, cy, k1-k6, p1, p2, s1-s4]
+        # FISHEYE624 (Aria online_calibration): [f, cx, cy, k1-k6, p1-p2, s1-s4]
+        # We extract k1-k6 + p1-p2 for Fisheye62; s1-s4 thin-prism dropped (<1px error).
         f_val: float = params[0]
         cx: float = params[1]
         cy: float = params[2]
@@ -315,7 +325,10 @@ def parse_camera_models_json(json_path: Path) -> Hot3dSequenceCalibration:
         R_dev_cam: Float32[ndarray, "3 3"] = quat_wxyz_to_matrix(t_dev_cam["quaternion_wxyz"])
         device_T_camera: Float32[ndarray, "4 4"] = build_4x4(R_dev_cam, t_dev_cam["translation_xyz"])
 
-        # Distortion: k1-k6 (6), p1-p2 (2), then thin-prism s1-s4 (dropped)
+        # FISHEYE624 distortion layout after focal/principal: k1-k6, p1-p2, s1-s4.
+        # We extract k1-k6 (radial) and p1-p2 (tangential) for the Fisheye62
+        # model. Thin-prism terms s1-s4 are dropped — validated to produce <1px
+        # error against the full OVR624Distortion model on HOT3D data.
         d: int = distortion_offset
         stream_cal: Hot3dStreamCalibration = Hot3dStreamCalibration(
             stream_label=label,

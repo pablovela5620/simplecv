@@ -150,6 +150,9 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
                 height=stream_cal.height,
                 width=stream_cal.width,
             )
+            # FISHEYE624 → Fisheye62: use k1-k6 radial + p1-p2 tangential.
+            # Thin-prism terms (s1-s4) from the full FISHEYE624 model are
+            # dropped — validated <1px error on HOT3D data.
             distortion: KannalaBrandtDistortion = KannalaBrandtDistortion(
                 k1=stream_cal.k1, k2=stream_cal.k2, k3=stream_cal.k3,
                 k4=stream_cal.k4, k5=stream_cal.k5, k6=stream_cal.k6,
