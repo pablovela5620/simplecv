@@ -163,9 +163,17 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         first_stream: str = next(iter(vrs_ts_data))
         vrs_ref_ts: Int64[ndarray, "n_video"] = np.array(vrs_ts_data[first_stream], dtype=np.int64)
 
-        # For each video frame, find the nearest label by device-time
-        rgb_label_indices: Int64[ndarray, "n_video"] = np.searchsorted(devicetime_ns_all, vrs_ref_ts, side="left")
-        rgb_label_indices = np.clip(rgb_label_indices, 0, len(devicetime_ns_all) - 1).astype(np.int64)
+        # For each video frame, find the nearest label by device-time.
+        # searchsorted gives the first index >= query; compare with the left
+        # neighbor to pick the truly closest timestamp.
+        insertion_indices: Int64[ndarray, "n_video"] = np.searchsorted(
+            devicetime_ns_all, vrs_ref_ts, side="left"
+        ).astype(np.int64)
+        left_indices: Int64[ndarray, "n_video"] = np.clip(insertion_indices - 1, 0, len(devicetime_ns_all) - 1).astype(np.int64)
+        right_indices: Int64[ndarray, "n_video"] = np.clip(insertion_indices, 0, len(devicetime_ns_all) - 1).astype(np.int64)
+        left_deltas: Int64[ndarray, "n_video"] = np.abs(vrs_ref_ts - devicetime_ns_all[left_indices])
+        right_deltas: Int64[ndarray, "n_video"] = np.abs(devicetime_ns_all[right_indices] - vrs_ref_ts)
+        rgb_label_indices: Int64[ndarray, "n_video"] = np.where(left_deltas <= right_deltas, left_indices, right_indices).astype(np.int64)
 
         frame_data_filtered: list[dict] = [frame_data[int(i)] for i in rgb_label_indices]
         devicetime_ns_filtered: Int64[ndarray, "n_video"] = devicetime_ns_all[rgb_label_indices]
@@ -344,17 +352,22 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
 
     @classmethod
     def iter_episode_sequences(cls, cfg: Hot3dConfig) -> Generator["Hot3dSequence", None, None]:
-        """Iterate over all sequences in the HOT3D aria root directory.
+        """Iterate over all sequences in the HOT3D headset root directory.
 
         Yields one ``Hot3dSequence`` per sequence folder that contains
-        a preprocessed ``_simplecv/`` directory.
+        at least one preprocessed stream MP4 under ``_simplecv/``.
         """
         root: Path = cfg.root_directory
         assert root.exists(), f"HOT3D root directory {root} does not exist."
 
+        # Check for any expected stream MP4 (Aria has rgb.mp4, Quest has slam_left/right.mp4)
+        def _has_preprocessed_streams(d: Path) -> bool:
+            simplecv_dir: Path = d / "_simplecv"
+            return simplecv_dir.is_dir() and any(simplecv_dir.glob("*.mp4"))
+
         seq_dirs: list[Path] = natsorted([
             d for d in root.iterdir()
-            if d.is_dir() and (d / "_simplecv" / "rgb.mp4").exists()
+            if d.is_dir() and _has_preprocessed_streams(d)
         ])
 
         for seq_dir in seq_dirs:

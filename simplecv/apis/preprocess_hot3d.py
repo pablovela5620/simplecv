@@ -97,7 +97,7 @@ def extract_stream_to_mp4(
 
     info: dict = reader.get_stream_info(stream_id)
     n_frames: int = info["data_records_count"]
-    label: str = ARIA_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
+    label: str = ALL_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
 
     # Filter to data records for this stream (pyvrs filtered iteration pattern)
     filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
@@ -223,7 +223,7 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
     ts_path.write_text(json.dumps(all_timestamps))
 
     t_seq_elapsed: float = time.perf_counter() - t_seq_start
-    print(f"  Done in {t_seq_elapsed:.1f}s ({len(config.streams)} streams)")
+    print(f"  Done in {t_seq_elapsed:.1f}s ({len(streams)} streams)")
 
 
 def main(config: PreprocessConfig) -> None:

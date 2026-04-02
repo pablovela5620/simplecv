@@ -290,8 +290,9 @@ class MP4Writer:
         errors: list[str] = []
 
         for name in candidates:
+            container: av.container.OutputContainer | None = None
             try:
-                container: av.container.OutputContainer = av.open(str(self._output_path), mode="w")
+                container = av.open(str(self._output_path), mode="w")
                 stream: av.video.stream.VideoStream = container.add_stream(name, rate=round(self._fps))
                 stream.width = width
                 stream.height = height
@@ -312,10 +313,11 @@ class MP4Writer:
             except Exception as exc:
                 errors.append(f"{name}: {exc}")
                 # Close the partially opened container on failure
-                import contextlib
+                if container is not None:
+                    import contextlib
 
-                with contextlib.suppress(Exception):
-                    container.close()
+                    with contextlib.suppress(Exception):
+                        container.close()
 
         msg = "No working encoder found for MP4. Tried:\n" + "\n".join(f"  - {e}" for e in errors)
         raise RuntimeError(msg)

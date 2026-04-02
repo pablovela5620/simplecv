@@ -149,6 +149,7 @@ scipy = ">=1.15.2,<2"
 natsort = ">=8.4.0,<9"
 av = "*"
 libjpeg-turbo = "*"  # C library required by PyTurboJPEG (HOT3D VRS preprocessing)
+requests = "*"  # HTTP downloads (HOT3D CDN)
 pytorch = ">=2.7,<2.8"
 torchvision = "*"
 torchcodec = "*"
