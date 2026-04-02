@@ -206,11 +206,19 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                     if not np.isnan(xyzc_stack[frame_idx, thumb_base_indices[hand_idx], :3]).all():
                         xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(conf)
 
-        # Use device-time timestamps (same domain as VRS/MPS) instead of raw
-        # timecode timestamps from the JSONL, which are in a different epoch.
+        # Normalize label timestamps to the video container's 0-based timeline.
+        # The MP4 container (from rr.AssetVideo) starts at 0, while the raw
+        # device-time labels start at ~9174s.  Subtract the VRS recording
+        # start time so _sample_labels() can match by timestamp correctly.
+        vrs_ts_path: Path = seq_dir / "_simplecv" / "timestamps_ns.json"
+        assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
+        vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
+        vrs_start_ns: np.int64 = np.int64(vrs_ts_data["camera-rgb"][0])
+        normalized_label_ts: Int64[ndarray, "num_frames"] = devicetime_ns_array - vrs_start_ns
+
         return ExoEgoLabels(
             xyzc_stack=xyzc_stack,
-            timestamps_ns=devicetime_ns_array,
+            timestamps_ns=normalized_label_ts,
         )
 
     @classmethod

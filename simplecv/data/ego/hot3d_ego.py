@@ -92,14 +92,22 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
         world_T_device_all: Float32[ndarray, "n_poses 4 4"]
         traj_ts_ns, world_T_device_all, _quality = parse_mps_closed_loop_trajectory(trajectory_path)
 
-        # ── Get video frame timestamps ───────────────────────────────────
-        rgb_path: Path = seq_dir / SIMPLECV_DIR / "rgb.mp4"
-        video_ts_ns: Int64[ndarray, "n_frames"] = rr.AssetVideo(path=rgb_path).read_frame_timestamps_nanos()
-        n_frames: int = len(video_ts_ns)
+        # ── Get video frame timestamps in device-time domain ─────────────
+        # The MP4 container has 0-based timestamps (from rr.AssetVideo), but
+        # MPS trajectory uses absolute device time.  Use the VRS device-time
+        # timestamps saved during preprocessing for the pose lookup.
+        vrs_ts_path: Path = seq_dir / SIMPLECV_DIR / "timestamps_ns.json"
+        assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
+        import json
+
+        vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
+        rgb_device_ts: list[int] = vrs_ts_data["camera-rgb"]
+        n_frames: int = len(rgb_device_ts)
+        device_ts_ns: Int64[ndarray, "n_frames"] = np.array(rgb_device_ts, dtype=np.int64)
 
         # ── Look up nearest device pose for each video frame ─────────────
         world_T_device_frames: Float32[ndarray, "n_frames 4 4"] = lookup_nearest_poses(
-            query_ts_ns=video_ts_ns.astype(np.int64),
+            query_ts_ns=device_ts_ns,
             trajectory_ts_ns=traj_ts_ns,
             world_T_device=world_T_device_all,
         )
