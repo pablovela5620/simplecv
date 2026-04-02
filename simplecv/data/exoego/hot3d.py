@@ -1,8 +1,8 @@
-"""HOT3D Aria dataset adapter for the ExoEgo visualization pipeline.
+"""HOT3D dataset adapter for the ExoEgo visualization pipeline (Aria + Quest 3).
 
 Ego-only (no exo cameras), following the UmeTrack pattern. Uses preprocessed
-AV1 MP4 videos (from VRS), MPS SLAM trajectories for camera poses, and
-UmeTrack-format hand annotations.
+AV1 MP4 videos (from VRS), device trajectories for camera poses, and
+UmeTrack-format hand annotations. Supports both Aria and Quest 3 headsets.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import json
 from collections.abc import Generator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -31,13 +32,20 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, Sing
 
 @dataclass
 class Hot3dConfig(BaseExoEgoDatasetConfig):
-    """Configuration for HOT3D Aria sequences."""
+    """Configuration for HOT3D sequences (Aria and Quest 3)."""
 
     _target: type = field(default_factory=lambda: Hot3dSequence)
-    root_directory: Path = Path("/mnt/8tb/data/hot3d/aria")
-    """Root directory containing HOT3D Aria sequence folders."""
+    base_directory: Path = Path("/mnt/8tb/data/hot3d")
+    """Base directory containing ``aria/`` and ``quest3/`` subdirectories."""
+    headset: Literal["aria", "quest3"] = "aria"
+    """Headset type. Determines subdirectory, camera streams, and trajectory source."""
     sequence_name: str = "P0001_10a27bf7"
     """Sequence folder name (e.g. 'P0001_10a27bf7')."""
+
+    @property
+    def root_directory(self) -> Path:
+        """Computed root: ``base_directory / headset``."""
+        return self.base_directory / self.headset
 
 
 class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
@@ -128,27 +136,33 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                 if line:
                     frame_data.append(json.loads(line))
 
-        # ── Load timecode → device-time mapping ─────────────────────────
-        # HOT3D JSONL timestamps are in "timecode" domain, but VRS/MPS use
-        # "device time".  The mapping CSV provides the 1:1 translation.
+        # ── Map JSONL timestamps to device-time domain ────────────────────
+        # Aria: JSONL uses "timecode" domain, VRS uses "device time".
+        #   The timecode_devicetime_mapping.csv provides the 1:1 translation.
+        # Quest 3: JSONL timestamps are already in the same domain as VRS.
         mapping_path: Path = seq_dir / "timecode_devicetime_mapping.csv"
-        assert mapping_path.exists(), f"Timecode mapping not found at {mapping_path}"
-        devicetime_ns_all: Int64[ndarray, "n_entries"] = load_timecode_to_devicetime_mapping(mapping_path)
-        assert len(devicetime_ns_all) == len(frame_data), (
-            f"Timecode mapping has {len(devicetime_ns_all)} entries but JSONL has {len(frame_data)}"
-        )
+        if mapping_path.exists():
+            # Aria: convert timecode → device-time
+            devicetime_ns_all: Int64[ndarray, "n_entries"] = load_timecode_to_devicetime_mapping(mapping_path)
+            assert len(devicetime_ns_all) == len(frame_data), (
+                f"Timecode mapping has {len(devicetime_ns_all)} entries but JSONL has {len(frame_data)}"
+            )
+        else:
+            # Quest 3: JSONL timestamps are already in device-time domain
+            devicetime_ns_all = np.array([entry["timestamp_ns"] for entry in frame_data], dtype=np.int64)
 
-        # ── Filter to RGB-frame-aligned entries only ─────────────────────
-        # The JSONL has entries for all camera streams (~2-3x more than RGB
-        # frames).  Only keep the entry closest to each RGB video frame to
-        # ensure 1:1 alignment between label frames and video/camera frames.
+        # ── Filter to video-frame-aligned entries only ────────────────────
+        # The JSONL may have more entries than video frames (Aria: ~2x, one
+        # per SLAM camera; Quest: ~1:1).  Keep nearest entry per video frame.
         vrs_ts_path: Path = seq_dir / "_simplecv" / "timestamps_ns.json"
         assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
         vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
-        vrs_rgb_ts: Int64[ndarray, "n_video"] = np.array(vrs_ts_data["camera-rgb"], dtype=np.int64)
+        # Use the first available stream's timestamps as reference
+        first_stream: str = next(iter(vrs_ts_data))
+        vrs_ref_ts: Int64[ndarray, "n_video"] = np.array(vrs_ts_data[first_stream], dtype=np.int64)
 
-        # For each RGB frame, find the nearest label by device-time
-        rgb_label_indices: Int64[ndarray, "n_video"] = np.searchsorted(devicetime_ns_all, vrs_rgb_ts, side="left")
+        # For each video frame, find the nearest label by device-time
+        rgb_label_indices: Int64[ndarray, "n_video"] = np.searchsorted(devicetime_ns_all, vrs_ref_ts, side="left")
         rgb_label_indices = np.clip(rgb_label_indices, 0, len(devicetime_ns_all) - 1).astype(np.int64)
 
         frame_data_filtered: list[dict] = [frame_data[int(i)] for i in rgb_label_indices]
@@ -229,7 +243,7 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         mano_stack: ManoStack | None = self._load_mano_poses(seq_dir, rgb_label_indices)
 
         # Normalize label timestamps to the video container's 0-based timeline.
-        vrs_start_ns: np.int64 = np.int64(vrs_rgb_ts[0])
+        vrs_start_ns: np.int64 = np.int64(vrs_ref_ts[0])
         normalized_label_ts: Int64[ndarray, "num_frames"] = devicetime_ns_filtered - vrs_start_ns
 
         return ExoEgoLabels(

@@ -1,7 +1,7 @@
-"""Egocentric view loader for HOT3D Aria with per-frame MPS extrinsics.
+"""Egocentric view loader for HOT3D (Aria and Quest 3).
 
-Supports all three Aria ego cameras: RGB (1408x1408) and two SLAM
-monochrome cameras (640x480 each).
+Supports Aria (3 cameras: RGB + 2 SLAM) and Quest 3 (2 cameras: SLAM only).
+Calibration and trajectory sources are headset-aware.
 """
 
 from __future__ import annotations
@@ -23,7 +23,10 @@ from simplecv.data.hot3d_utils import (
     Hot3dStreamCalibration,
     load_calibration,
     lookup_nearest_poses,
+    parse_camera_models_json,
+    parse_headset_trajectory,
     parse_mps_closed_loop_trajectory,
+    parse_online_calibration_first,
 )
 
 if TYPE_CHECKING:
@@ -31,20 +34,44 @@ if TYPE_CHECKING:
 else:  # pragma: no cover - runtime alias to avoid circular import
     from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig as Hot3dConfig
 
-# Aria ego camera streams: label → MP4 filename stem.
-# Order matters: videos and cameras are paired positionally.
-HOT3D_EGO_STREAMS: dict[str, str] = {
+# Ego camera streams per headset: label → MP4 filename stem.
+ARIA_EGO_STREAMS: dict[str, str] = {
     "camera-rgb": "rgb",
     "camera-slam-left": "slam_left",
     "camera-slam-right": "slam_right",
 }
+QUEST_EGO_STREAMS: dict[str, str] = {
+    "camera-slam-left": "slam_left",
+    "camera-slam-right": "slam_right",
+}
 
-# Preprocessed output directory name
 SIMPLECV_DIR: str = "_simplecv"
 
 
+def _detect_headset(seq_dir: Path) -> str:
+    """Read metadata.json to determine headset type ('Aria' or 'Quest3')."""
+    metadata_path: Path = seq_dir / "metadata.json"
+    if metadata_path.exists():
+        metadata: dict = json.loads(metadata_path.read_text())
+        return metadata.get("headset", "Aria")
+    return "Aria"
+
+
+def _ego_streams_for_headset(headset: str) -> dict[str, str]:
+    """Return the ego stream mapping for the given headset type."""
+    if headset == "Quest3":
+        return QUEST_EGO_STREAMS
+    return ARIA_EGO_STREAMS
+
+
 class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
-    """Egocentric view loader for HOT3D Aria with per-frame MPS extrinsics in meters."""
+    """Egocentric view loader for HOT3D (Aria and Quest 3)."""
+
+    def __init__(self, cfg: Hot3dConfig) -> None:
+        seq_dir: Path = Path(cfg.root_directory) / cfg.sequence_name
+        self._headset: str = _detect_headset(seq_dir)
+        self._ego_streams: dict[str, str] = _ego_streams_for_headset(self._headset)
+        super().__init__(cfg)
 
     def __len__(self) -> int:
         assert len(self.ego_video_readers) > 0, "No videos found."
@@ -54,21 +81,20 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
         raise NotImplementedError("Hot3D ego data loading not implemented yet.")
 
     def _sequence_dir(self) -> Path:
-        """Get the sequence directory path."""
         return Path(self.config.root_directory) / self.config.sequence_name
 
     def load_video_paths(self) -> list[Path]:
-        """Load paths to preprocessed AV1 MP4 videos for all Aria ego cameras."""
+        """Load paths to preprocessed AV1 MP4 videos for all ego cameras."""
         seq_dir: Path = self._sequence_dir()
         simplecv_dir: Path = seq_dir / SIMPLECV_DIR
 
         video_paths: list[Path] = []
-        for label, stem in HOT3D_EGO_STREAMS.items():
+        for label, stem in self._ego_streams.items():
             video_path: Path = simplecv_dir / f"{stem}.mp4"
             assert video_path.exists(), (
                 f"Preprocessed video for '{label}' not found at {video_path}. "
                 f"Run: pixi run preprocess-hot3d --root {self.config.root_directory} "
-                f"--sequence {self.config.sequence_name} --streams 214-1 1201-1 1201-2 --skip-existing false"
+                f"--sequence {self.config.sequence_name} --no-skip-existing"
             )
             video_paths.append(video_path)
 
@@ -77,28 +103,26 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
     def load_ego_cams(self) -> dict[str, list[Fisheye62Parameters]]:
         """Load per-frame fisheye camera parameters for all ego cameras.
 
-        Intrinsics come from ``_simplecv/calibration.json``.
-        Per-frame extrinsics come from ``mps/slam/closed_loop_trajectory.csv``:
-            ``world_T_camera = world_T_device @ device_T_camera``
-            ``cam_T_world = inv(world_T_camera)``
+        Calibration source hierarchy:
+        - **Aria**: Prefer ``online_calibration.jsonl`` (MPS-refined, per-timestamp).
+          Meta invested in online calibration refinement for Aria sequences, so this
+          is the most accurate source. Falls back to ``camera_models.json`` if missing.
+        - **Quest 3**: Use ``camera_models.json`` (no MPS available).
+
+        Trajectory source:
+        - **Aria**: ``mps/slam/closed_loop_trajectory.csv`` (device-time domain).
+        - **Quest 3**: ``headset_trajectory.csv`` (native VRS time domain).
         """
         seq_dir: Path = self._sequence_dir()
 
         # ── Load calibration ─────────────────────────────────────────────
-        cal_path: Path = seq_dir / SIMPLECV_DIR / "calibration.json"
-        assert cal_path.exists(), f"Calibration not found at {cal_path}"
-        cal: Hot3dSequenceCalibration = load_calibration(cal_path)
-
-        # Index calibration by stream label
+        cal: Hot3dSequenceCalibration = self._load_calibration(seq_dir)
         cal_by_label: dict[str, Hot3dStreamCalibration] = {s.stream_label: s for s in cal.streams}
 
-        # ── Load MPS trajectory ──────────────────────────────────────────
-        trajectory_path: Path = seq_dir / "mps" / "slam" / "closed_loop_trajectory.csv"
-        assert trajectory_path.exists(), f"MPS trajectory not found at {trajectory_path}"
-
+        # ── Load trajectory ──────────────────────────────────────────────
         traj_ts_ns: Int64[ndarray, "n_poses"]
         world_T_device_all: Float32[ndarray, "n_poses 4 4"]
-        traj_ts_ns, world_T_device_all, _quality = parse_mps_closed_loop_trajectory(trajectory_path)
+        traj_ts_ns, world_T_device_all = self._load_trajectory(seq_dir)
 
         # ── Load VRS device-time timestamps per stream ───────────────────
         vrs_ts_path: Path = seq_dir / SIMPLECV_DIR / "timestamps_ns.json"
@@ -108,28 +132,25 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
         # ── Build per-frame camera params for each stream ────────────────
         all_cam_dict: dict[str, list[Fisheye62Parameters]] = {}
 
-        for label in HOT3D_EGO_STREAMS:
+        for label in self._ego_streams:
             stream_cal: Hot3dStreamCalibration | None = cal_by_label.get(label)
             assert stream_cal is not None, f"No calibration found for stream '{label}'"
             assert label in vrs_ts_data, (
                 f"No timestamps for stream '{label}' in timestamps_ns.json. "
-                f"Re-run preprocessing with --streams 214-1 1201-1 1201-2"
+                f"Re-run preprocessing: pixi run preprocess-hot3d --root {self.config.root_directory} "
+                f"--sequence {self.config.sequence_name} --no-skip-existing"
             )
 
             device_T_camera: Float32[ndarray, "4 4"] = np.array(stream_cal.device_T_camera, dtype=np.float32)
-
-            # Per-stream device-time timestamps for MPS pose lookup
             stream_device_ts: Int64[ndarray, "n_frames"] = np.array(vrs_ts_data[label], dtype=np.int64)
             n_frames: int = len(stream_device_ts)
 
-            # Look up nearest device pose for each frame
             world_T_device_frames: Float32[ndarray, "n_frames 4 4"] = lookup_nearest_poses(
                 query_ts_ns=stream_device_ts,
                 trajectory_ts_ns=traj_ts_ns,
                 world_T_device=world_T_device_all,
             )
 
-            # Build intrinsics + distortion (static per stream)
             intrinsics: Intrinsics = Intrinsics(
                 camera_conventions="RDF",
                 fl_x=stream_cal.fl_x,
@@ -140,17 +161,11 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
                 width=stream_cal.width,
             )
             distortion: KannalaBrandtDistortion = KannalaBrandtDistortion(
-                k1=stream_cal.k1,
-                k2=stream_cal.k2,
-                k3=stream_cal.k3,
-                k4=stream_cal.k4,
-                k5=stream_cal.k5,
-                k6=stream_cal.k6,
-                p1=stream_cal.p1,
-                p2=stream_cal.p2,
+                k1=stream_cal.k1, k2=stream_cal.k2, k3=stream_cal.k3,
+                k4=stream_cal.k4, k5=stream_cal.k5, k6=stream_cal.k6,
+                p1=stream_cal.p1, p2=stream_cal.p2,
             )
 
-            # Build per-frame Fisheye62Parameters
             cam_list: list[Fisheye62Parameters] = []
             prev_cam_T_world: Float32[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
 
@@ -158,7 +173,6 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
                 world_T_device: Float32[ndarray, "4 4"] = world_T_device_frames[frame_idx]
                 world_T_camera: Float32[ndarray, "4 4"] = world_T_device @ device_T_camera
 
-                # Handle singular matrices (reuse last valid)
                 try:
                     cam_T_world: Float32[ndarray, "4 4"] = np.linalg.inv(world_T_camera)
                 except np.linalg.LinAlgError:
@@ -169,31 +183,65 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
                     else:
                         cam_T_world = prev_cam_T_world
 
-                cam_R_world: Float32[ndarray, "3 3"] = cam_T_world[:3, :3]
-                cam_t_world: Float32[ndarray, "3"] = cam_T_world[:3, 3]
-
                 extrinsics: Extrinsics = Extrinsics(
-                    cam_R_world=cam_R_world,
-                    cam_t_world=cam_t_world,
+                    cam_R_world=cam_T_world[:3, :3],
+                    cam_t_world=cam_T_world[:3, 3],
                 )
-
-                cam_params: Fisheye62Parameters = Fisheye62Parameters(
-                    name=label,
-                    intrinsics=intrinsics,
-                    distortion=distortion,
-                    extrinsics=extrinsics,
-                )
-                cam_list.append(cam_params)
+                cam_list.append(Fisheye62Parameters(
+                    name=label, intrinsics=intrinsics, distortion=distortion, extrinsics=extrinsics,
+                ))
 
             all_cam_dict[label] = cam_list
 
         return all_cam_dict
 
+    def _load_calibration(self, seq_dir: Path) -> Hot3dSequenceCalibration:
+        """Load calibration with headset-aware source selection.
+
+        Aria: prefer online_calibration.jsonl (MPS-refined per-timestamp intrinsics)
+        over camera_models.json (factory). Meta's online calibration pipeline
+        refines intrinsics during SLAM — while current measurements show <0.01px
+        difference, the refined version is the intended source for Aria.
+
+        Quest 3: use camera_models.json (no MPS available).
+        """
+        # Check for preprocessed calibration first (from earlier preprocessing run)
+        preprocessed: Path = seq_dir / SIMPLECV_DIR / "calibration.json"
+        if preprocessed.exists():
+            return load_calibration(preprocessed)
+
+        # Aria: prefer online_calibration.jsonl (MPS-refined)
+        online_cal: Path = seq_dir / "mps" / "slam" / "online_calibration.jsonl"
+        if online_cal.exists():
+            return parse_online_calibration_first(online_cal)
+
+        # Fallback (Quest 3 or Aria without MPS): camera_models.json
+        cam_models: Path = seq_dir / "camera_models.json"
+        assert cam_models.exists(), f"No calibration source found in {seq_dir}"
+        return parse_camera_models_json(cam_models)
+
+    def _load_trajectory(self, seq_dir: Path) -> tuple[Int64[ndarray, "n"], Float32[ndarray, "n 4 4"]]:
+        """Load device trajectory with headset-aware source and time domain.
+
+        Aria: MPS closed_loop_trajectory.csv (device-time domain, 1kHz).
+        Quest 3: headset_trajectory.csv (native VRS time domain, ~30Hz).
+        """
+        # Aria: prefer MPS SLAM trajectory (higher rate, device-time domain)
+        mps_traj: Path = seq_dir / "mps" / "slam" / "closed_loop_trajectory.csv"
+        if mps_traj.exists():
+            ts_ns, world_T_device, _quality = parse_mps_closed_loop_trajectory(mps_traj)
+            return ts_ns, world_T_device
+
+        # Quest 3 (or Aria without MPS): headset_trajectory.csv
+        headset_traj: Path = seq_dir / "headset_trajectory.csv"
+        assert headset_traj.exists(), f"No trajectory source found in {seq_dir}"
+        return parse_headset_trajectory(headset_traj)
+
     def align_cams_and_videos(
         self, video_path_list: list[Path], ego_cam_dict: dict[str, list[Fisheye62Parameters]]
     ) -> tuple[dict[str, list[Fisheye62Parameters]], dict[str, Path]]:
         """Align cameras and videos by stream label order."""
-        stream_labels: list[str] = list(HOT3D_EGO_STREAMS.keys())
+        stream_labels: list[str] = list(self._ego_streams.keys())
         assert len(video_path_list) == len(stream_labels), (
             f"Expected {len(stream_labels)} ego videos, got {len(video_path_list)}"
         )

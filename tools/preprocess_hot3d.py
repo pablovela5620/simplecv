@@ -25,7 +25,9 @@ from turbojpeg import TurboJPEG
 
 from simplecv.data.hot3d_utils import (
     ARIA_STREAM_ID_TO_LABEL,
+    QUEST_STREAM_ID_TO_LABEL,
     Hot3dSequenceCalibration,
+    parse_camera_models_json,
     parse_online_calibration_first,
     save_calibration,
 )
@@ -34,17 +36,35 @@ from simplecv.video_encoder import MP4Writer, VideoCodecChoice
 # Shared TurboJPEG instance (thread-safe)
 _TJ: TurboJPEG = TurboJPEG()
 
-# VRS stream IDs for Aria image streams
-ARIA_IMAGE_STREAM_IDS: list[str] = ["214-1", "1201-1", "1201-2"]
+# Default VRS stream IDs per headset type
+ARIA_STREAM_IDS: list[str] = ["214-1", "1201-1", "1201-2"]
+QUEST_STREAM_IDS: list[str] = ["1201-1", "1201-2"]
 
-# Output filenames per stream label
+# Output filenames per stream label (shared across headsets)
 STREAM_LABEL_TO_FILENAME: dict[str, str] = {
     "camera-rgb": "rgb.mp4",
     "camera-slam-left": "slam_left.mp4",
     "camera-slam-right": "slam_right.mp4",
 }
 
+# Combined stream ID → label mapping
+ALL_STREAM_ID_TO_LABEL: dict[str, str] = {**ARIA_STREAM_ID_TO_LABEL, **QUEST_STREAM_ID_TO_LABEL}
+
 OUTPUT_DIR_NAME: str = "_simplecv"
+
+
+def _detect_headset(seq_dir: Path) -> str:
+    """Read metadata.json to determine headset type."""
+    metadata_path: Path = seq_dir / "metadata.json"
+    if metadata_path.exists():
+        metadata: dict = json.loads(metadata_path.read_text())
+        return metadata.get("headset", "Aria")
+    return "Aria"
+
+
+def _default_streams_for_headset(headset: str) -> list[str]:
+    """Return default VRS stream IDs for the given headset type."""
+    return QUEST_STREAM_IDS if headset == "Quest3" else ARIA_STREAM_IDS
 
 
 @dataclass
@@ -59,8 +79,8 @@ class PreprocessConfig:
     """Number of parallel JPEG decode threads."""
     skip_existing: bool = True
     """Skip sequences that already have _simplecv/ output."""
-    streams: list[str] = field(default_factory=lambda: ["214-1", "1201-1", "1201-2"])
-    """VRS stream IDs to extract. Default: RGB + both SLAM cameras."""
+    streams: list[str] = field(default_factory=list)
+    """VRS stream IDs to extract. Empty = auto-detect from metadata.json."""
 
 
 def decode_jpeg_to_yuv(jpeg_bytes: bytes) -> list[np.ndarray]:
@@ -153,18 +173,21 @@ def extract_stream_to_mp4(
 
 
 def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
-    """Preprocess a single HOT3D sequence."""
+    """Preprocess a single HOT3D sequence (Aria or Quest 3)."""
     vrs_path: Path = seq_dir / "recording.vrs"
     if not vrs_path.exists():
         print(f"  [SKIP] No recording.vrs in {seq_dir}")
         return
 
+    # Auto-detect headset type and select streams
+    headset: str = _detect_headset(seq_dir)
+    streams: list[str] = config.streams if config.streams else _default_streams_for_headset(headset)
+
     output_dir: Path = seq_dir / OUTPUT_DIR_NAME
     if config.skip_existing and output_dir.exists():
-        # Check if all expected outputs exist
         expected_files: list[str] = ["calibration.json", "timestamps_ns.json"]
-        for sid in config.streams:
-            label: str = ARIA_STREAM_ID_TO_LABEL.get(sid, sid)
+        for sid in streams:
+            label: str = ALL_STREAM_ID_TO_LABEL.get(sid, sid)
             expected_files.append(STREAM_LABEL_TO_FILENAME.get(label, f"{label}.mp4"))
         if all((output_dir / f).exists() for f in expected_files):
             print(f"  [SKIP] Already preprocessed: {seq_dir.name}")
@@ -172,20 +195,27 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     t_seq_start: float = time.perf_counter()
+    print(f"  Headset: {headset}, streams: {streams}")
 
-    # Extract calibration from MPS online_calibration.jsonl
+    # Extract calibration — prefer MPS online_calibration (Aria), fall back to camera_models.json (Quest)
     cal_jsonl: Path = seq_dir / "mps" / "slam" / "online_calibration.jsonl"
+    cam_models_path: Path = seq_dir / "camera_models.json"
     if cal_jsonl.exists():
+        # Aria: MPS-refined per-timestamp intrinsics (most accurate source)
         cal: Hot3dSequenceCalibration = parse_online_calibration_first(cal_jsonl)
-        save_calibration(cal, output_dir / "calibration.json")
-        print(f"  Calibration: {len(cal.streams)} streams extracted")
+    elif cam_models_path.exists():
+        # Quest 3 (or Aria without MPS): factory calibration
+        cal = parse_camera_models_json(cam_models_path)
     else:
-        print("  [WARN] No online_calibration.jsonl found")
+        print("  [WARN] No calibration source found, skipping")
+        return
+    save_calibration(cal, output_dir / "calibration.json")
+    print(f"  Calibration: {len(cal.streams)} streams extracted")
 
     # Extract video streams
     all_timestamps: dict[str, list[int]] = {}
-    for stream_id in config.streams:
-        label = ARIA_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
+    for stream_id in streams:
+        label: str = ALL_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
         filename: str = STREAM_LABEL_TO_FILENAME.get(label, f"{label}.mp4")
         output_path: Path = output_dir / filename
 

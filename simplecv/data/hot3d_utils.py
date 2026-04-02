@@ -1,6 +1,7 @@
-"""Parsing utilities for HOT3D Aria dataset files.
+"""Parsing utilities for HOT3D dataset files (Aria and Quest 3).
 
-Handles MPS SLAM trajectories, online calibration JSONL, UmeTrack hand
+Handles camera calibration (``camera_models.json``, ``online_calibration.jsonl``),
+device trajectories (MPS SLAM, ``headset_trajectory.csv``), UmeTrack hand
 annotations, and the preprocessed calibration JSON produced by
 ``tools/preprocess_hot3d.py``.
 """
@@ -170,6 +171,18 @@ ARIA_STREAM_ID_TO_LABEL: dict[str, str] = {
 
 ARIA_LABEL_TO_STREAM_ID: dict[str, str] = {v: k for k, v in ARIA_STREAM_ID_TO_LABEL.items()}
 
+# Quest 3 image dimensions per stream label
+QUEST_IMAGE_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "camera-slam-left": (1280, 1024),
+    "camera-slam-right": (1280, 1024),
+}
+
+# Stream ID to label mapping for Quest 3 VRS (no RGB stream)
+QUEST_STREAM_ID_TO_LABEL: dict[str, str] = {
+    "1201-1": "camera-slam-left",
+    "1201-2": "camera-slam-right",
+}
+
 
 def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration:
     """Parse the first entry of online_calibration.jsonl to get factory calibration.
@@ -232,6 +245,129 @@ def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration
         streams.append(stream_cal)
 
     return Hot3dSequenceCalibration(streams=streams)
+
+
+# ─────────── camera_models.json parser (Aria + Quest) ─────────────────────── #
+
+
+def parse_camera_models_json(json_path: Path) -> Hot3dSequenceCalibration:
+    """Parse ``camera_models.json`` — works for both Aria and Quest 3.
+
+    Aria has 15 projection params: ``[f, cx, cy, k1-k6, p1-p2, s1-s4]``
+    (single focal length).  Quest 3 has 16: ``[fx, fy, cx, cy, k1-k6, p1-p2, s1-s4]``
+    (separate fx/fy).  Both use FISHEYE624 model.
+
+    The ``T_Device_Camera`` transform uses ``quaternion_wxyz`` + ``translation_xyz``
+    format (same for both headsets).
+    """
+    with open(json_path) as f:
+        cameras: list[dict] = json.load(f)
+
+    streams: list[Hot3dStreamCalibration] = []
+    for cam in cameras:
+        label: str = cam["label"]
+        params: list[float] = cam["projectionParams"]
+        n_params: int = len(params)
+
+        # Handle Aria (15 params: [f, cx, cy, ...]) vs Quest (16 params: [fx, fy, cx, cy, ...])
+        # See hand_tracking_toolkit camera.from_json() for reference.
+        if n_params == 15:
+            # Aria: single focal length
+            fl_x: float = params[0]
+            fl_y: float = params[0]
+            cx: float = params[1]
+            cy: float = params[2]
+            distortion_offset: int = 3
+        else:
+            # Quest 3 (and standard): separate fx/fy
+            fl_x = params[0]
+            fl_y = params[1]
+            cx = params[2]
+            cy = params[3]
+            distortion_offset = 4
+
+        width: int = cam["imageWidth"]
+        height: int = cam["imageHeight"]
+
+        # Build device_T_camera from quaternion_wxyz + translation_xyz
+        t_dev_cam: dict = cam["T_Device_Camera"]
+        R_dev_cam: Float32[ndarray, "3 3"] = quat_wxyz_to_matrix(t_dev_cam["quaternion_wxyz"])
+        device_T_camera: Float32[ndarray, "4 4"] = build_4x4(R_dev_cam, t_dev_cam["translation_xyz"])
+
+        # Distortion: k1-k6 (6), p1-p2 (2), then thin-prism s1-s4 (dropped)
+        d: int = distortion_offset
+        stream_cal: Hot3dStreamCalibration = Hot3dStreamCalibration(
+            stream_label=label,
+            width=width,
+            height=height,
+            fl_x=fl_x,
+            fl_y=fl_y,
+            cx=cx,
+            cy=cy,
+            k1=params[d] if d < n_params else 0.0,
+            k2=params[d + 1] if d + 1 < n_params else 0.0,
+            k3=params[d + 2] if d + 2 < n_params else 0.0,
+            k4=params[d + 3] if d + 3 < n_params else 0.0,
+            k5=params[d + 4] if d + 4 < n_params else 0.0,
+            k6=params[d + 5] if d + 5 < n_params else 0.0,
+            p1=params[d + 6] if d + 6 < n_params else 0.0,
+            p2=params[d + 7] if d + 7 < n_params else 0.0,
+            device_T_camera=device_T_camera.tolist(),
+        )
+        streams.append(stream_cal)
+
+    return Hot3dSequenceCalibration(streams=streams)
+
+
+# ─────────── headset_trajectory.csv parser (Aria + Quest) ─────────────────── #
+
+
+def parse_headset_trajectory(
+    csv_path: Path,
+) -> tuple[Int64[ndarray, "n_poses"], Float32[ndarray, "n_poses 4 4"]]:
+    """Parse ``headset_trajectory.csv`` — available for both Aria and Quest 3.
+
+    Columns: ``object_uid, timestamp[ns], t_wo_x/y/z[m], q_wo_w/x/y/z``
+
+    Timestamps are in **timecode domain** for Aria (need
+    ``timecode_devicetime_mapping.csv`` to convert to device time) and in
+    the **native VRS domain** for Quest 3.
+
+    Returns
+    -------
+    timestamps_ns
+        Timestamps in nanoseconds (as-is from the CSV).
+    world_T_device
+        4x4 world-to-device transforms.
+    """
+    import pandas as pd
+
+    df: pd.DataFrame = pd.read_csv(csv_path)
+
+    timestamps_ns: Int64[ndarray, "n_poses"] = df["timestamp[ns]"].values.astype(np.int64)
+
+    n_poses: int = len(df)
+    world_T_device: Float32[ndarray, "n_poses 4 4"] = np.zeros((n_poses, 4, 4), dtype=np.float32)
+
+    tx: Float32[ndarray, "n_poses"] = df["t_wo_x[m]"].values.astype(np.float32)
+    ty: Float32[ndarray, "n_poses"] = df["t_wo_y[m]"].values.astype(np.float32)
+    tz: Float32[ndarray, "n_poses"] = df["t_wo_z[m]"].values.astype(np.float32)
+    qx: Float32[ndarray, "n_poses"] = df["q_wo_x"].values.astype(np.float32)
+    qy: Float32[ndarray, "n_poses"] = df["q_wo_y"].values.astype(np.float32)
+    qz: Float32[ndarray, "n_poses"] = df["q_wo_z"].values.astype(np.float32)
+    qw: Float32[ndarray, "n_poses"] = df["q_wo_w"].values.astype(np.float32)
+
+    quats_xyzw: Float32[ndarray, "n_poses 4"] = np.stack([qx, qy, qz, qw], axis=-1)
+    rotations: Rotation = Rotation.from_quat(quats_xyzw)
+    rot_matrices: Float32[ndarray, "n_poses 3 3"] = rotations.as_matrix().astype(np.float32)
+
+    world_T_device[:, :3, :3] = rot_matrices
+    world_T_device[:, 0, 3] = tx
+    world_T_device[:, 1, 3] = ty
+    world_T_device[:, 2, 3] = tz
+    world_T_device[:, 3, 3] = 1.0
+
+    return timestamps_ns, world_T_device
 
 
 # ──────────── Timecode ↔ device-time mapping ──────────────────────────────── #
