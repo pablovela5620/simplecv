@@ -21,7 +21,7 @@ from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.hot3d_ego import Hot3dEgoSequence
-from simplecv.data.exo.base_exo import BaseExoSequence
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.hot3d_utils import build_4x4, load_timecode_to_devicetime_mapping, quat_wxyz_to_matrix
@@ -225,6 +225,9 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                     if not np.isnan(xyzc_stack[frame_idx, thumb_base_indices[hand_idx], :3]).all():
                         xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(conf)
 
+        # ── Load MANO parameters (if available) ────────────────────────
+        mano_stack: ManoStack | None = self._load_mano_poses(seq_dir, rgb_label_indices)
+
         # Normalize label timestamps to the video container's 0-based timeline.
         vrs_start_ns: np.int64 = np.int64(vrs_rgb_ts[0])
         normalized_label_ts: Int64[ndarray, "num_frames"] = devicetime_ns_filtered - vrs_start_ns
@@ -232,7 +235,80 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         return ExoEgoLabels(
             xyzc_stack=xyzc_stack,
             timestamps_ns=normalized_label_ts,
+            mano_stack=mano_stack,
         )
+
+    def _load_mano_poses(self, seq_dir: Path, rgb_label_indices: Int64[ndarray, "n_video"]) -> ManoStack | None:
+        """Load MANO parameters from ``mano_hand_pose_trajectory.jsonl``.
+
+        HOT3D MANO format per hand:
+        - ``pose``: 15 PCA hand coefficients (zero-padded to 45 for MANO layer)
+        - ``wrist_xform.q_wxyz``: global rotation as quaternion → axis-angle (3)
+        - ``wrist_xform.t_xyz``: translation in meters
+        - ``betas``: 10 shape params (per-frame but typically constant)
+
+        ManoStack convention: index 0=right, 1=left.
+        HOT3D JSONL keys: "0"=left, "1"=right.
+        """
+        from scipy.spatial.transform import Rotation
+
+        mano_path: Path = seq_dir / "mano_hand_pose_trajectory.jsonl"
+        if not mano_path.exists():
+            return None
+
+        mano_frames: list[dict] = []
+        with open(mano_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    mano_frames.append(json.loads(line))
+
+        # Filter to same RGB-aligned indices as UmeTrack
+        mano_filtered: list[dict] = [mano_frames[int(i)] for i in rgb_label_indices]
+        num_frames: int = len(mano_filtered)
+
+        so3: Float32[ndarray, "num_frames 2 48"] = np.zeros((num_frames, 2, 48), dtype=np.float32)
+        trans: Float32[ndarray, "num_frames 2 3"] = np.zeros((num_frames, 2, 3), dtype=np.float32)
+        betas: Float32[ndarray, "10"] | None = None
+
+        # HOT3D key → ManoStack hand index: "0"=left→1, "1"=right→0
+        hand_key_to_mano_idx: dict[str, int] = {"0": 1, "1": 0}
+
+        for frame_idx, entry in enumerate(mano_filtered):
+            hand_poses: dict = entry.get("hand_poses", {})
+
+            for hand_key, mano_hand_idx in hand_key_to_mano_idx.items():
+                if hand_key not in hand_poses:
+                    continue
+
+                pose_data: dict = hand_poses[hand_key]
+
+                # Extract betas from first available frame
+                if betas is None and "betas" in pose_data:
+                    betas = np.array(pose_data["betas"], dtype=np.float32)
+
+                # Global rotation: quaternion [w,x,y,z] → axis-angle (3)
+                wrist_data: dict = pose_data["wrist_xform"]
+                q_wxyz: list[float] = wrist_data["q_wxyz"]
+                w, x, y, z = q_wxyz
+                global_rot: Float32[ndarray, "3"] = Rotation.from_quat([x, y, z, w]).as_rotvec().astype(np.float32)
+
+                # PCA hand pose: 15 values → zero-pad to 45
+                pca_coeffs: list[float] = pose_data["pose"]
+                hand_pca: Float32[ndarray, "45"] = np.zeros(45, dtype=np.float32)
+                hand_pca[: len(pca_coeffs)] = np.array(pca_coeffs, dtype=np.float32)
+
+                # Concatenate: [3 global_rot, 45 PCA hand] = 48
+                so3[frame_idx, mano_hand_idx, :3] = global_rot
+                so3[frame_idx, mano_hand_idx, 3:] = hand_pca
+
+                # Translation in meters
+                trans[frame_idx, mano_hand_idx] = np.array(wrist_data["t_xyz"], dtype=np.float32)
+
+        if betas is None:
+            return None
+
+        return ManoStack(betas=betas, so3=so3, trans=trans)
 
     @classmethod
     def iter_episode_sequences(cls, cfg: Hot3dConfig) -> Generator["Hot3dSequence", None, None]:
