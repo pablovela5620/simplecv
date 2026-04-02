@@ -17,7 +17,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import av
 import numpy as np
 import pyvrs
 import tyro
@@ -30,6 +29,7 @@ from simplecv.data.hot3d_utils import (
     parse_online_calibration_first,
     save_calibration,
 )
+from simplecv.video_encoder import MP4Writer, VideoCodecChoice
 
 # Shared TurboJPEG instance (thread-safe)
 _TJ: TurboJPEG = TurboJPEG()
@@ -55,10 +55,6 @@ class PreprocessConfig:
     """Root directory containing sequence folders."""
     sequence: str = ""
     """Process a single sequence (empty = all sequences with recording.vrs)."""
-    codec: str = "libsvtav1"
-    """Video codec for encoding. 'libsvtav1' (AV1 CPU), 'av1_nvenc' (AV1 GPU)."""
-    crf: int = 30
-    """Constant rate factor for encoding quality (lower = better, 0-63)."""
     num_decode_workers: int = 4
     """Number of parallel JPEG decode threads."""
     skip_existing: bool = True
@@ -67,17 +63,15 @@ class PreprocessConfig:
     """VRS stream IDs to extract. Default: RGB + both SLAM cameras."""
 
 
-def decode_jpeg_to_bgr(jpeg_bytes: bytes) -> np.ndarray:
-    """Decode JPEG bytes to BGR numpy array using TurboJPEG."""
-    return _TJ.decode(jpeg_bytes)
+def decode_jpeg_to_yuv(jpeg_bytes: bytes) -> list[np.ndarray]:
+    """Decode JPEG bytes to YUV420 planes using TurboJPEG (fastest path)."""
+    return _TJ.decode_to_yuv_planes(jpeg_bytes)
 
 
 def extract_stream_to_mp4(
     vrs_path: Path,
     stream_id: str,
     output_path: Path,
-    codec: str,
-    crf: int,
     num_workers: int,
 ) -> list[int]:
     """Extract a single VRS image stream to AV1 MP4.
@@ -120,12 +114,12 @@ def extract_stream_to_mp4(
         print(f"  [WARN] No image frames found in stream {stream_id}")
         return []
 
-    # ── Phase 2: Parallel JPEG decode ─────────────────────────────────
+    # ── Phase 2: Parallel JPEG → YUV decode ─────────────────────────────
     t_decode_start: float = time.perf_counter()
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        bgr_frames: list[np.ndarray] = list(
+        yuv_frames: list[list[np.ndarray]] = list(
             tqdm(
-                pool.map(decode_jpeg_to_bgr, jpeg_frames),
+                pool.map(decode_jpeg_to_yuv, jpeg_frames),
                 total=len(jpeg_frames),
                 desc=f"Decoding {label}",
                 leave=False,
@@ -134,11 +128,8 @@ def extract_stream_to_mp4(
 
     t_decode_elapsed: float = time.perf_counter() - t_decode_start
 
-    # ── Phase 3: Encode to MP4 ────────────────────────────────────────
+    # ── Phase 3: Encode to MP4 via MP4Writer (NVENC auto-selected) ────
     t_encode_start: float = time.perf_counter()
-    first_frame: np.ndarray = bgr_frames[0]
-    height: int = first_frame.shape[0]
-    width: int = first_frame.shape[1]
 
     # Calculate FPS from timestamps
     if len(timestamps_ns) > 1:
@@ -147,39 +138,24 @@ def extract_stream_to_mp4(
     else:
         fps = 30.0
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer: MP4Writer = MP4Writer(output_path, codec=VideoCodecChoice.AV1, fps=fps)
+    for planes in tqdm(yuv_frames, desc=f"Encoding {label}", leave=False):
+        if len(planes) >= 3:
+            writer.write_yuv_planes(planes[0], planes[1], planes[2])
+        else:
+            writer.write_yuv_planes(planes[0])
+    writer.close()
 
-    container: av.container.OutputContainer = av.open(str(output_path), mode="w")
-    stream: av.video.stream.VideoStream = container.add_stream(codec, rate=round(fps))
-    stream.width = width
-    stream.height = height
-    stream.pix_fmt = "yuv420p"
-
-    # Set CRF for quality control
-    if "nvenc" in codec:
-        stream.options = {"preset": "p4", "rc": "constqp", "qp": str(crf)}
-    else:
-        stream.options = {"crf": str(crf), "preset": "6"}
-
-    for bgr_frame in tqdm(bgr_frames, desc=f"Encoding {label}", leave=False):
-        # Convert BGR to RGB for av
-        rgb_frame: np.ndarray = bgr_frame[:, :, ::-1]
-        video_frame: av.VideoFrame = av.VideoFrame.from_ndarray(rgb_frame, format="rgb24")
-        for packet in stream.encode(video_frame):
-            container.mux(packet)
-
-    # Flush encoder
-    for packet in stream.encode():
-        container.mux(packet)
-
-    container.close()
+    width: int = yuv_frames[0][0].shape[1]
+    height: int = yuv_frames[0][0].shape[0]
 
     t_encode_elapsed: float = time.perf_counter() - t_encode_start
     t_total: float = t_read_elapsed + t_decode_elapsed + t_encode_elapsed
 
+    encoder_name: str = writer.encoder_name
     print(
-        f"  {label}: {len(bgr_frames)} frames, {width}x{height}, {fps:.1f}fps → {output_path.name} "
-        f"({t_total:.1f}s total: read {t_read_elapsed:.1f}s, decode {t_decode_elapsed:.1f}s, encode {t_encode_elapsed:.1f}s)"
+        f"  {label}: {len(yuv_frames)} frames, {width}x{height}, {fps:.1f}fps → {output_path.name} "
+        f"[{encoder_name}] ({t_total:.1f}s total: read {t_read_elapsed:.1f}s, decode {t_decode_elapsed:.1f}s, encode {t_encode_elapsed:.1f}s)"
     )
     return timestamps_ns
 
@@ -225,8 +201,6 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
             vrs_path=vrs_path,
             stream_id=stream_id,
             output_path=output_path,
-            codec=config.codec,
-            crf=config.crf,
             num_workers=config.num_decode_workers,
         )
         all_timestamps[label] = timestamps

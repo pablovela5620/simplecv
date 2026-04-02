@@ -23,7 +23,6 @@ import numpy as np
 from jaxtyping import UInt8
 from numpy import ndarray
 
-
 # ──────────────────────── Codec selection ─────────────────────────────────── #
 
 
@@ -293,6 +292,11 @@ class MP4Writer:
                 stream.pix_fmt = "yuv420p"
                 stream.gop_size = _GOP_SIZE
                 stream.max_b_frames = 0
+                # NVENC: container.add_stream() defaults to unlimited bitrate
+                # unlike CodecContext.create() which defaults to 2 Mbps.
+                # Match the CodecContext default for comparable file sizes.
+                if "nvenc" in name:
+                    stream.bit_rate = 2_000_000
                 stream.options = _encoder_options(name)
 
                 self._container = container
@@ -302,10 +306,10 @@ class MP4Writer:
             except Exception as exc:
                 errors.append(f"{name}: {exc}")
                 # Close the partially opened container on failure
-                try:
+                import contextlib
+
+                with contextlib.suppress(Exception):
                     container.close()
-                except Exception:
-                    pass
 
         msg = "No working encoder found for MP4. Tried:\n" + "\n".join(f"  - {e}" for e in errors)
         raise RuntimeError(msg)
