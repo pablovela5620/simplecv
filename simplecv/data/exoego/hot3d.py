@@ -133,18 +133,34 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         # "device time".  The mapping CSV provides the 1:1 translation.
         mapping_path: Path = seq_dir / "timecode_devicetime_mapping.csv"
         assert mapping_path.exists(), f"Timecode mapping not found at {mapping_path}"
-        devicetime_ns_array: Int64[ndarray, "n_entries"] = load_timecode_to_devicetime_mapping(mapping_path)
-        assert len(devicetime_ns_array) == len(frame_data), (
-            f"Timecode mapping has {len(devicetime_ns_array)} entries but JSONL has {len(frame_data)}"
+        devicetime_ns_all: Int64[ndarray, "n_entries"] = load_timecode_to_devicetime_mapping(mapping_path)
+        assert len(devicetime_ns_all) == len(frame_data), (
+            f"Timecode mapping has {len(devicetime_ns_all)} entries but JSONL has {len(frame_data)}"
         )
 
-        num_frames: int = len(frame_data)
+        # ── Filter to RGB-frame-aligned entries only ─────────────────────
+        # The JSONL has entries for all camera streams (~2-3x more than RGB
+        # frames).  Only keep the entry closest to each RGB video frame to
+        # ensure 1:1 alignment between label frames and video/camera frames.
+        vrs_ts_path: Path = seq_dir / "_simplecv" / "timestamps_ns.json"
+        assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
+        vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
+        vrs_rgb_ts: Int64[ndarray, "n_video"] = np.array(vrs_ts_data["camera-rgb"], dtype=np.int64)
+
+        # For each RGB frame, find the nearest label by device-time
+        rgb_label_indices: Int64[ndarray, "n_video"] = np.searchsorted(devicetime_ns_all, vrs_rgb_ts, side="left")
+        rgb_label_indices = np.clip(rgb_label_indices, 0, len(devicetime_ns_all) - 1).astype(np.int64)
+
+        frame_data_filtered: list[dict] = [frame_data[int(i)] for i in rgb_label_indices]
+        devicetime_ns_filtered: Int64[ndarray, "n_video"] = devicetime_ns_all[rgb_label_indices]
+
+        num_frames: int = len(frame_data_filtered)
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
         xyzc_stack[:, :, 3] = np.float32(0.0)
 
         prev_landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
 
-        for frame_idx, entry in enumerate(frame_data):
+        for frame_idx, entry in enumerate(frame_data_filtered):
             hand_poses: dict = entry.get("hand_poses", {})
             landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
             hand_confidences: Float32[ndarray, "2"] = np.zeros(2, dtype=np.float32)
@@ -210,14 +226,8 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                         xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(conf)
 
         # Normalize label timestamps to the video container's 0-based timeline.
-        # The MP4 container (from rr.AssetVideo) starts at 0, while the raw
-        # device-time labels start at ~9174s.  Subtract the VRS recording
-        # start time so _sample_labels() can match by timestamp correctly.
-        vrs_ts_path: Path = seq_dir / "_simplecv" / "timestamps_ns.json"
-        assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
-        vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
-        vrs_start_ns: np.int64 = np.int64(vrs_ts_data["camera-rgb"][0])
-        normalized_label_ts: Int64[ndarray, "num_frames"] = devicetime_ns_array - vrs_start_ns
+        vrs_start_ns: np.int64 = np.int64(vrs_rgb_ts[0])
+        normalized_label_ts: Int64[ndarray, "num_frames"] = devicetime_ns_filtered - vrs_start_ns
 
         return ExoEgoLabels(
             xyzc_stack=xyzc_stack,
