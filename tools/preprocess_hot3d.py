@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,8 +63,8 @@ class PreprocessConfig:
     """Number of parallel JPEG decode threads."""
     skip_existing: bool = True
     """Skip sequences that already have _simplecv/ output."""
-    streams: list[str] = field(default_factory=lambda: ["214-1"])
-    """VRS stream IDs to extract. Default: RGB only. Add '1201-1', '1201-2' for SLAM cameras."""
+    streams: list[str] = field(default_factory=lambda: ["214-1", "1201-1", "1201-2"])
+    """VRS stream IDs to extract. Default: RGB + both SLAM cameras."""
 
 
 def decode_jpeg_to_bgr(jpeg_bytes: bytes) -> np.ndarray:
@@ -96,7 +97,8 @@ def extract_stream_to_mp4(
     # Filter to data records for this stream (pyvrs filtered iteration pattern)
     filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
 
-    # Collect all JPEG frames + timestamps from VRS
+    # ── Phase 1: Read JPEG frames from VRS ──────────────────────────────
+    t_read_start: float = time.perf_counter()
     jpeg_frames: list[bytes] = []
     timestamps_ns: list[int] = []
 
@@ -112,11 +114,14 @@ def extract_stream_to_mp4(
         jpeg_frames.append(jpeg_bytes)
         timestamps_ns.append(timestamp_ns)
 
+    t_read_elapsed: float = time.perf_counter() - t_read_start
+
     if not jpeg_frames:
         print(f"  [WARN] No image frames found in stream {stream_id}")
         return []
 
-    # Parallel JPEG decode
+    # ── Phase 2: Parallel JPEG decode ─────────────────────────────────
+    t_decode_start: float = time.perf_counter()
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
         bgr_frames: list[np.ndarray] = list(
             tqdm(
@@ -127,7 +132,10 @@ def extract_stream_to_mp4(
             )
         )
 
-    # Encode to MP4
+    t_decode_elapsed: float = time.perf_counter() - t_decode_start
+
+    # ── Phase 3: Encode to MP4 ────────────────────────────────────────
+    t_encode_start: float = time.perf_counter()
     first_frame: np.ndarray = bgr_frames[0]
     height: int = first_frame.shape[0]
     width: int = first_frame.shape[1]
@@ -166,7 +174,13 @@ def extract_stream_to_mp4(
 
     container.close()
 
-    print(f"  {label}: {len(bgr_frames)} frames, {width}x{height}, {fps:.1f}fps → {output_path.name}")
+    t_encode_elapsed: float = time.perf_counter() - t_encode_start
+    t_total: float = t_read_elapsed + t_decode_elapsed + t_encode_elapsed
+
+    print(
+        f"  {label}: {len(bgr_frames)} frames, {width}x{height}, {fps:.1f}fps → {output_path.name} "
+        f"({t_total:.1f}s total: read {t_read_elapsed:.1f}s, decode {t_decode_elapsed:.1f}s, encode {t_encode_elapsed:.1f}s)"
+    )
     return timestamps_ns
 
 
@@ -189,6 +203,7 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
             return
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    t_seq_start: float = time.perf_counter()
 
     # Extract calibration from MPS online_calibration.jsonl
     cal_jsonl: Path = seq_dir / "mps" / "slam" / "online_calibration.jsonl"
@@ -219,7 +234,9 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
     # Save timestamps
     ts_path: Path = output_dir / "timestamps_ns.json"
     ts_path.write_text(json.dumps(all_timestamps))
-    print(f"  Timestamps saved: {ts_path}")
+
+    t_seq_elapsed: float = time.perf_counter() - t_seq_start
+    print(f"  Done in {t_seq_elapsed:.1f}s ({len(config.streams)} streams)")
 
 
 def main(config: PreprocessConfig) -> None:
