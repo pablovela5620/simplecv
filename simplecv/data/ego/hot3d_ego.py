@@ -183,8 +183,8 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
-        """Aria MPS uses gravity-aligned world with Z pointing down."""
-        return rr.ViewCoordinates.RIGHT_HAND_Z_DOWN
+        """Aria MPS world frame: gravity = [0,0,-9.81] so +Z is up."""
+        return rr.ViewCoordinates.RIGHT_HAND_Z_UP
 
     @property
     def image_plane_distance(self) -> int | float:
