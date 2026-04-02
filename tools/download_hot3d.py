@@ -62,8 +62,8 @@ class DownloadConfig:
     """Path to the Hot3DAria_download_urls.json file."""
     output_dir: Path = Path("/mnt/8tb/data/hot3d/aria")
     """Output directory for downloaded sequences."""
-    max_sequences: int = 20
-    """Maximum number of sequences to download (0 = all)."""
+    max_sequences: int | None = 20
+    """Maximum number of sequences to download (None = all)."""
     data_types: list[str] = field(default_factory=lambda: DESIRED_DATA_TYPES)
     """Data types to download per sequence."""
     verify_sha1: bool = True
@@ -174,7 +174,7 @@ def main(config: DownloadConfig) -> None:
     sequences: dict[str, dict] = data["sequences"]
     seq_names: list[str] = list(sequences.keys())
 
-    if config.max_sequences > 0:
+    if config.max_sequences is not None:
         seq_names = seq_names[: config.max_sequences]
 
     print(f"Downloading {len(seq_names)} sequences to {config.output_dir}")

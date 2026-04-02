@@ -182,23 +182,29 @@ class VideoEncoder:
 
     def encode_frame(
         self,
-        image: UInt8[ndarray, "h w"] | UInt8[ndarray, "h w 3"],
+        rgb_or_gray: UInt8[ndarray, "h w"] | UInt8[ndarray, "h w 3"],
     ) -> list[tuple[int, bytes]]:
-        """Encode an RGB or grayscale frame (with internal YUV conversion)."""
+        """Encode an RGB or grayscale frame (with internal YUV conversion).
+
+        Do NOT pass BGR images — use ``encode_yuv_planes()`` with pre-decoded
+        YUV data instead for correct colors and better performance.
+        """
         if self._ctx is None:
-            height: int = image.shape[0]
-            width: int = image.shape[1]
+            height: int = rgb_or_gray.shape[0]
+            width: int = rgb_or_gray.shape[1]
             self._init_encoder(width, height)
 
-        channels: int = 1 if image.ndim == 2 else image.shape[2]
+        channels: int = 1 if rgb_or_gray.ndim == 2 else rgb_or_gray.shape[2]
         if channels == 1:
-            frame: av.VideoFrame = av.VideoFrame.from_ndarray(image if image.ndim == 2 else image[:, :, 0], format="gray")
+            frame: av.VideoFrame = av.VideoFrame.from_ndarray(
+                rgb_or_gray if rgb_or_gray.ndim == 2 else rgb_or_gray[:, :, 0], format="gray"
+            )
         elif channels == 3:
-            frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+            frame = av.VideoFrame.from_ndarray(rgb_or_gray, format="rgb24")
         elif channels == 4:
-            frame = av.VideoFrame.from_ndarray(image[:, :, :3], format="rgb24")
+            frame = av.VideoFrame.from_ndarray(rgb_or_gray[:, :, :3], format="rgb24")
         else:
-            frame = av.VideoFrame.from_ndarray(image[:, :, 0], format="gray")
+            frame = av.VideoFrame.from_ndarray(rgb_or_gray[:, :, 0], format="gray")
 
         frame = frame.reformat(format="yuv420p")
         frame.pts = self._frame_number
@@ -350,19 +356,24 @@ class MP4Writer:
 
     def write_frame(
         self,
-        image: UInt8[ndarray, "h w"] | UInt8[ndarray, "h w 3"],
+        rgb_or_gray: UInt8[ndarray, "h w"] | UInt8[ndarray, "h w 3"],
     ) -> None:
-        """Encode an RGB or grayscale frame and write to MP4."""
-        if self._container is None:
-            self._init_container(image.shape[1], image.shape[0])
+        """Encode an RGB or grayscale frame and write to MP4.
 
-        channels: int = 1 if image.ndim == 2 else image.shape[2]
+        Do NOT pass BGR images — use ``write_yuv_planes()`` instead.
+        """
+        if self._container is None:
+            self._init_container(rgb_or_gray.shape[1], rgb_or_gray.shape[0])
+
+        channels: int = 1 if rgb_or_gray.ndim == 2 else rgb_or_gray.shape[2]
         if channels == 1:
-            frame: av.VideoFrame = av.VideoFrame.from_ndarray(image if image.ndim == 2 else image[:, :, 0], format="gray")
+            frame: av.VideoFrame = av.VideoFrame.from_ndarray(
+                rgb_or_gray if rgb_or_gray.ndim == 2 else rgb_or_gray[:, :, 0], format="gray"
+            )
         elif channels == 3:
-            frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+            frame = av.VideoFrame.from_ndarray(rgb_or_gray, format="rgb24")
         else:
-            frame = av.VideoFrame.from_ndarray(image[:, :, :3], format="rgb24")
+            frame = av.VideoFrame.from_ndarray(rgb_or_gray[:, :, :3], format="rgb24")
 
         frame = frame.reformat(format="yuv420p")
         frame.pts = self._frame_number

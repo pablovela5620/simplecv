@@ -71,7 +71,28 @@ def load_calibration(path: Path) -> Hot3dSequenceCalibration:
     return from_json(Hot3dSequenceCalibration, path.read_text())
 
 
-# ─────────────────── Aria quaternion format helpers ──────────────────────── #
+# ──────────────────── Headset detection ────────────────────────────────── #
+
+
+def detect_headset(seq_dir: Path) -> str:
+    """Read ``metadata.json`` to determine headset type (``'Aria'`` or ``'Quest3'``).
+
+    Raises ``AssertionError`` if ``metadata.json`` is missing — every valid
+    HOT3D sequence must have this file.
+    """
+    metadata_path: Path = seq_dir / "metadata.json"
+    assert metadata_path.exists(), (
+        f"metadata.json not found in {seq_dir}. "
+        f"Is this a valid HOT3D sequence directory?"
+    )
+    metadata: dict = json.loads(metadata_path.read_text())
+    return metadata.get("headset", "Aria")
+
+
+# ─────────────────── Quaternion / transform helpers ──────────────────────── #
+# TODO: These are general rotation/transform utilities and could be moved to
+# simplecv/ops/ for reuse across other datasets. Kept here for now to avoid
+# touching import sites across the codebase.
 
 
 def aria_unit_quaternion_to_matrix(uq: list) -> Float32[ndarray, "3 3"]:

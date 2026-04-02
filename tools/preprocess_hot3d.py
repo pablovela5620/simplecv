@@ -27,6 +27,7 @@ from simplecv.data.hot3d_utils import (
     ARIA_STREAM_ID_TO_LABEL,
     QUEST_STREAM_ID_TO_LABEL,
     Hot3dSequenceCalibration,
+    detect_headset,
     parse_camera_models_json,
     parse_online_calibration_first,
     save_calibration,
@@ -51,15 +52,6 @@ STREAM_LABEL_TO_FILENAME: dict[str, str] = {
 ALL_STREAM_ID_TO_LABEL: dict[str, str] = {**ARIA_STREAM_ID_TO_LABEL, **QUEST_STREAM_ID_TO_LABEL}
 
 OUTPUT_DIR_NAME: str = "_simplecv"
-
-
-def _detect_headset(seq_dir: Path) -> str:
-    """Read metadata.json to determine headset type."""
-    metadata_path: Path = seq_dir / "metadata.json"
-    if metadata_path.exists():
-        metadata: dict = json.loads(metadata_path.read_text())
-        return metadata.get("headset", "Aria")
-    return "Aria"
 
 
 def _default_streams_for_headset(headset: str) -> list[str]:
@@ -180,7 +172,7 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
         return
 
     # Auto-detect headset type and select streams
-    headset: str = _detect_headset(seq_dir)
+    headset: str = detect_headset(seq_dir)
     streams: list[str] = config.streams if config.streams else _default_streams_for_headset(headset)
 
     output_dir: Path = seq_dir / OUTPUT_DIR_NAME

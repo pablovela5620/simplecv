@@ -25,7 +25,7 @@ from simplecv.data.ego.hot3d_ego import Hot3dEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
-from simplecv.data.hot3d_utils import build_4x4, load_timecode_to_devicetime_mapping, quat_wxyz_to_matrix
+from simplecv.data.hot3d_utils import build_4x4, detect_headset, load_timecode_to_devicetime_mapping, quat_wxyz_to_matrix
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, SingleHandPose, landmarks_from_hand_pose
 
@@ -54,11 +54,8 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
     def __init__(self, cfg: Hot3dConfig) -> None:
         self._ego_stream_names: list[str] = []
         self._exo_stream_names: list[str] = []
-        # Detect headset type for world_coordinate_system
-        metadata_path: Path = Path(cfg.root_directory) / cfg.sequence_name / "metadata.json"
-        self._headset: str = "Aria"
-        if metadata_path.exists():
-            self._headset = json.loads(metadata_path.read_text()).get("headset", "Aria")
+        seq_dir: Path = Path(cfg.root_directory) / cfg.sequence_name
+        self._headset: str = detect_headset(seq_dir)
         super().__init__(cfg)
 
     def _sequence_dir(self) -> Path:
@@ -179,6 +176,11 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
 
         prev_landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
 
+        # ── Per-frame UmeTrack hand forward kinematics ───────────────────
+        # For each filtered frame, convert UmeTrack wrist_xform + joint_angles
+        # into 3D hand landmarks in world frame (meters), then map to COCO-133.
+        # The UmeTrack hand model is in mm, so wrist translation is converted
+        # to mm before FK, and output is scaled back to meters.
         for frame_idx, entry in enumerate(frame_data_filtered):
             hand_poses: dict = entry.get("hand_poses", {})
             landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
@@ -196,20 +198,21 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                 hand_confidences[hand_idx] = np.float32(confidence)
 
                 if confidence > 0.0:
-                    # Build wrist 4x4 transform from quaternion + translation
+                    # Step 1: Build wrist 4x4 transform (world_T_wrist) from quaternion + translation.
+                    # Translation is in meters in the JSONL but the hand model is in mm.
                     wrist_data: dict = pose_data["wrist_xform"]
                     q_wxyz: list[float] = wrist_data["q_wxyz"]
                     t_xyz: list[float] = wrist_data["t_xyz"]
                     R_wrist: Float32[ndarray, "3 3"] = quat_wxyz_to_matrix(q_wxyz)
-                    # Hand model rest positions are in mm; wrist translation
-                    # from HOT3D is in meters.  Convert to mm for FK.
                     t_xyz_mm: list[float] = [v * 1000.0 for v in t_xyz]
                     wrist_xform: Float32[ndarray, "4 4"] = build_4x4(R_wrist, t_xyz_mm)
 
+                    # Step 2: Run UmeTrack forward kinematics to get 21 hand landmarks.
+                    # landmarks_from_hand_pose applies the hand model skeleton + skinning
+                    # with X-flip for right hand (hand_idx=1).
                     joint_angles: Float32[ndarray, "22"] = np.array(
                         pose_data["joint_angles"], dtype=np.float32
                     )
-
                     hand_pose: SingleHandPose = SingleHandPose(
                         joint_angles=joint_angles,
                         wrist_xform=wrist_xform,
@@ -218,13 +221,17 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                     landmarks_mm: Float32[ndarray, "21 3"] = landmarks_from_hand_pose(
                         hand_model, hand_pose, hand_idx
                     ).astype(np.float32, copy=False)
+
+                    # Step 3: Convert mm → meters for world-frame output.
                     scale_to_meters: float = 1e-3
                     landmarks_world: Float32[ndarray, "21 3"] = landmarks_mm * scale_to_meters
                     landmarks_lr[hand_idx] = landmarks_world
                     prev_landmarks_lr[hand_idx] = landmarks_world
                 else:
+                    # No detection: carry forward last valid landmarks (gap filling)
                     landmarks_lr[hand_idx] = prev_landmarks_lr[hand_idx]
 
+            # Step 4: Map 2×21 hand landmarks into the 133-keypoint COCO-WholeBody layout.
             xyzc_stack[frame_idx] = assembly21_to_coco133(landmarks_lr)
 
             # Set confidence for hand keypoints
@@ -275,6 +282,9 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         if not mano_path.exists():
             return None
 
+        # JSONL: one JSON object per line. pyserde doesn't support JSONL natively,
+        # and the schema varies per frame (some frames have empty hand_poses), so
+        # we parse line-by-line with json.loads.
         mano_frames: list[dict] = []
         with open(mano_path) as f:
             for line in f:
@@ -312,7 +322,10 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                 w, x, y, z = q_wxyz
                 global_rot: Float32[ndarray, "3"] = Rotation.from_quat([x, y, z, w]).as_rotvec().astype(np.float32)
 
-                # PCA hand pose: 15 values → zero-pad to 45
+                # PCA hand pose: HOT3D provides 15 PCA coefficients, but our
+                # MANOLayerNP expects 45 (ncomps=45 hardcoded). Zero-padding is
+                # mathematically correct since PCA is linear — the 30 zero
+                # coefficients contribute nothing to the output.
                 pca_coeffs: list[float] = pose_data["pose"]
                 hand_pca: Float32[ndarray, "45"] = np.zeros(45, dtype=np.float32)
                 hand_pca[: len(pca_coeffs)] = np.array(pca_coeffs, dtype=np.float32)

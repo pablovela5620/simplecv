@@ -19,6 +19,7 @@ from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
 from simplecv.data.hot3d_utils import (
     Hot3dSequenceCalibration,
     Hot3dStreamCalibration,
+    detect_headset,
     load_calibration,
     lookup_nearest_poses,
     parse_camera_models_json,
@@ -46,15 +47,6 @@ QUEST_EGO_STREAMS: dict[str, str] = {
 SIMPLECV_DIR: str = "_simplecv"
 
 
-def _detect_headset(seq_dir: Path) -> str:
-    """Read metadata.json to determine headset type ('Aria' or 'Quest3')."""
-    metadata_path: Path = seq_dir / "metadata.json"
-    if metadata_path.exists():
-        metadata: dict = json.loads(metadata_path.read_text())
-        return metadata.get("headset", "Aria")
-    return "Aria"
-
-
 def _ego_streams_for_headset(headset: str) -> dict[str, str]:
     """Return the ego stream mapping for the given headset type."""
     if headset == "Quest3":
@@ -67,7 +59,7 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
 
     def __init__(self, cfg: Hot3dConfig) -> None:
         seq_dir: Path = Path(cfg.root_directory) / cfg.sequence_name
-        self._headset: str = _detect_headset(seq_dir)
+        self._headset: str = detect_headset(seq_dir)
         self._ego_streams: dict[str, str] = _ego_streams_for_headset(self._headset)
         super().__init__(cfg)
 
@@ -227,7 +219,11 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
         # Aria: prefer MPS SLAM trajectory (higher rate, device-time domain)
         mps_traj: Path = seq_dir / "mps" / "slam" / "closed_loop_trajectory.csv"
         if mps_traj.exists():
-            ts_ns, world_T_device, _quality = parse_mps_closed_loop_trajectory(mps_traj)
+            mps_result: tuple[
+                Int64[ndarray, "n_poses"], Float32[ndarray, "n_poses 4 4"], Float32[ndarray, "n_poses"]
+            ] = parse_mps_closed_loop_trajectory(mps_traj)
+            ts_ns: Int64[ndarray, "n_poses"] = mps_result[0]
+            world_T_device: Float32[ndarray, "n_poses 4 4"] = mps_result[1]
             return ts_ns, world_T_device
 
         # Quest 3 (or Aria without MPS): headset_trajectory.csv
