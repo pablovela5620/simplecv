@@ -54,6 +54,11 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
     def __init__(self, cfg: Hot3dConfig) -> None:
         self._ego_stream_names: list[str] = []
         self._exo_stream_names: list[str] = []
+        # Detect headset type for world_coordinate_system
+        metadata_path: Path = Path(cfg.root_directory) / cfg.sequence_name / "metadata.json"
+        self._headset: str = "Aria"
+        if metadata_path.exists():
+            self._headset = json.loads(metadata_path.read_text()).get("headset", "Aria")
         super().__init__(cfg)
 
     def _sequence_dir(self) -> Path:
@@ -351,7 +356,11 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
-        """Headset-aware world frame. Aria: +Z up, Quest: +Y up."""
-        if self.ego_sequence is not None:
-            return self.ego_sequence.world_coordinate_system
+        """Headset-aware world frame.
+
+        Aria: gravity = [0,0,-9.81] → +Z is up.
+        Quest 3: Y ≈ 1.0m (head height) → +Y is up (OpenXR convention).
+        """
+        if self._headset == "Quest3":
+            return rr.ViewCoordinates.RIGHT_HAND_Y_UP
         return rr.ViewCoordinates.RIGHT_HAND_Z_UP

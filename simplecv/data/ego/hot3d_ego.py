@@ -11,10 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-import rerun as rr
 from jaxtyping import Float32, Int64
 from numpy import ndarray
-from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
@@ -255,17 +253,6 @@ class Hot3dEgoSequence(BaseEgoSequence[Hot3dConfig]):
             aligned_video_map[label] = video_path_list[idx]
 
         return aligned_cam_dict, aligned_video_map
-
-    @property
-    def world_coordinate_system(self) -> ViewCoordinates:
-        """Headset-aware world frame.
-
-        Aria: gravity = [0,0,-9.81] → +Z is up.
-        Quest 3: Y ≈ 1.0m (head height) → +Y is up (OpenXR convention).
-        """
-        if self._headset == "Quest3":
-            return rr.ViewCoordinates.RIGHT_HAND_Y_UP
-        return rr.ViewCoordinates.RIGHT_HAND_Z_UP
 
     @property
     def image_plane_distance(self) -> int | float:
