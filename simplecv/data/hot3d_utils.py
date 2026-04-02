@@ -234,6 +234,29 @@ def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration
     return Hot3dSequenceCalibration(streams=streams)
 
 
+# ──────────── Timecode ↔ device-time mapping ──────────────────────────────── #
+
+
+def load_timecode_to_devicetime_mapping(csv_path: Path) -> Int64[ndarray, "n_entries"]:
+    """Load ``timecode_devicetime_mapping.csv`` and return device-time timestamps.
+
+    HOT3D uses two time domains:
+    - **Timecode**: Used by hand annotation JSONL, headset_trajectory.csv
+    - **Device time**: Used by VRS frame timestamps, MPS SLAM trajectory
+
+    The mapping CSV has columns ``timecode_ns`` and ``devicetime_ns`` with a
+    1:1 correspondence to the JSONL annotation entries.  This function returns
+    the ``devicetime_ns`` column so label timestamps can be expressed in the
+    same domain as VRS / MPS data.
+    """
+    import csv
+
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        devicetime_ns: list[int] = [int(row["devicetime_ns"]) for row in reader]
+    return np.array(devicetime_ns, dtype=np.int64)
+
+
 # ──────────── Nearest-neighbor pose interpolation ─────────────────────────── #
 
 

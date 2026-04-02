@@ -24,7 +24,7 @@ from simplecv.data.ego.hot3d_ego import Hot3dEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
-from simplecv.data.hot3d_utils import build_4x4, quat_wxyz_to_matrix
+from simplecv.data.hot3d_utils import build_4x4, load_timecode_to_devicetime_mapping, quat_wxyz_to_matrix
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, SingleHandPose, landmarks_from_hand_pose
 
@@ -101,8 +101,9 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         - ``umetrack_hand_pose_trajectory.jsonl``: per-frame hand poses
         - ``umetrack_hand_user_profile.json``: hand model definition
 
-        Coordinates are already in meters (no scaling needed, unlike UmeTrack dataset
-        which is in millimeters).
+        The hand model rest positions are in millimeters (same as UmeTrack).
+        The wrist_xform translation in HOT3D is in meters, so we convert it to
+        mm before FK, then scale the output back to meters.
         """
         seq_dir: Path = self._sequence_dir()
 
@@ -127,15 +128,23 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                 if line:
                     frame_data.append(json.loads(line))
 
+        # ── Load timecode → device-time mapping ─────────────────────────
+        # HOT3D JSONL timestamps are in "timecode" domain, but VRS/MPS use
+        # "device time".  The mapping CSV provides the 1:1 translation.
+        mapping_path: Path = seq_dir / "timecode_devicetime_mapping.csv"
+        assert mapping_path.exists(), f"Timecode mapping not found at {mapping_path}"
+        devicetime_ns_array: Int64[ndarray, "n_entries"] = load_timecode_to_devicetime_mapping(mapping_path)
+        assert len(devicetime_ns_array) == len(frame_data), (
+            f"Timecode mapping has {len(devicetime_ns_array)} entries but JSONL has {len(frame_data)}"
+        )
+
         num_frames: int = len(frame_data)
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
         xyzc_stack[:, :, 3] = np.float32(0.0)
 
-        timestamps_ns_list: list[int] = []
         prev_landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
 
         for frame_idx, entry in enumerate(frame_data):
-            timestamps_ns_list.append(int(entry["timestamp_ns"]))
             hand_poses: dict = entry.get("hand_poses", {})
             landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
             hand_confidences: Float32[ndarray, "2"] = np.zeros(2, dtype=np.float32)
@@ -154,7 +163,10 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                     q_wxyz: list[float] = wrist_data["q_wxyz"]
                     t_xyz: list[float] = wrist_data["t_xyz"]
                     R_wrist: Float32[ndarray, "3 3"] = quat_wxyz_to_matrix(q_wxyz)
-                    wrist_xform: Float32[ndarray, "4 4"] = build_4x4(R_wrist, t_xyz)
+                    # Hand model rest positions are in mm; wrist translation
+                    # from HOT3D is in meters.  Convert to mm for FK.
+                    t_xyz_mm: list[float] = [v * 1000.0 for v in t_xyz]
+                    wrist_xform: Float32[ndarray, "4 4"] = build_4x4(R_wrist, t_xyz_mm)
 
                     joint_angles: Float32[ndarray, "22"] = np.array(
                         pose_data["joint_angles"], dtype=np.float32
@@ -165,10 +177,11 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                         wrist_xform=wrist_xform,
                         hand_confidence=confidence,
                     )
-                    # HOT3D is already in meters — no scaling needed
-                    landmarks_world: Float32[ndarray, "21 3"] = landmarks_from_hand_pose(
+                    landmarks_mm: Float32[ndarray, "21 3"] = landmarks_from_hand_pose(
                         hand_model, hand_pose, hand_idx
                     ).astype(np.float32, copy=False)
+                    scale_to_meters: float = 1e-3
+                    landmarks_world: Float32[ndarray, "21 3"] = landmarks_mm * scale_to_meters
                     landmarks_lr[hand_idx] = landmarks_world
                     prev_landmarks_lr[hand_idx] = landmarks_world
                 else:
@@ -193,11 +206,11 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                     if not np.isnan(xyzc_stack[frame_idx, thumb_base_indices[hand_idx], :3]).all():
                         xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(conf)
 
-        timestamps_ns: Int64[ndarray, "num_frames"] = np.array(timestamps_ns_list, dtype=np.int64)
-
+        # Use device-time timestamps (same domain as VRS/MPS) instead of raw
+        # timecode timestamps from the JSONL, which are in a different epoch.
         return ExoEgoLabels(
             xyzc_stack=xyzc_stack,
-            timestamps_ns=timestamps_ns,
+            timestamps_ns=devicetime_ns_array,
         )
 
     @classmethod
