@@ -1,20 +1,20 @@
 """Aria Gen2 Pilot dataset adapter for the ExoEgo visualization pipeline.
 
-Ego-only (Aria device, no exo cameras). Uses preprocessed AV1 MP4 videos
-(from VRS), MPS SLAM trajectories for camera poses. MPS hand tracking
-provides wrist+palm positions only (not full finger keypoints), so labels
-are not mapped to COCO-133.
+Ego-only (Aria device, no exo cameras). Uses preprocessed MP4 videos
+(from H.265 VRS), MPS SLAM trajectories for camera poses, and MPS hand
+tracking providing full 21-landmark 3D hand keypoints in device frame.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Int
+from jaxtyping import Float32, Int, Int64
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
@@ -24,6 +24,8 @@ from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.hot3d_utils import lookup_nearest_poses, parse_mps_closed_loop_trajectory
+from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 
 
 @dataclass
@@ -70,7 +72,7 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
         return None  # ego-only
 
     def load_stream_timestamps_ns(self) -> dict[str, Int[ndarray, "n_frames"]]:
-        """Return per-stream timestamps for ego videos."""
+        """Return per-stream timestamps for ego videos (and labels if available)."""
         stream_ts: dict[str, Int[ndarray, "n_frames"]] = {}
         self._ego_stream_names.clear()
 
@@ -85,14 +87,162 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
                 stream_ts[stream_name] = timestamps
                 self._ego_stream_names.append(stream_name)
 
+        labels: ExoEgoLabels | None = self.exoego_labels
+        if labels is not None and labels.timestamps_ns is not None:
+            stream_ts["labels"] = labels.timestamps_ns
+
         return stream_ts
 
     def load_labels(self) -> ExoEgoLabels | None:
-        """MPS hand tracking provides wrist+palm only, not COCO-133 keypoints.
+        """Load COCO-133 hand keypoints from MPS hand tracking results.
 
-        Return None since the data doesn't map to the expected 133-keypoint format.
+        MPS hand tracking provides 21 landmarks per hand in **device frame**
+        (meters), using the same ordering as Assembly-Hands / UmeTrack.
+        We transform them to world frame using the MPS SLAM trajectory and
+        then map to COCO-133 via ``assembly21_to_coco133``.
+
+        Timestamp alignment:
+        - MPS hand tracking timestamps are in device-time ``tracking_timestamp_us``
+          (same domain as the MPS SLAM trajectory).
+        - We filter to one label per video frame via nearest-neighbor matching
+          against the VRS device-time timestamps saved during preprocessing.
+        - Label timestamps are then normalized to the 0-based video timeline
+          (subtract VRS recording start time).
         """
-        return None
+        seq_dir: Path = self._sequence_dir()
+        hand_csv: Path = seq_dir / "mps" / "hand_tracking" / "hand_tracking_results.csv"
+        if not hand_csv.exists():
+            return None
+
+        import pandas as pd
+
+        df: pd.DataFrame = pd.read_csv(hand_csv)
+        if df.empty:
+            return None
+
+        # ── Timestamps: μs → ns (device-time domain) ─────────────────────
+        hand_ts_ns: Int64[ndarray, "n_hand"] = (df["tracking_timestamp_us"].values * np.int64(1000)).astype(np.int64)
+
+        # ── Load trajectory for device→world transform ────────────────────
+        traj_csv: Path = seq_dir / "mps" / "slam" / "closed_loop_trajectory.csv"
+        assert traj_csv.exists(), f"Trajectory not found at {traj_csv}"
+        traj_result: tuple[
+            Int64[ndarray, "n_poses"], Float32[ndarray, "n_poses 4 4"], Float32[ndarray, "n_poses"]
+        ] = parse_mps_closed_loop_trajectory(traj_csv)
+        traj_ts_ns: Int64[ndarray, "n_poses"] = traj_result[0]
+        world_T_device_all: Float32[ndarray, "n_poses 4 4"] = traj_result[1]
+
+        # Look up world_T_device for every hand tracking frame
+        world_T_device_hand: Float32[ndarray, "n_hand 4 4"] = lookup_nearest_poses(
+            query_ts_ns=hand_ts_ns,
+            trajectory_ts_ns=traj_ts_ns,
+            world_T_device=world_T_device_all,
+        )
+
+        # ── Extract 21 landmarks per hand (device frame, meters) ──────────
+        n_hand: int = len(df)
+        left_conf: Float32[ndarray, "n_hand"] = df["left_tracking_confidence"].values.astype(np.float32)
+        right_conf: Float32[ndarray, "n_hand"] = df["right_tracking_confidence"].values.astype(np.float32)
+
+        # Build (n_hand, 21, 3) arrays for left and right in device frame
+        left_device: Float32[ndarray, "n_hand 21 3"] = np.zeros((n_hand, 21, 3), dtype=np.float32)
+        right_device: Float32[ndarray, "n_hand 21 3"] = np.zeros((n_hand, 21, 3), dtype=np.float32)
+        for lm_idx in range(21):
+            for axis_idx, axis in enumerate(["x", "y", "z"]):
+                left_col: str = f"t{axis}_left_landmark_{lm_idx}_device"
+                right_col: str = f"t{axis}_right_landmark_{lm_idx}_device"
+                left_device[:, lm_idx, axis_idx] = df[left_col].values.astype(np.float32)
+                right_device[:, lm_idx, axis_idx] = df[right_col].values.astype(np.float32)
+
+        # ── Transform device→world ────────────────────────────────────────
+        # world_point = R @ device_point + t
+        R_all: Float32[ndarray, "n_hand 3 3"] = world_T_device_hand[:, :3, :3]
+        t_all: Float32[ndarray, "n_hand 3"] = world_T_device_hand[:, :3, 3]
+
+        # Vectorized: (n_hand, 21, 3) = einsum('nij,nkj->nki', R, pts) + t[:,None,:]
+        left_world: Float32[ndarray, "n_hand 21 3"] = np.einsum("nij,nkj->nki", R_all, left_device) + t_all[:, np.newaxis, :]
+        right_world: Float32[ndarray, "n_hand 21 3"] = np.einsum("nij,nkj->nki", R_all, right_device) + t_all[:, np.newaxis, :]
+
+        # Zero out invalid detections (confidence <= 0)
+        left_invalid: ndarray = left_conf <= 0
+        right_invalid: ndarray = right_conf <= 0
+        left_world[left_invalid] = np.nan
+        right_world[right_invalid] = np.nan
+
+        # ── Filter to video-frame-aligned entries ─────────────────────────
+        vrs_ts_path: Path = seq_dir / "_simplecv" / "timestamps_ns.json"
+        assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
+        vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
+        first_stream: str = next(iter(vrs_ts_data))
+        vrs_ref_ts: Int64[ndarray, "n_video"] = np.array(vrs_ts_data[first_stream], dtype=np.int64)
+
+        # Nearest-neighbor: for each video frame, find closest hand tracking frame
+        insertion: Int64[ndarray, "n_video"] = np.searchsorted(hand_ts_ns, vrs_ref_ts, side="left").astype(np.int64)
+        left_idx: Int64[ndarray, "n_video"] = np.clip(insertion - 1, 0, n_hand - 1).astype(np.int64)
+        right_idx: Int64[ndarray, "n_video"] = np.clip(insertion, 0, n_hand - 1).astype(np.int64)
+        left_delta: Int64[ndarray, "n_video"] = np.abs(vrs_ref_ts - hand_ts_ns[left_idx])
+        right_delta: Int64[ndarray, "n_video"] = np.abs(hand_ts_ns[right_idx] - vrs_ref_ts)
+        aligned_idx: Int64[ndarray, "n_video"] = np.where(left_delta <= right_delta, left_idx, right_idx).astype(np.int64)
+
+        left_aligned: Float32[ndarray, "n_video 21 3"] = left_world[aligned_idx]
+        right_aligned: Float32[ndarray, "n_video 21 3"] = right_world[aligned_idx]
+        left_conf_aligned: Float32[ndarray, "n_video"] = left_conf[aligned_idx]
+        right_conf_aligned: Float32[ndarray, "n_video"] = right_conf[aligned_idx]
+        hand_ts_aligned: Int64[ndarray, "n_video"] = hand_ts_ns[aligned_idx]
+
+        # ── Map to COCO-133 ───────────────────────────────────────────────
+        num_frames: int = len(vrs_ref_ts)
+        xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
+        xyzc_stack[:, :, 3] = np.float32(0.0)
+
+        prev_landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
+
+        for frame_idx in range(num_frames):
+            landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
+
+            # Left hand
+            l_conf: float = float(left_conf_aligned[frame_idx])
+            if l_conf > 0:
+                landmarks_lr[0] = left_aligned[frame_idx]
+                prev_landmarks_lr[0] = left_aligned[frame_idx]
+            else:
+                landmarks_lr[0] = prev_landmarks_lr[0]
+
+            # Right hand
+            r_conf: float = float(right_conf_aligned[frame_idx])
+            if r_conf > 0:
+                landmarks_lr[1] = right_aligned[frame_idx]
+                prev_landmarks_lr[1] = right_aligned[frame_idx]
+            else:
+                landmarks_lr[1] = prev_landmarks_lr[1]
+
+            xyzc_stack[frame_idx] = assembly21_to_coco133(landmarks_lr)
+
+            # Set confidence for hand keypoints (matching HOT3D pattern)
+            adjustments: tuple[tuple[int, int], ...] = ((0, 91), (1, 112))
+            wrist_indices: tuple[int, int] = (9, 10)
+            thumb_base_indices: tuple[int, int] = (92, 113)
+            for hand_idx, coco_offset in adjustments:
+                conf: float = float(left_conf_aligned[frame_idx]) if hand_idx == 0 else float(right_conf_aligned[frame_idx])
+                conf = max(conf, 0.0)
+                if conf <= 0.0:
+                    xyzc_stack[frame_idx, coco_offset: coco_offset + 21, 3] = np.float32(0.0)
+                    xyzc_stack[frame_idx, wrist_indices[hand_idx], 3] = np.float32(0.0)
+                    xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(0.0)
+                else:
+                    xyzc_stack[frame_idx, coco_offset: coco_offset + 21, 3] = np.float32(conf)
+                    xyzc_stack[frame_idx, wrist_indices[hand_idx], 3] = np.float32(conf)
+                    if not np.isnan(xyzc_stack[frame_idx, thumb_base_indices[hand_idx], :3]).all():
+                        xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(conf)
+
+        # Normalize timestamps to 0-based video timeline
+        vrs_start_ns: np.int64 = np.int64(vrs_ref_ts[0])
+        normalized_ts: Int64[ndarray, "num_frames"] = hand_ts_aligned - vrs_start_ns
+
+        return ExoEgoLabels(
+            xyzc_stack=xyzc_stack,
+            timestamps_ns=normalized_ts,
+        )
 
     @classmethod
     def iter_episode_sequences(cls, cfg: AriaGen2PilotConfig) -> Generator["AriaGen2PilotSequence", None, None]:
