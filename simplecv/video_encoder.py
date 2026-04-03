@@ -90,11 +90,12 @@ def ffmpeg_transcode(
     input_format: str = "hevc",
     fps: int = 30,
     encoder: str | None = None,
+    cq: int | None = None,
 ) -> None:
     """Transcode a raw video bitstream to yuv420p MP4 via ffmpeg subprocess.
 
-    Uses NVENC GPU encoding by default. Settings match :class:`MP4Writer`:
-    GOP=30, no B-frames, NVENC default quality or CRF 30 for CPU fallback.
+    Uses NVENC GPU encoding by default with constant-quality (CQ) mode.
+    GOP=30, no B-frames.
 
     Args:
         input_path: Raw bitstream file (e.g. Annex-B ``.h265``).
@@ -103,6 +104,9 @@ def ffmpeg_transcode(
         fps: Output frame rate.
         encoder: Explicit encoder name, or ``None`` to auto-detect via
             :func:`pick_ffmpeg_encoder`.
+        cq: NVENC constant-quality value (0–51, higher = smaller file).
+            ``None`` uses the NVENC default (~28). For CPU fallback the
+            module-level ``_CRF`` is used instead.
     """
     import subprocess
 
@@ -113,7 +117,10 @@ def ffmpeg_transcode(
         "-c:v", encoder, "-pix_fmt", "yuv420p",
         "-g", str(_GOP_SIZE), "-bf", "0",
     ]
-    if encoder == "libsvtav1":
+    if "nvenc" in encoder:
+        if cq is not None:
+            encoder_args += ["-cq", str(cq)]
+    elif encoder == "libsvtav1":
         encoder_args += ["-crf", str(_CRF), "-preset", "8"]
 
     cmd: list[str] = [

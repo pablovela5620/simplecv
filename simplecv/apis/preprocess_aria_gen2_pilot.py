@@ -16,7 +16,6 @@ Usage:
 from __future__ import annotations
 
 import json
-import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -92,13 +91,6 @@ def _read_vrs_stream(
     return image_blocks, timestamps_ns
 
 
-def _extract_vrs_timestamps(vrs_path: Path, stream_id: str) -> list[int]:
-    """Read VRS timestamps for a stream without reading image data."""
-    reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
-    filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
-    return [int(rec.timestamp * 1e9) for rec in filtered]
-
-
 def _get_vrs_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
     """Read image (width, height) from VRS stream image_spec."""
     reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
@@ -122,6 +114,12 @@ def _fps_from_timestamps(timestamps_ns: list[int]) -> int:
     return 30
 
 
+# NVENC CQ for SLAM streams (512x512 grayscale).  Higher = smaller file.
+# SLAM frames have low entropy; CQ 40 gives ~17MB vs ~85MB at NVENC default.
+# RGB uses None (NVENC default) which already produces good quality at ~88MB.
+_CQ_SLAM: int = 40
+
+
 def transcode_h265_stream_to_mp4(
     vrs_path: Path,
     stream_id: str,
@@ -137,6 +135,7 @@ def transcode_h265_stream_to_mp4(
     Returns list of VRS timestamps in nanoseconds.
     """
     label: str = ARIA_GEN2_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
+    cq: int | None = None if label == "camera-rgb" else _CQ_SLAM
 
     t0: float = time.perf_counter()
     nal_units, timestamps_ns = _read_vrs_stream(vrs_path, stream_id, label)
@@ -158,21 +157,16 @@ def transcode_h265_stream_to_mp4(
         input_format="hevc",
         fps=_fps_from_timestamps(timestamps_ns),
         encoder=encoder,
+        cq=cq,
     )
     tmp_path.unlink()
 
     t_transcode: float = time.perf_counter() - t1
     print(
         f"  {label}: {len(nal_units)} frames → {output_path.name} "
-        f"[{encoder}] ({t_read + t_transcode:.1f}s: read {t_read:.1f}s, transcode {t_transcode:.1f}s)"
+        f"[{encoder}, cq={cq}] ({t_read + t_transcode:.1f}s: read {t_read:.1f}s, transcode {t_transcode:.1f}s)"
     )
     return timestamps_ns
-
-
-def _find_preview_mp4(seq_dir: Path) -> Path | None:
-    """Find the preview RGB MP4 downloaded alongside the VRS."""
-    candidates: list[Path] = list(seq_dir.glob("*_preview_rgb.mp4"))
-    return candidates[0] if candidates else None
 
 
 # ── Sequence-level orchestration ──────────────────────────────────────── #
@@ -229,14 +223,6 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
         label = ARIA_GEN2_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
         filename: str = ARIA_GEN2_STREAM_LABEL_TO_FILENAME.get(label, f"{label}.mp4")
         output_path: Path = output_dir / filename
-
-        if label == "camera-rgb":
-            preview: Path | None = _find_preview_mp4(seq_dir)
-            if preview is not None:
-                shutil.copy2(str(preview), str(output_path))
-                all_timestamps[label] = _extract_vrs_timestamps(vrs_path, stream_id)
-                print(f"  {label}: copied preview MP4 ({preview.name}), {len(all_timestamps[label])} VRS timestamps")
-                continue
 
         all_timestamps[label] = transcode_h265_stream_to_mp4(
             vrs_path=vrs_path, stream_id=stream_id, output_path=output_path, encoder=encoder,

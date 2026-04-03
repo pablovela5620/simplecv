@@ -27,7 +27,6 @@ DESIRED_DATA_TYPES: list[str] = [
     "mps_slam_trajectories",
     "mps_slam_calibration",
     "mps_hand_tracking",
-    "video_main_rgb",
 ]
 
 # Mapping from data type to subdirectory inside the sequence folder.
