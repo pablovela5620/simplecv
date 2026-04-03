@@ -159,10 +159,16 @@ def transcode_h265_stream_to_mp4(
     out_stream.width = in_stream.codec_context.width
     out_stream.height = in_stream.codec_context.height
     out_stream.pix_fmt = in_stream.codec_context.pix_fmt or "gray"
+    # Force a fixed time_base so PTS increments are meaningful.
+    out_stream.time_base = Fraction(1, fps)
 
     frame_count: int = 0
     for frame in tqdm(inp.decode(in_stream), total=len(nal_units), desc=f"Transcode {label}", leave=False):
+        # Decoded frames from raw Annex-B have pts=None.  Assign monotonic
+        # PTS in units of (1/fps) so each frame advances by exactly 1 tick.
         frame.pts = frame_count
+        frame.dts = frame_count
+        frame.time_base = Fraction(1, fps)
         for packet in out_stream.encode(frame):
             out.mux(packet)
         frame_count += 1
