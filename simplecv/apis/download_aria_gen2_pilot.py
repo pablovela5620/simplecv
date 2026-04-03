@@ -12,12 +12,64 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from serde import serde
+from serde.json import from_json
+
 from simplecv.apis.download_hot3d import download_file, extract_zip, verify_sha1
+
+# ── URL JSON schema (pyserde) ─────────────────────────────────────────── #
+
+
+@serde
+class DataTypeEntry:
+    """A single downloadable asset (VRS file, ZIP archive, etc.)."""
+
+    filename: str
+    """CDN filename, e.g. ``AriaGen2PilotDataset_v1.0_walk_1_main_recording.vrs``."""
+    sha1sum: str
+    """Expected SHA-1 hex digest for integrity verification."""
+    file_size_bytes: int
+    """Expected file size in bytes (used for skip-if-complete check)."""
+    download_url: str
+    """CDN download URL."""
+
+
+@serde
+class SequenceUrls:
+    """All downloadable assets for a single sequence."""
+
+    main_vrs: DataTypeEntry | None = None
+    video_main_rgb: DataTypeEntry | None = None
+    mps_slam_trajectories: DataTypeEntry | None = None
+    mps_slam_calibration: DataTypeEntry | None = None
+    mps_slam_points: DataTypeEntry | None = None
+    mps_slam_summary: DataTypeEntry | None = None
+    mps_hand_tracking: DataTypeEntry | None = None
+    mps_artifacts: DataTypeEntry | None = None
+    depth: DataTypeEntry | None = None
+    scene: DataTypeEntry | None = None
+    heart_rate: DataTypeEntry | None = None
+    diarization: DataTypeEntry | None = None
+    hand_object_interaction: DataTypeEntry | None = None
+
+    def get(self, data_type: str) -> DataTypeEntry | None:
+        """Look up a data type entry by name."""
+        return getattr(self, data_type, None)
+
+
+@serde
+class AriaGen2PilotUrlJson:
+    """Top-level schema for ``AriaGen2PilotDataset_download_urls.json``."""
+
+    sequences: dict[str, SequenceUrls]
+    """Mapping from sequence name (e.g. ``walk_1``) to its downloadable assets."""
+
+
+# ── Download configuration ────────────────────────────────────────────── #
 
 # Data types needed for simplecv integration (video + MPS trajectory/calibration + hand tracking).
 # Skip mps_artifacts (huge ~3.5GB), mps_slam_points (huge ~3.4GB), depth (large ~2GB),
@@ -67,9 +119,12 @@ class DownloadConfig:
     """Verify SHA1 checksums after download."""
 
 
+# ── Download logic ────────────────────────────────────────────────────── #
+
+
 def download_sequence(
     sequence_name: str,
-    sequence_data: dict[str, dict],
+    sequence_urls: SequenceUrls,
     output_dir: Path,
     data_types: list[str],
     verify: bool,
@@ -80,38 +135,33 @@ def download_sequence(
 
     success: bool = True
     for dtype in data_types:
-        if dtype not in sequence_data:
+        entry: DataTypeEntry | None = sequence_urls.get(dtype)
+        if entry is None:
             continue
-
-        info: dict = sequence_data[dtype]
-        filename: str = info["filename"]
-        url: str = info["download_url"]
-        expected_size: int = info["file_size_bytes"]
-        expected_sha1: str = info["sha1sum"]
 
         # Determine save location
         save_subdir: str = DATA_TYPE_SAVE_PATHS.get(dtype, ".")
         save_dir: Path = seq_dir / save_subdir
         save_dir.mkdir(parents=True, exist_ok=True)
-        dest_path: Path = save_dir / filename
+        dest_path: Path = save_dir / entry.filename
 
         # Download
         try:
-            download_file(url, dest_path, expected_size)
+            download_file(entry.download_url, dest_path, entry.file_size_bytes)
         except Exception as exc:
             print(f"  [FAIL] {dtype}: {exc}")
             success = False
             continue
 
         # Verify checksum
-        if verify and not verify_sha1(dest_path, expected_sha1):
-            print(f"  [FAIL] {dtype}: SHA1 mismatch for {filename}")
+        if verify and not verify_sha1(dest_path, entry.sha1sum):
+            print(f"  [FAIL] {dtype}: SHA1 mismatch for {entry.filename}")
             dest_path.unlink(missing_ok=True)
             success = False
             continue
 
         # Extract ZIPs
-        if filename.endswith(".zip"):
+        if entry.filename.endswith(".zip"):
             extract_zip(dest_path, save_dir)
 
         # Rename VRS to canonical name
@@ -127,12 +177,9 @@ def main(config: DownloadConfig) -> None:
     """Download Aria Gen2 Pilot sequences."""
     assert config.urls_json.exists(), f"URL JSON not found: {config.urls_json}"
 
-    with open(config.urls_json) as f:
-        data: dict = json.load(f)
+    url_json: AriaGen2PilotUrlJson = from_json(AriaGen2PilotUrlJson, config.urls_json.read_text())
 
-    sequences: dict[str, dict] = data["sequences"]
-    seq_names: list[str] = list(sequences.keys())
-
+    seq_names: list[str] = list(url_json.sequences.keys())
     if config.max_sequences is not None:
         seq_names = seq_names[: config.max_sequences]
 
@@ -145,7 +192,7 @@ def main(config: DownloadConfig) -> None:
         print(f"\n[{i + 1}/{len(seq_names)}] {seq_name}")
         ok: bool = download_sequence(
             sequence_name=seq_name,
-            sequence_data=sequences[seq_name],
+            sequence_urls=url_json.sequences[seq_name],
             output_dir=config.output_dir,
             data_types=config.data_types,
             verify=config.verify_sha1,
