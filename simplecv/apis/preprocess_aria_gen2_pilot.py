@@ -128,13 +128,14 @@ def transcode_h265_stream_to_mp4(
     """Extract H.265 NAL units from VRS and transcode to yuv420p AV1 MP4.
 
     The VRS stores monochrome (gray8) H.265 which Rerun cannot decode
-    (H.265 Rext profile). This function converts gray → yuv420p AV1
-    via ffmpeg with full GPU pipeline: NVDEC decode + NVENC AV1 encode.
+    (H.265 Rext profile) and NVDEC cannot decode (no Rext support).
+    CPU H.265 decode is required (~380fps for 512x512), then NVENC AV1
+    encode with HOT3D-matching settings (2Mbps, GOP=30, no B-frames).
 
     Approach:
     1. Read raw H.265 Annex-B NAL units + timestamps from VRS
     2. Write concatenated bitstream to temp file
-    3. Run ``ffmpeg -c:v hevc_cuvid -i tmp.h265 -c:v av1_nvenc -pix_fmt yuv420p out.mp4``
+    3. Run ``ffmpeg -f hevc -i tmp.h265 -c:v av1_nvenc -b:v 2M out.mp4``
 
     Returns list of VRS timestamps in nanoseconds.
     """
@@ -176,10 +177,17 @@ def transcode_h265_stream_to_mp4(
         fps = 30
 
     encoder: str = _pick_ffmpeg_encoder()
+    # GOP=30 (1s keyframes at 30fps), no B-frames — consistent with HOT3D.
+    # NVENC: use default quality (CQ mode); ffmpeg NVENC defaults are sane
+    # unlike PyAV's container.add_stream() which defaults to unlimited bitrate.
+    # CPU fallback: CRF 30, preset 8 matching video_encoder.py settings.
+    encoder_args: list[str] = ["-c:v", encoder, "-pix_fmt", "yuv420p", "-g", "30", "-bf", "0"]
+    if encoder == "libsvtav1":
+        encoder_args += ["-crf", "30", "-preset", "8"]
     cmd: list[str] = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-f", "hevc", "-i", tmp_path,
-        "-c:v", encoder, "-pix_fmt", "yuv420p",
+        *encoder_args,
         "-r", str(fps),
         str(output_path),
     ]
