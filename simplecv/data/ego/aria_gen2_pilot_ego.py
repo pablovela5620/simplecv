@@ -100,28 +100,30 @@ class AriaGen2PilotEgoSequence(BaseEgoSequence[AriaGen2PilotConfig]):
         assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
         vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
 
+        # Use RGB timestamps as the canonical reference for ALL cameras.
+        # Gen2 cameras run at different rates (RGB 10fps, SLAM 30fps), but
+        # the viewer assumes all ego cameras share the same frame count.
+        # By looking up trajectory poses at RGB timestamps for every camera,
+        # all cameras get identical frame counts and temporal alignment.
+        rgb_label: str = "camera-rgb"
+        assert rgb_label in vrs_ts_data, f"No RGB timestamps in timestamps_ns.json"
+        canonical_device_ts: Int64[ndarray, "n_frames"] = np.array(vrs_ts_data[rgb_label], dtype=np.int64)
+        n_frames: int = len(canonical_device_ts)
+
+        world_T_device_frames: Float32[ndarray, "n_frames 4 4"] = lookup_nearest_poses(
+            query_ts_ns=canonical_device_ts,
+            trajectory_ts_ns=traj_ts_ns,
+            world_T_device=world_T_device_all,
+        )
+
         # Build per-frame camera params for each stream
         all_cam_dict: dict[str, list[Fisheye62Parameters]] = {}
 
         for label in self._ego_streams:
             stream_cal: Hot3dStreamCalibration | None = cal_by_label.get(label)
             assert stream_cal is not None, f"No calibration found for stream '{label}'"
-            assert label in vrs_ts_data, (
-                f"No timestamps for stream '{label}' in timestamps_ns.json. "
-                f"Re-run preprocessing: pixi run preprocess-aria-gen2-pilot "
-                f"--root {self.config.base_directory} "
-                f"--sequence {self.config.sequence_name} --no-skip-existing"
-            )
 
             device_T_camera: Float32[ndarray, "4 4"] = np.array(stream_cal.device_T_camera, dtype=np.float32)
-            stream_device_ts: Int64[ndarray, "n_frames"] = np.array(vrs_ts_data[label], dtype=np.int64)
-            n_frames: int = len(stream_device_ts)
-
-            world_T_device_frames: Float32[ndarray, "n_frames 4 4"] = lookup_nearest_poses(
-                query_ts_ns=stream_device_ts,
-                trajectory_ts_ns=traj_ts_ns,
-                world_T_device=world_T_device_all,
-            )
 
             intrinsics: Intrinsics = Intrinsics(
                 camera_conventions="RDF",

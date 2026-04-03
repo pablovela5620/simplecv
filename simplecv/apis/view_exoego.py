@@ -639,21 +639,8 @@ def log_exoego_batch(
             cam_log_path: Path = parent_log_path / "ego" / cam_name
             pinhole_log_path: Path = cam_log_path / "pinhole"
 
-            # When ego cameras run at different frame rates (e.g. RGB 10fps vs
-            # SLAM 30fps), camera params must be temporally aligned to label
-            # timestamps rather than indexed by raw frame number.
-            cam_stream_name: str = f"ego/{cam_name}"
-            cam_video_ts: Int[ndarray, "n_cam_frames"] | None = exoego_sequence.stream_timestamps_ns.get(cam_stream_name)
-            if cam_video_ts is not None and len(cam_video_ts) != len(label_timestamps_trim) and len(cam_video_ts) > 0:
-                # Different frame rate: for each label timestamp pick the nearest cam param
-                indices: Int[ndarray, "n_labels"] = np.searchsorted(cam_video_ts, label_timestamps_trim, side="right") - 1
-                indices = np.clip(indices, 0, len(ego_cam_param_list) - 1)
-                aligned_cam_params: list[PinholeParameters | Fisheye62Parameters] = [ego_cam_param_list[int(i)] for i in indices]
-            else:
-                aligned_cam_params = ego_cam_param_list
-
             # Align coordinate, confidence, and camera-parameter buffers when their lengths differ.
-            n_frames_total: int = min(len(xyz_stack), len(aligned_cam_params))
+            n_frames_total: int = min(len(xyz_stack), len(ego_cam_param_list))
             xyz_trim: Float[ndarray, "n_frames 133 3"] = xyz_stack[:n_frames_total]
             conf_trim: Float[ndarray, "n_frames 133"] = conf_stack[:n_frames_total]
             color_trim: UInt8[ndarray, "n_frames 133 3"] = colors[:n_frames_total]
@@ -661,10 +648,10 @@ def log_exoego_batch(
             if n_frames_total == 0:
                 continue
 
-            if isinstance(aligned_cam_params[0], PinholeParameters):
+            if isinstance(ego_cam_param_list[0], PinholeParameters):
                 # Time-aligned fast path: one call over the full trimmed sequence
                 pinhole_slice_full: list[PinholeParameters] = cast(
-                    list[PinholeParameters], aligned_cam_params[:n_frames_total]
+                    list[PinholeParameters], ego_cam_param_list[:n_frames_total]
                 )
                 uv_ego_stack: Float[ndarray, "n_frames 133 2"] = project_brown_conrady_diagonal(
                     xyz_stack_world=xyz_trim[:n_frames_total],
@@ -672,10 +659,10 @@ def log_exoego_batch(
                     filter_invalid=True,
                 )
 
-            elif isinstance(aligned_cam_params[0], Fisheye62Parameters):
+            elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
                 # Time-aligned fisheye fast path: one pose per frame, no outer-product grid
                 fisheye_slice_full: list[Fisheye62Parameters] = cast(
-                    list[Fisheye62Parameters], aligned_cam_params[:n_frames_total]
+                    list[Fisheye62Parameters], ego_cam_param_list[:n_frames_total]
                 )
                 uv_ego_stack: Float[ndarray, "n_frames 133 2"] = project_kannala_brandt_diagonal(
                     xyz_stack_world=xyz_trim[:n_frames_total],
@@ -684,7 +671,7 @@ def log_exoego_batch(
                 )
             else:
                 raise NotImplementedError(
-                    f"Ego camera parameters of type '{type(aligned_cam_params[0])}' are not supported."
+                    f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
                 )
 
             n_frames_cam: int = len(uv_ego_stack)
@@ -875,22 +862,15 @@ def setup_scene(
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
 
-        # Build per-camera timestamp map so each camera's poses are logged
-        # on its own video timeline. Cameras may run at different rates
-        # (e.g. Aria Gen2: RGB 10fps vs SLAM 30fps).
-        ego_ts_by_name: dict[str, Int[ndarray, "n_frames"]] = dict(
-            zip(ego_video_names, ego_timestamp_list, strict=True)
-        )
-
         # log the ego cameras and their trajectories
+        shortest_ego_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(ego_timestamp_list)
         ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
             dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
         )
         for cam_name, ego_cam_param_list in ego_cam_dict.items():
             if not ego_cam_param_list:
                 continue
-            cam_video_ts: Int[ndarray, "n_frames"] = ego_ts_by_name[cam_name]
-            n_frames_cam: int = min(len(ego_cam_param_list), len(cam_video_ts))
+            n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
             if n_frames_cam <= 0:
                 continue
             trimmed_cam_params: list[PinholeParameters | Fisheye62Parameters] = ego_cam_param_list[:n_frames_cam]
@@ -917,7 +897,7 @@ def setup_scene(
             # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
             rr.send_columns(
                 f"{cam_log_path}",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * cam_video_ts[0 : len(batch_world_t_cam)])],
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])],
                 columns=[
                     *rr.Transform3D.columns(
                         translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
