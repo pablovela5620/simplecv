@@ -61,6 +61,14 @@ description = "Download HOT3D Aria sequences from CDN URLs"
 cmd = "python tools/preprocess_hot3d.py"
 description = "Convert HOT3D VRS files to AV1 MP4 for simplecv"
 
+[tool.pixi.tasks.download-aria-gen2-pilot]
+cmd = "python tools/download_aria_gen2_pilot.py"
+description = "Download Aria Gen2 Pilot sequences from CDN URLs"
+
+[tool.pixi.tasks.preprocess-aria-gen2-pilot]
+cmd = "python tools/preprocess_aria_gen2_pilot.py"
+description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for simplecv"
+
 [tool.pixi.tasks._download-example-polycam-data]
 cmd = """
     test -e data/example-room-scan-poly.zip

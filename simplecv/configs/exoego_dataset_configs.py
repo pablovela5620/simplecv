@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import tyro
 
+from simplecv.data.exoego.aria_gen2_pilot import AriaGen2PilotConfig
 from simplecv.data.exoego.assembly101 import Assembly101Config
 from simplecv.data.exoego.base_exoego import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.ego100k import Egocentric100KConfig
@@ -16,6 +17,7 @@ from simplecv.data.exoego.umetrack import UmeTrackConfig
 
 # ───────────────────── registry → union ─────────────────── #
 dataset_defaults = {
+    "aria-gen2": AriaGen2PilotConfig(),
     "assembly101": Assembly101Config(),
     "ego100k": Egocentric100KConfig(),
     "hocap": HocapConfig(),
