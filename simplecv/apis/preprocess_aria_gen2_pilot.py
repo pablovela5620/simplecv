@@ -1,8 +1,8 @@
 """One-time VRS → MP4 conversion for Aria Gen2 Pilot sequences.
 
 Aria Gen2 encodes video streams as H.265 inside VRS (unlike Gen1 which uses
-JPEG). This script extracts H.265 NAL units from VRS, writes them to a temp
-Annex-B file, then transcodes to H.265 MP4 via PyAV.
+JPEG). This script extracts H.265 NAL units from VRS and **remuxes** them
+into MP4 containers without decode/encode — ~130x faster than transcoding.
 
 For the RGB stream, the download provides a preview MP4 which is used directly
 (just copied + timestamps extracted from VRS).
@@ -14,9 +14,9 @@ Usage:
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
-import tempfile
 import time
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -101,17 +101,20 @@ def _get_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
     raise ValueError(f"Could not determine dimensions for stream {stream_id}")
 
 
-def transcode_h265_stream_to_mp4(
+def remux_h265_stream_to_mp4(
     vrs_path: Path,
     stream_id: str,
     output_path: Path,
 ) -> list[int]:
-    """Extract H.265 NAL units from VRS, transcode to H.265 MP4.
+    """Extract H.265 NAL units from VRS and remux to MP4 (no decode/encode).
 
-    Approach:
-    1. Read raw H.265 NAL units from VRS (Annex-B format, fast)
-    2. Write to temp .h265 file
-    3. Decode with PyAV → re-encode to H.265 MP4
+    Approach (following the ``mux_h264_to_mp4`` pattern in rerun_log_utils):
+    1. Read raw H.265 Annex-B NAL units from VRS image blocks
+    2. Concatenate into a single bytestream, open as raw HEVC input
+    3. Demux packets and remux into MP4 with VRS device-time timestamps
+
+    This is ~130x faster than a full transcode since no decode or encode
+    occurs — packets are copied directly from VRS to MP4.
 
     Returns list of VRS timestamps in nanoseconds.
     """
@@ -120,7 +123,7 @@ def transcode_h265_stream_to_mp4(
     info: dict = reader.get_stream_info(stream_id)
     n_frames: int = info["data_records_count"]
 
-    # Phase 1: Read raw H.265 NAL units from VRS
+    # Phase 1: Read raw H.265 NAL units + timestamps from VRS
     t0: float = time.perf_counter()
     filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
     nal_units: list[bytes] = []
@@ -135,57 +138,39 @@ def transcode_h265_stream_to_mp4(
         print(f"  [WARN] No frames in stream {stream_id}")
         return []
 
-    # Phase 2: Write Annex-B bitstream to temp file
-    tmp_h265 = tempfile.NamedTemporaryFile(suffix=".h265", delete=False)
-    for nal in nal_units:
-        tmp_h265.write(nal)
-    tmp_h265.close()
-    tmp_path: Path = Path(tmp_h265.name)
-
-    # Phase 3: Decode → re-encode to H.265 MP4
+    # Phase 2: Remux — concatenate NAL units, open as raw HEVC, copy packets
     t1: float = time.perf_counter()
+    sample_bytes: io.BytesIO = io.BytesIO(b"".join(nal_units))
 
-    if len(timestamps_ns) > 1:
-        dt_ns: float = float(timestamps_ns[-1] - timestamps_ns[0]) / (len(timestamps_ns) - 1)
-        fps: int = max(1, round(1e9 / dt_ns))
-    else:
-        fps = 30
+    input_container = av.open(sample_bytes, mode="r", format="hevc")
+    input_stream = input_container.streams.video[0]
 
-    inp = av.open(str(tmp_path))
-    in_stream = inp.streams.video[0]
+    output_container = av.open(str(output_path), mode="w")
+    output_stream = output_container.add_stream_from_template(input_stream)
+    # Nanosecond time_base preserves exact VRS timestamps without fps rounding.
+    ns_time_base: Fraction = Fraction(1, 1_000_000_000)
+    output_stream.time_base = ns_time_base
+    if output_stream.codec_context is not None:
+        output_stream.codec_context.time_base = ns_time_base
 
-    out = av.open(str(output_path), "w")
-    out_stream = out.add_stream("hevc", rate=Fraction(fps, 1))
-    out_stream.width = in_stream.codec_context.width
-    out_stream.height = in_stream.codec_context.height
-    out_stream.pix_fmt = in_stream.codec_context.pix_fmt or "gray"
-    # Force a fixed time_base so PTS increments are meaningful.
-    out_stream.time_base = Fraction(1, fps)
-
+    start_ns: int = timestamps_ns[0]
     frame_count: int = 0
-    for frame in tqdm(inp.decode(in_stream), total=len(nal_units), desc=f"Transcode {label}", leave=False):
-        # Decoded frames from raw Annex-B have pts=None.  Assign monotonic
-        # PTS in units of (1/fps) so each frame advances by exactly 1 tick.
-        frame.pts = frame_count
-        frame.dts = frame_count
-        frame.time_base = Fraction(1, fps)
-        for packet in out_stream.encode(frame):
-            out.mux(packet)
+    for packet, ts_ns in zip(input_container.demux(input_stream), timestamps_ns, strict=False):
+        packet.time_base = ns_time_base
+        packet.pts = ts_ns - start_ns
+        packet.dts = packet.pts  # No B-frames in VRS H.265 (all I-frames)
+        packet.stream = output_stream
+        output_container.mux(packet)
         frame_count += 1
 
-    # Flush encoder
-    for packet in out_stream.encode():
-        out.mux(packet)
+    input_container.close()
+    output_container.close()
 
-    out.close()
-    inp.close()
-    tmp_path.unlink()
-
-    t_transcode: float = time.perf_counter() - t1
-    t_total: float = t_read + t_transcode
+    t_remux: float = time.perf_counter() - t1
+    t_total: float = t_read + t_remux
     print(
-        f"  {label}: {frame_count} frames, {fps}fps → {output_path.name} "
-        f"({t_total:.1f}s: read {t_read:.1f}s, transcode {t_transcode:.1f}s)"
+        f"  {label}: {frame_count} frames → {output_path.name} "
+        f"({t_total:.1f}s: read {t_read:.1f}s, remux {t_remux:.1f}s)"
     )
     return timestamps_ns
 
@@ -264,8 +249,8 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
                 print(f"  {label}: copied preview MP4 ({preview.name}), {len(timestamps)} VRS timestamps")
                 continue
 
-        # SLAM cameras (or RGB fallback): H.265 transcode from VRS
-        timestamps = transcode_h265_stream_to_mp4(
+        # SLAM cameras (or RGB fallback): H.265 remux from VRS (no decode/encode)
+        timestamps = remux_h265_stream_to_mp4(
             vrs_path=vrs_path,
             stream_id=stream_id,
             output_path=output_path,
