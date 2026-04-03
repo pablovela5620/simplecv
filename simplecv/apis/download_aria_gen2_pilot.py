@@ -160,8 +160,8 @@ def download_sequence(
             success = False
             continue
 
-        # Extract ZIPs
-        if entry.filename.endswith(".zip"):
+        # Extract ZIPs (may already be extracted + deleted from a prior run)
+        if entry.filename.endswith(".zip") and dest_path.exists():
             extract_zip(dest_path, save_dir)
 
         # Rename VRS to canonical name
