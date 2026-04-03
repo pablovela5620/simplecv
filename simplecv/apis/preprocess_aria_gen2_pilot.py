@@ -14,15 +14,12 @@ Usage:
 
 from __future__ import annotations
 
-import io
 import json
 import shutil
 import time
 from dataclasses import dataclass, field
-from fractions import Fraction
 from pathlib import Path
 
-import av
 import pyvrs
 from tqdm import tqdm
 
@@ -101,23 +98,53 @@ def _get_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
     raise ValueError(f"Could not determine dimensions for stream {stream_id}")
 
 
-def remux_h265_stream_to_mp4(
+def _ffmpeg_available() -> bool:
+    """Check if ffmpeg is on PATH."""
+    import shutil
+
+    return shutil.which("ffmpeg") is not None
+
+
+# Encoder preference: NVENC GPU first, then CPU fallback.
+_FFMPEG_ENCODER_CANDIDATES: list[str] = ["hevc_nvenc", "libx265"]
+
+
+def _pick_ffmpeg_encoder() -> str:
+    """Return the first available ffmpeg H.265 encoder."""
+    import subprocess
+
+    for enc in _FFMPEG_ENCODER_CANDIDATES:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if enc in result.stdout:
+            return enc
+    return "libx265"
+
+
+def transcode_h265_stream_to_mp4(
     vrs_path: Path,
     stream_id: str,
     output_path: Path,
 ) -> list[int]:
-    """Extract H.265 NAL units from VRS and remux to MP4 (no decode/encode).
+    """Extract H.265 NAL units from VRS and transcode to yuv420p H.265 MP4.
 
-    Approach (following the ``mux_h264_to_mp4`` pattern in rerun_log_utils):
-    1. Read raw H.265 Annex-B NAL units from VRS image blocks
-    2. Concatenate into a single bytestream, open as raw HEVC input
-    3. Demux packets and remux into MP4 with VRS device-time timestamps
+    The VRS stores monochrome (gray8) H.265 which Rerun cannot decode
+    (H.265 Rext profile). This function converts gray → yuv420p Main
+    profile via ffmpeg subprocess with NVENC GPU acceleration (~3s per
+    10k-frame SLAM stream).
 
-    This is ~130x faster than a full transcode since no decode or encode
-    occurs — packets are copied directly from VRS to MP4.
+    Approach:
+    1. Read raw H.265 Annex-B NAL units + timestamps from VRS
+    2. Write concatenated bitstream to temp file
+    3. Run ``ffmpeg -f hevc -i tmp.h265 -c:v hevc_nvenc -pix_fmt yuv420p out.mp4``
 
     Returns list of VRS timestamps in nanoseconds.
     """
+    import subprocess
+    import tempfile
+
     reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
     label: str = ARIA_GEN2_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
     info: dict = reader.get_stream_info(stream_id)
@@ -138,39 +165,39 @@ def remux_h265_stream_to_mp4(
         print(f"  [WARN] No frames in stream {stream_id}")
         return []
 
-    # Phase 2: Remux — concatenate NAL units, open as raw HEVC, copy packets
+    # Phase 2: Write Annex-B bitstream to temp file
+    tmp_h265 = tempfile.NamedTemporaryFile(suffix=".h265", delete=False)
+    tmp_h265.write(b"".join(nal_units))
+    tmp_h265.close()
+    tmp_path: str = tmp_h265.name
+
+    # Phase 3: ffmpeg transcode gray H.265 → yuv420p H.265 MP4
     t1: float = time.perf_counter()
-    sample_bytes: io.BytesIO = io.BytesIO(b"".join(nal_units))
+    if len(timestamps_ns) > 1:
+        dt_ns: float = float(timestamps_ns[-1] - timestamps_ns[0]) / (len(timestamps_ns) - 1)
+        fps: int = max(1, round(1e9 / dt_ns))
+    else:
+        fps = 30
 
-    input_container = av.open(sample_bytes, mode="r", format="hevc")
-    input_stream = input_container.streams.video[0]
+    encoder: str = _pick_ffmpeg_encoder()
+    cmd: list[str] = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "hevc", "-i", tmp_path,
+        "-c:v", encoder, "-pix_fmt", "yuv420p",
+        "-r", str(fps),
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    Path(tmp_path).unlink()
 
-    output_container = av.open(str(output_path), mode="w")
-    output_stream = output_container.add_stream_from_template(input_stream)
-    # Nanosecond time_base preserves exact VRS timestamps without fps rounding.
-    ns_time_base: Fraction = Fraction(1, 1_000_000_000)
-    output_stream.time_base = ns_time_base
-    if output_stream.codec_context is not None:
-        output_stream.codec_context.time_base = ns_time_base
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg failed for {label}: {result.stderr[-300:]}")
 
-    start_ns: int = timestamps_ns[0]
-    frame_count: int = 0
-    for packet, ts_ns in zip(input_container.demux(input_stream), timestamps_ns, strict=False):
-        packet.time_base = ns_time_base
-        packet.pts = ts_ns - start_ns
-        packet.dts = packet.pts  # No B-frames in VRS H.265 (all I-frames)
-        packet.stream = output_stream
-        output_container.mux(packet)
-        frame_count += 1
-
-    input_container.close()
-    output_container.close()
-
-    t_remux: float = time.perf_counter() - t1
-    t_total: float = t_read + t_remux
+    t_transcode: float = time.perf_counter() - t1
+    t_total: float = t_read + t_transcode
     print(
-        f"  {label}: {frame_count} frames → {output_path.name} "
-        f"({t_total:.1f}s: read {t_read:.1f}s, remux {t_remux:.1f}s)"
+        f"  {label}: {len(nal_units)} frames → {output_path.name} "
+        f"[{encoder}] ({t_total:.1f}s: read {t_read:.1f}s, transcode {t_transcode:.1f}s)"
     )
     return timestamps_ns
 
@@ -249,8 +276,8 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
                 print(f"  {label}: copied preview MP4 ({preview.name}), {len(timestamps)} VRS timestamps")
                 continue
 
-        # SLAM cameras (or RGB fallback): H.265 remux from VRS (no decode/encode)
-        timestamps = remux_h265_stream_to_mp4(
+        # SLAM cameras (or RGB fallback): gray H.265 → yuv420p via ffmpeg+NVENC
+        timestamps = transcode_h265_stream_to_mp4(
             vrs_path=vrs_path,
             stream_id=stream_id,
             output_path=output_path,
