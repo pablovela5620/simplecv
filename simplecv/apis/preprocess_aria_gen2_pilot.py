@@ -98,29 +98,26 @@ def _get_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
     raise ValueError(f"Could not determine dimensions for stream {stream_id}")
 
 
-def _ffmpeg_available() -> bool:
-    """Check if ffmpeg is on PATH."""
-    import shutil
-
-    return shutil.which("ffmpeg") is not None
-
-
-# Encoder preference: NVENC GPU first, then CPU fallback.
-_FFMPEG_ENCODER_CANDIDATES: list[str] = ["hevc_nvenc", "libx265"]
-
-
 def _pick_ffmpeg_encoder() -> str:
-    """Return the first available ffmpeg H.265 encoder."""
+    """Return the best available ffmpeg AV1/H.265 encoder.
+
+    Prefers NVENC GPU (av1_nvenc > hevc_nvenc) then CPU fallback (libsvtav1).
+    Note: NVDEC (hevc_cuvid) is NOT used for decode because it cannot handle
+    raw Annex-B input (``-f hevc``). CPU H.265 decode is fast enough (~380fps
+    for 512x512).
+    """
     import subprocess
 
-    for enc in _FFMPEG_ENCODER_CANDIDATES:
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if enc in result.stdout:
-            return enc
-    return "libx265"
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True, text=True, timeout=10,
+    )
+    encoders: str = result.stdout
+
+    for candidate in ["av1_nvenc", "hevc_nvenc"]:
+        if candidate in encoders:
+            return candidate
+    return "libsvtav1"
 
 
 def transcode_h265_stream_to_mp4(
@@ -128,17 +125,16 @@ def transcode_h265_stream_to_mp4(
     stream_id: str,
     output_path: Path,
 ) -> list[int]:
-    """Extract H.265 NAL units from VRS and transcode to yuv420p H.265 MP4.
+    """Extract H.265 NAL units from VRS and transcode to yuv420p AV1 MP4.
 
     The VRS stores monochrome (gray8) H.265 which Rerun cannot decode
-    (H.265 Rext profile). This function converts gray → yuv420p Main
-    profile via ffmpeg subprocess with NVENC GPU acceleration (~3s per
-    10k-frame SLAM stream).
+    (H.265 Rext profile). This function converts gray → yuv420p AV1
+    via ffmpeg with full GPU pipeline: NVDEC decode + NVENC AV1 encode.
 
     Approach:
     1. Read raw H.265 Annex-B NAL units + timestamps from VRS
     2. Write concatenated bitstream to temp file
-    3. Run ``ffmpeg -f hevc -i tmp.h265 -c:v hevc_nvenc -pix_fmt yuv420p out.mp4``
+    3. Run ``ffmpeg -c:v hevc_cuvid -i tmp.h265 -c:v av1_nvenc -pix_fmt yuv420p out.mp4``
 
     Returns list of VRS timestamps in nanoseconds.
     """
@@ -171,7 +167,7 @@ def transcode_h265_stream_to_mp4(
     tmp_h265.close()
     tmp_path: str = tmp_h265.name
 
-    # Phase 3: ffmpeg transcode gray H.265 → yuv420p H.265 MP4
+    # Phase 3: ffmpeg GPU transcode gray H.265 → yuv420p AV1 MP4
     t1: float = time.perf_counter()
     if len(timestamps_ns) > 1:
         dt_ns: float = float(timestamps_ns[-1] - timestamps_ns[0]) / (len(timestamps_ns) - 1)
