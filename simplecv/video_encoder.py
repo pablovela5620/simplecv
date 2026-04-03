@@ -55,6 +55,79 @@ def _encoder_options(name: str) -> dict[str, str]:
     return {}
 
 
+# ─────────────── ffmpeg subprocess transcode ──────────────────────────────── #
+# Used when the source codec (e.g. monochrome H.265 Rext) cannot be handled
+# by PyAV's NVENC path or needs pixel format conversion. ~10x faster than
+# the equivalent PyAV decode→reformat→encode loop because ffmpeg runs the
+# full pipeline in C without Python frame iteration overhead.
+
+
+def pick_ffmpeg_encoder() -> str:
+    """Return the best available ffmpeg AV1/H.265 encoder.
+
+    Prefers NVENC GPU (``av1_nvenc`` > ``hevc_nvenc``) then CPU fallback
+    (``libsvtav1``).
+    """
+    import subprocess
+
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    encoders: str = result.stdout
+
+    for candidate in ["av1_nvenc", "hevc_nvenc"]:
+        if candidate in encoders:
+            return candidate
+    return "libsvtav1"
+
+
+def ffmpeg_transcode(
+    input_path: Path,
+    output_path: Path,
+    input_format: str = "hevc",
+    fps: int = 30,
+    encoder: str | None = None,
+) -> None:
+    """Transcode a raw video bitstream to yuv420p MP4 via ffmpeg subprocess.
+
+    Uses NVENC GPU encoding by default. Settings match :class:`MP4Writer`:
+    GOP=30, no B-frames, NVENC default quality or CRF 30 for CPU fallback.
+
+    Args:
+        input_path: Raw bitstream file (e.g. Annex-B ``.h265``).
+        output_path: Destination ``.mp4`` path.
+        input_format: ffmpeg input format (``hevc``, ``h264``, etc.).
+        fps: Output frame rate.
+        encoder: Explicit encoder name, or ``None`` to auto-detect via
+            :func:`pick_ffmpeg_encoder`.
+    """
+    import subprocess
+
+    if encoder is None:
+        encoder = pick_ffmpeg_encoder()
+
+    encoder_args: list[str] = [
+        "-c:v", encoder, "-pix_fmt", "yuv420p",
+        "-g", str(_GOP_SIZE), "-bf", "0",
+    ]
+    if encoder == "libsvtav1":
+        encoder_args += ["-crf", str(_CRF), "-preset", "8"]
+
+    cmd: list[str] = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", input_format, "-i", str(input_path),
+        *encoder_args,
+        "-r", str(fps),
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg transcode failed: {result.stderr[-300:]}")
+
+
 # ──────────────────── VideoEncoder (raw packets) ──────────────────────────── #
 
 

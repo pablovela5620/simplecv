@@ -1,11 +1,12 @@
-"""One-time VRS → MP4 conversion for Aria Gen2 Pilot sequences.
+"""One-time VRS → AV1 MP4 conversion for Aria Gen2 Pilot sequences.
 
 Aria Gen2 encodes video streams as H.265 inside VRS (unlike Gen1 which uses
-JPEG). This script extracts H.265 NAL units from VRS and **remuxes** them
-into MP4 containers without decode/encode — ~130x faster than transcoding.
+JPEG). The SLAM cameras use monochrome (gray8) H.265 Rext profile which
+neither Rerun nor NVDEC can decode, so we transcode to yuv420p AV1 via
+ffmpeg + NVENC (~4s per 10k-frame stream).
 
-For the RGB stream, the download provides a preview MP4 which is used directly
-(just copied + timestamps extracted from VRS).
+For the RGB stream, the download provides a preview MP4 which is copied
+directly (timestamps still extracted from VRS for pose alignment).
 
 Usage:
     pixi run preprocess-aria-gen2-pilot --root /mnt/8tb/data/aria-gen2-pilot
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,10 +27,10 @@ from tqdm import tqdm
 
 from simplecv.data.hot3d_utils import (
     Hot3dSequenceCalibration,
-    Hot3dStreamCalibration,
     parse_online_calibration_first,
     save_calibration,
 )
+from simplecv.video_encoder import ffmpeg_transcode, pick_ffmpeg_encoder
 
 # ── Aria Gen2 stream mapping ──────────────────────────────────────────── #
 # Gen2 has 5 cameras vs Gen1's 3, with different SLAM camera labels.
@@ -49,7 +51,6 @@ ARIA_GEN2_STREAM_LABEL_TO_FILENAME: dict[str, str] = {
     "slam-side-right": "slam_side_right.mp4",
 }
 
-# Default streams to extract
 ARIA_GEN2_STREAM_IDS: list[str] = ["214-1", "1201-1", "1201-2", "1201-3", "1201-4"]
 
 OUTPUT_DIR_NAME: str = "_simplecv"
@@ -70,24 +71,36 @@ class PreprocessConfig:
     """VRS stream IDs to extract. Empty = default Aria Gen2 streams."""
 
 
-def _extract_vrs_timestamps(vrs_path: Path, stream_id: str) -> list[int]:
-    """Read VRS timestamps for a stream without decoding images.
+# ── VRS helpers ───────────────────────────────────────────────────────── #
 
-    Returns list of nanosecond timestamps in device-time domain.
-    """
+
+def _read_vrs_stream(
+    vrs_path: Path, stream_id: str, label: str,
+) -> tuple[list[bytes], list[int]]:
+    """Read raw image blocks + nanosecond timestamps from a VRS stream."""
+    reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
+    info: dict = reader.get_stream_info(stream_id)
+    n_frames: int = info["data_records_count"]
+    filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
+
+    image_blocks: list[bytes] = []
+    timestamps_ns: list[int] = []
+    for rec in tqdm(filtered, total=n_frames, desc=f"Reading {label}", leave=False):
+        if rec.n_image_blocks > 0:
+            image_blocks.append(rec.image_blocks[0].tobytes())
+            timestamps_ns.append(int(rec.timestamp * 1e9))
+    return image_blocks, timestamps_ns
+
+
+def _extract_vrs_timestamps(vrs_path: Path, stream_id: str) -> list[int]:
+    """Read VRS timestamps for a stream without reading image data."""
     reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
     filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
-    timestamps_ns: list[int] = []
-    for rec in filtered:
-        timestamps_ns.append(int(rec.timestamp * 1e9))
-    return timestamps_ns
+    return [int(rec.timestamp * 1e9) for rec in filtered]
 
 
-def _get_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
-    """Read image dimensions from VRS stream image_spec.
-
-    Returns (width, height).
-    """
+def _get_vrs_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
+    """Read image (width, height) from VRS stream image_spec."""
     reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
     filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
     for rec in filtered:
@@ -98,110 +111,60 @@ def _get_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
     raise ValueError(f"Could not determine dimensions for stream {stream_id}")
 
 
-def _pick_ffmpeg_encoder() -> str:
-    """Return the best available ffmpeg AV1/H.265 encoder.
+# ── Stream processing ─────────────────────────────────────────────────── #
 
-    Prefers NVENC GPU (av1_nvenc > hevc_nvenc) then CPU fallback (libsvtav1).
-    Note: NVDEC (hevc_cuvid) is NOT used for decode because it cannot handle
-    raw Annex-B input (``-f hevc``). CPU H.265 decode is fast enough (~380fps
-    for 512x512).
-    """
-    import subprocess
 
-    result = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-encoders"],
-        capture_output=True, text=True, timeout=10,
-    )
-    encoders: str = result.stdout
-
-    for candidate in ["av1_nvenc", "hevc_nvenc"]:
-        if candidate in encoders:
-            return candidate
-    return "libsvtav1"
+def _fps_from_timestamps(timestamps_ns: list[int]) -> int:
+    """Compute integer FPS from nanosecond timestamps."""
+    if len(timestamps_ns) > 1:
+        dt_ns: float = float(timestamps_ns[-1] - timestamps_ns[0]) / (len(timestamps_ns) - 1)
+        return max(1, round(1e9 / dt_ns))
+    return 30
 
 
 def transcode_h265_stream_to_mp4(
     vrs_path: Path,
     stream_id: str,
     output_path: Path,
+    encoder: str,
 ) -> list[int]:
     """Extract H.265 NAL units from VRS and transcode to yuv420p AV1 MP4.
 
     The VRS stores monochrome (gray8) H.265 which Rerun cannot decode
     (H.265 Rext profile) and NVDEC cannot decode (no Rext support).
-    CPU H.265 decode is required (~380fps for 512x512), then NVENC AV1
-    encode with HOT3D-matching settings (2Mbps, GOP=30, no B-frames).
-
-    Approach:
-    1. Read raw H.265 Annex-B NAL units + timestamps from VRS
-    2. Write concatenated bitstream to temp file
-    3. Run ``ffmpeg -f hevc -i tmp.h265 -c:v av1_nvenc -b:v 2M out.mp4``
+    CPU H.265 decode + NVENC AV1 encode via :func:`ffmpeg_transcode`.
 
     Returns list of VRS timestamps in nanoseconds.
     """
-    import subprocess
-    import tempfile
-
-    reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
     label: str = ARIA_GEN2_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
-    info: dict = reader.get_stream_info(stream_id)
-    n_frames: int = info["data_records_count"]
 
-    # Phase 1: Read raw H.265 NAL units + timestamps from VRS
     t0: float = time.perf_counter()
-    filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
-    nal_units: list[bytes] = []
-    timestamps_ns: list[int] = []
-    for rec in tqdm(filtered, total=n_frames, desc=f"Reading {label}", leave=False):
-        if rec.n_image_blocks > 0:
-            nal_units.append(rec.image_blocks[0].tobytes())
-            timestamps_ns.append(int(rec.timestamp * 1e9))
+    nal_units, timestamps_ns = _read_vrs_stream(vrs_path, stream_id, label)
     t_read: float = time.perf_counter() - t0
 
     if not nal_units:
         print(f"  [WARN] No frames in stream {stream_id}")
         return []
 
-    # Phase 2: Write Annex-B bitstream to temp file
-    tmp_h265 = tempfile.NamedTemporaryFile(suffix=".h265", delete=False)
-    tmp_h265.write(b"".join(nal_units))
-    tmp_h265.close()
-    tmp_path: str = tmp_h265.name
-
-    # Phase 3: ffmpeg GPU transcode gray H.265 → yuv420p AV1 MP4
+    # Write Annex-B bitstream to temp file, transcode via ffmpeg
     t1: float = time.perf_counter()
-    if len(timestamps_ns) > 1:
-        dt_ns: float = float(timestamps_ns[-1] - timestamps_ns[0]) / (len(timestamps_ns) - 1)
-        fps: int = max(1, round(1e9 / dt_ns))
-    else:
-        fps = 30
+    with tempfile.NamedTemporaryFile(suffix=".h265", delete=False) as tmp:
+        tmp.write(b"".join(nal_units))
+        tmp_path: Path = Path(tmp.name)
 
-    encoder: str = _pick_ffmpeg_encoder()
-    # GOP=30 (1s keyframes at 30fps), no B-frames — consistent with HOT3D.
-    # NVENC: use default quality (CQ mode); ffmpeg NVENC defaults are sane
-    # unlike PyAV's container.add_stream() which defaults to unlimited bitrate.
-    # CPU fallback: CRF 30, preset 8 matching video_encoder.py settings.
-    encoder_args: list[str] = ["-c:v", encoder, "-pix_fmt", "yuv420p", "-g", "30", "-bf", "0"]
-    if encoder == "libsvtav1":
-        encoder_args += ["-crf", "30", "-preset", "8"]
-    cmd: list[str] = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "hevc", "-i", tmp_path,
-        *encoder_args,
-        "-r", str(fps),
-        str(output_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    Path(tmp_path).unlink()
-
-    if result.returncode:
-        raise RuntimeError(f"ffmpeg failed for {label}: {result.stderr[-300:]}")
+    ffmpeg_transcode(
+        input_path=tmp_path,
+        output_path=output_path,
+        input_format="hevc",
+        fps=_fps_from_timestamps(timestamps_ns),
+        encoder=encoder,
+    )
+    tmp_path.unlink()
 
     t_transcode: float = time.perf_counter() - t1
-    t_total: float = t_read + t_transcode
     print(
         f"  {label}: {len(nal_units)} frames → {output_path.name} "
-        f"[{encoder}] ({t_total:.1f}s: read {t_read:.1f}s, transcode {t_transcode:.1f}s)"
+        f"[{encoder}] ({t_read + t_transcode:.1f}s: read {t_read:.1f}s, transcode {t_transcode:.1f}s)"
     )
     return timestamps_ns
 
@@ -209,9 +172,10 @@ def transcode_h265_stream_to_mp4(
 def _find_preview_mp4(seq_dir: Path) -> Path | None:
     """Find the preview RGB MP4 downloaded alongside the VRS."""
     candidates: list[Path] = list(seq_dir.glob("*_preview_rgb.mp4"))
-    if candidates:
-        return candidates[0]
-    return None
+    return candidates[0] if candidates else None
+
+
+# ── Sequence-level orchestration ──────────────────────────────────────── #
 
 
 def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
@@ -237,63 +201,51 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
     t_seq_start: float = time.perf_counter()
     print(f"  Streams: {streams}")
 
-    # ── Extract calibration with correct dimensions ──────────────────────
+    # ── Calibration (patch dimensions from VRS image specs) ───────────────
     cal_jsonl: Path = seq_dir / "mps" / "slam" / "online_calibration.jsonl"
     if not cal_jsonl.exists():
         print("  [WARN] No online_calibration.jsonl found, skipping")
         return
 
     cal: Hot3dSequenceCalibration = parse_online_calibration_first(cal_jsonl)
-
-    # Fix image dimensions from VRS (online_calibration uses approximate cx*2/cy*2)
-    vrs_dims: dict[str, tuple[int, int]] = {}
     for sid in streams:
-        label: str = ARIA_GEN2_STREAM_ID_TO_LABEL.get(sid, sid)
+        label = ARIA_GEN2_STREAM_ID_TO_LABEL.get(sid, sid)
         try:
-            w, h = _get_stream_dimensions(vrs_path, sid)
-            vrs_dims[label] = (w, h)
+            w, h = _get_vrs_stream_dimensions(vrs_path, sid)
         except ValueError:
-            pass
-
-    for stream_cal in cal.streams:
-        if stream_cal.stream_label in vrs_dims:
-            stream_cal.width, stream_cal.height = vrs_dims[stream_cal.stream_label]
+            continue
+        for stream_cal in cal.streams:
+            if stream_cal.stream_label == label:
+                stream_cal.width, stream_cal.height = w, h
 
     save_calibration(cal, output_dir / "calibration.json")
     print(f"  Calibration: {len(cal.streams)} streams, dims patched from VRS")
 
-    # ── Extract video streams ─────────────────────────────────────────────
+    # ── Video streams ─────────────────────────────────────────────────────
+    encoder: str = pick_ffmpeg_encoder()
     all_timestamps: dict[str, list[int]] = {}
 
     for stream_id in streams:
-        label: str = ARIA_GEN2_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
+        label = ARIA_GEN2_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
         filename: str = ARIA_GEN2_STREAM_LABEL_TO_FILENAME.get(label, f"{label}.mp4")
         output_path: Path = output_dir / filename
 
         if label == "camera-rgb":
-            # RGB: use preview MP4 if available (much faster than VRS transcode)
             preview: Path | None = _find_preview_mp4(seq_dir)
             if preview is not None:
                 shutil.copy2(str(preview), str(output_path))
-                timestamps: list[int] = _extract_vrs_timestamps(vrs_path, stream_id)
-                all_timestamps[label] = timestamps
-                print(f"  {label}: copied preview MP4 ({preview.name}), {len(timestamps)} VRS timestamps")
+                all_timestamps[label] = _extract_vrs_timestamps(vrs_path, stream_id)
+                print(f"  {label}: copied preview MP4 ({preview.name}), {len(all_timestamps[label])} VRS timestamps")
                 continue
 
-        # SLAM cameras (or RGB fallback): gray H.265 → yuv420p via ffmpeg+NVENC
-        timestamps = transcode_h265_stream_to_mp4(
-            vrs_path=vrs_path,
-            stream_id=stream_id,
-            output_path=output_path,
+        all_timestamps[label] = transcode_h265_stream_to_mp4(
+            vrs_path=vrs_path, stream_id=stream_id, output_path=output_path, encoder=encoder,
         )
-        all_timestamps[label] = timestamps
 
-    # Save timestamps
-    ts_path: Path = output_dir / "timestamps_ns.json"
-    ts_path.write_text(json.dumps(all_timestamps))
+    # ── Save timestamps ───────────────────────────────────────────────────
+    (output_dir / "timestamps_ns.json").write_text(json.dumps(all_timestamps))
 
-    t_seq_elapsed: float = time.perf_counter() - t_seq_start
-    print(f"  Done in {t_seq_elapsed:.1f}s ({len(streams)} streams)")
+    print(f"  Done in {time.perf_counter() - t_seq_start:.1f}s ({len(streams)} streams)")
 
 
 def main(config: PreprocessConfig) -> None:
