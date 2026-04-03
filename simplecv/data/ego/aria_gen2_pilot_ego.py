@@ -101,10 +101,14 @@ class AriaGen2PilotEgoSequence(BaseEgoSequence[AriaGen2PilotConfig]):
         vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
 
         # Use RGB timestamps as the canonical reference for ALL cameras.
-        # Gen2 cameras run at different rates (RGB 10fps, SLAM 30fps), but
-        # the viewer assumes all ego cameras share the same frame count.
+        # Gen2 cameras run at different rates (RGB 10fps, SLAM 30fps;
+        # hand tracking 30fps; SLAM trajectory 1kHz), but the viewer
+        # assumes all ego cameras share the same frame count.
         # By looking up trajectory poses at RGB timestamps for every camera,
         # all cameras get identical frame counts and temporal alignment.
+        # TODO: support per-camera native frame rates so SLAM cameras and
+        # hand labels can run at their full 30fps instead of being
+        # downsampled to the RGB 10fps timeline.
         rgb_label: str = "camera-rgb"
         assert rgb_label in vrs_ts_data, f"No RGB timestamps in timestamps_ns.json"
         canonical_device_ts: Int64[ndarray, "n_frames"] = np.array(vrs_ts_data[rgb_label], dtype=np.int64)
