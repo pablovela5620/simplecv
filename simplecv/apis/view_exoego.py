@@ -862,15 +862,22 @@ def setup_scene(
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
 
+        # Build per-camera timestamp map so each camera's poses are logged
+        # on its own video timeline. Cameras may run at different rates
+        # (e.g. Aria Gen2: RGB 10fps vs SLAM 30fps).
+        ego_ts_by_name: dict[str, Int[ndarray, "n_frames"]] = dict(
+            zip(ego_video_names, ego_timestamp_list, strict=True)
+        )
+
         # log the ego cameras and their trajectories
-        shortest_ego_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(ego_timestamp_list)
         ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
             dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
         )
         for cam_name, ego_cam_param_list in ego_cam_dict.items():
             if not ego_cam_param_list:
                 continue
-            n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
+            cam_video_ts: Int[ndarray, "n_frames"] = ego_ts_by_name[cam_name]
+            n_frames_cam: int = min(len(ego_cam_param_list), len(cam_video_ts))
             if n_frames_cam <= 0:
                 continue
             trimmed_cam_params: list[PinholeParameters | Fisheye62Parameters] = ego_cam_param_list[:n_frames_cam]
@@ -897,7 +904,7 @@ def setup_scene(
             # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
             rr.send_columns(
                 f"{cam_log_path}",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])],
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * cam_video_ts[0 : len(batch_world_t_cam)])],
                 columns=[
                     *rr.Transform3D.columns(
                         translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
