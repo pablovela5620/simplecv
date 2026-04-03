@@ -35,7 +35,7 @@ class AriaGen2PilotConfig(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: AriaGen2PilotSequence)
     base_directory: Path = Path("/mnt/8tb/data/aria-gen2-pilot")
     """Base directory containing sequence subdirectories."""
-    sequence_name: str = "walk_1"
+    sequence_name: str = "cook_0"
     """Sequence folder name (e.g. 'walk_1', 'cook_0', 'eat_0')."""
 
 
