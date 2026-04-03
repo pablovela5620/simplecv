@@ -170,9 +170,10 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
         right_world[right_invalid] = np.nan
 
         # ── Filter to video-frame-aligned entries ─────────────────────────
-        # Hand tracking runs at 30fps but we downsample to the RGB 10fps
-        # timeline (one label per RGB frame) because the viewer shares a
-        # single frame count across all ego cameras and labels.
+        # Hand tracking and SLAM cameras both run at 30fps, but we
+        # downsample to the RGB 10fps timeline (one label per RGB frame)
+        # because the viewer shares a single frame count across all ego
+        # cameras and labels.
         # TODO: emit labels at native 30fps once the viewer supports
         # per-stream frame rates.
         vrs_ts_path: Path = seq_dir / "_simplecv" / "timestamps_ns.json"
