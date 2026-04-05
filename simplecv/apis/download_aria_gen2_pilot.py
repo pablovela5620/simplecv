@@ -146,6 +146,17 @@ def download_sequence(
         save_dir.mkdir(parents=True, exist_ok=True)
         dest_path: Path = save_dir / entry.filename
 
+        # Skip if the final output already exists (idempotent reruns).
+        # ZIPs are deleted after extraction, and main_vrs is renamed to
+        # video.vrs, so checking dest_path alone would re-download.
+        if dtype == "main_vrs" and (seq_dir / VRS_CANONICAL_NAME).exists():
+            continue
+        if entry.filename.endswith(".zip") and not dest_path.exists():
+            # ZIP was already extracted + deleted on a prior run — check if
+            # the extraction directory has content.
+            if any(save_dir.iterdir()):
+                continue
+
         # Download
         try:
             download_file(entry.download_url, dest_path, entry.file_size_bytes)
@@ -161,7 +172,7 @@ def download_sequence(
             success = False
             continue
 
-        # Extract ZIPs (may already be extracted + deleted from a prior run)
+        # Extract ZIPs
         if entry.filename.endswith(".zip") and dest_path.exists():
             extract_zip(dest_path, save_dir)
 
