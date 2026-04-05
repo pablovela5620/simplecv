@@ -55,6 +55,97 @@ def _encoder_options(name: str) -> dict[str, str]:
     return {}
 
 
+# ─────────────── ffmpeg subprocess transcode ──────────────────────────────── #
+# Used when the source codec (e.g. monochrome H.265 Rext) cannot be handled
+# by PyAV's NVENC path or needs pixel format conversion. ~10x faster than
+# the equivalent PyAV decode→reformat→encode loop because ffmpeg runs the
+# full pipeline in C without Python frame iteration overhead.
+
+
+def pick_ffmpeg_encoder() -> str:
+    """Return the best available ffmpeg AV1/H.265 encoder.
+
+    Prefers NVENC GPU (``av1_nvenc`` > ``hevc_nvenc``) then CPU fallback
+    (``libsvtav1``).
+
+    Raises ``RuntimeError`` if ffmpeg is not installed.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found on PATH. Install ffmpeg to preprocess Aria Gen2 VRS files.")
+
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg -encoders failed: {result.stderr[:200]}")
+
+    encoders: str = result.stdout
+
+    for candidate in ["av1_nvenc", "hevc_nvenc"]:
+        if candidate in encoders:
+            return candidate
+    return "libsvtav1"
+
+
+def ffmpeg_transcode(
+    input_path: Path,
+    output_path: Path,
+    input_format: str = "hevc",
+    fps: int = 30,
+    encoder: str | None = None,
+    cq: int | None = None,
+) -> None:
+    """Transcode a raw video bitstream to yuv420p MP4 via ffmpeg subprocess.
+
+    Uses NVENC GPU encoding by default with constant-quality (CQ) mode.
+    GOP=30, no B-frames.
+
+    Args:
+        input_path: Raw bitstream file (e.g. Annex-B ``.h265``).
+        output_path: Destination ``.mp4`` path.
+        input_format: ffmpeg input format (``hevc``, ``h264``, etc.).
+        fps: Output frame rate.
+        encoder: Explicit encoder name, or ``None`` to auto-detect via
+            :func:`pick_ffmpeg_encoder`.
+        cq: NVENC constant-quality value (0–51, higher = smaller file).
+            ``None`` uses the NVENC default (~28). For CPU fallback the
+            module-level ``_CRF`` is used instead.
+    """
+    import subprocess
+
+    if encoder is None:
+        encoder = pick_ffmpeg_encoder()
+
+    encoder_args: list[str] = [
+        "-c:v", encoder, "-pix_fmt", "yuv420p",
+        "-g", str(_GOP_SIZE), "-bf", "0",
+    ]
+    if "nvenc" in encoder:
+        if cq is not None:
+            encoder_args += ["-cq", str(cq)]
+    elif encoder == "libsvtav1":
+        encoder_args += ["-crf", str(_CRF), "-preset", "8"]
+
+    cmd: list[str] = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        # -r before -i sets the input framerate so ffmpeg doesn't assume
+        # a default (25fps) and resample/duplicate frames.
+        "-r", str(fps),
+        "-f", input_format, "-i", str(input_path),
+        *encoder_args,
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg transcode failed: {result.stderr[-300:]}")
+
+
 # ──────────────────── VideoEncoder (raw packets) ──────────────────────────── #
 
 
