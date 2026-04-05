@@ -23,8 +23,8 @@ from serde.json import from_json, to_json
 
 
 @serde
-class Hot3dStreamCalibration:
-    """Calibration for a single HOT3D camera stream (Aria or Quest 3).
+class AriaStreamCalibration:
+    """Calibration for a single Meta camera stream (Aria or Quest 3).
 
     Both headsets use Meta's FISHEYE624 (FisheyeRadTanThinPrism) projection
     model, but with different parameter layouts:
@@ -62,22 +62,30 @@ class Hot3dStreamCalibration:
     """4x4 transform from camera frame to device (CPF) frame, row-major."""
 
 
+# Backward-compatible aliases
+Hot3dStreamCalibration = AriaStreamCalibration
+
+
 @serde
-class Hot3dSequenceCalibration:
-    """All camera calibrations for a HOT3D sequence."""
+class AriaSequenceCalibration:
+    """All camera calibrations for a sequence (Aria or Quest 3)."""
 
-    streams: list[Hot3dStreamCalibration]
+    streams: list[AriaStreamCalibration]
 
 
-def save_calibration(cal: Hot3dSequenceCalibration, path: Path) -> None:
+# Backward-compatible alias
+Hot3dSequenceCalibration = AriaSequenceCalibration
+
+
+def save_calibration(cal: AriaSequenceCalibration, path: Path) -> None:
     """Serialize calibration to JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(to_json(cal))
 
 
-def load_calibration(path: Path) -> Hot3dSequenceCalibration:
+def load_calibration(path: Path) -> AriaSequenceCalibration:
     """Deserialize calibration from JSON."""
-    return from_json(Hot3dSequenceCalibration, path.read_text())
+    return from_json(AriaSequenceCalibration, path.read_text())
 
 
 # ──────────────────── Headset detection ────────────────────────────────── #
@@ -214,7 +222,7 @@ QUEST_STREAM_ID_TO_LABEL: dict[str, str] = {
 }
 
 
-def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration:
+def parse_online_calibration_first(jsonl_path: Path) -> AriaSequenceCalibration:
     """Parse the first entry of online_calibration.jsonl to get factory calibration.
 
     The online calibration updates per-frame, but the intrinsics change very
@@ -228,7 +236,7 @@ def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration
     with open(jsonl_path) as f:
         first_entry: dict = json.loads(f.readline())
 
-    streams: list[Hot3dStreamCalibration] = []
+    streams: list[AriaStreamCalibration] = []
     for cam in first_entry["CameraCalibrations"]:
         label: str = cam["Label"]
         params: list[float] = cam["Projection"]["Params"]
@@ -255,7 +263,7 @@ def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration
         t_translation: list[float] = t_dev_cam["Translation"]
         device_T_camera: Float32[ndarray, "4 4"] = build_4x4(R_dev_cam, t_translation)
 
-        stream_cal: Hot3dStreamCalibration = Hot3dStreamCalibration(
+        stream_cal: AriaStreamCalibration = AriaStreamCalibration(
             stream_label=label,
             width=width,
             height=height,
@@ -275,13 +283,13 @@ def parse_online_calibration_first(jsonl_path: Path) -> Hot3dSequenceCalibration
         )
         streams.append(stream_cal)
 
-    return Hot3dSequenceCalibration(streams=streams)
+    return AriaSequenceCalibration(streams=streams)
 
 
 # ─────────── camera_models.json parser (Aria + Quest) ─────────────────────── #
 
 
-def parse_camera_models_json(json_path: Path) -> Hot3dSequenceCalibration:
+def parse_camera_models_json(json_path: Path) -> AriaSequenceCalibration:
     """Parse ``camera_models.json`` — works for both Aria and Quest 3.
 
     Aria has 15 projection params: ``[f, cx, cy, k1-k6, p1-p2, s1-s4]``
@@ -294,7 +302,7 @@ def parse_camera_models_json(json_path: Path) -> Hot3dSequenceCalibration:
     with open(json_path) as f:
         cameras: list[dict] = json.load(f)
 
-    streams: list[Hot3dStreamCalibration] = []
+    streams: list[AriaStreamCalibration] = []
     for cam in cameras:
         label: str = cam["label"]
         params: list[float] = cam["projectionParams"]
@@ -330,7 +338,7 @@ def parse_camera_models_json(json_path: Path) -> Hot3dSequenceCalibration:
         # model. Thin-prism terms s1-s4 are dropped — validated to produce <1px
         # error against the full OVR624Distortion model on HOT3D data.
         d: int = distortion_offset
-        stream_cal: Hot3dStreamCalibration = Hot3dStreamCalibration(
+        stream_cal: AriaStreamCalibration = AriaStreamCalibration(
             stream_label=label,
             width=width,
             height=height,
@@ -350,7 +358,7 @@ def parse_camera_models_json(json_path: Path) -> Hot3dSequenceCalibration:
         )
         streams.append(stream_cal)
 
-    return Hot3dSequenceCalibration(streams=streams)
+    return AriaSequenceCalibration(streams=streams)
 
 
 # ─────────── headset_trajectory.csv parser (Aria + Quest) ─────────────────── #

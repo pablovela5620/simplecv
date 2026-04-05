@@ -25,7 +25,7 @@ import pyvrs
 from tqdm import tqdm
 
 from simplecv.data.hot3d_utils import (
-    Hot3dSequenceCalibration,
+    AriaSequenceCalibration,
     parse_online_calibration_first,
     save_calibration,
 )
@@ -201,7 +201,7 @@ def preprocess_sequence(seq_dir: Path, config: PreprocessConfig) -> None:
         print("  [WARN] No online_calibration.jsonl found, skipping")
         return
 
-    cal: Hot3dSequenceCalibration = parse_online_calibration_first(cal_jsonl)
+    cal: AriaSequenceCalibration = parse_online_calibration_first(cal_jsonl)
     for sid in streams:
         label = ARIA_GEN2_STREAM_ID_TO_LABEL.get(sid, sid)
         try:

@@ -18,8 +18,9 @@ from pathlib import Path
 
 from serde import serde
 from serde.json import from_json
+from tqdm import tqdm
 
-from simplecv.apis.download_hot3d import download_file, extract_zip, verify_sha1
+from simplecv.apis.download_utils import download_file, extract_zip, verify_sha1
 
 # ── URL JSON schema (pyserde) ─────────────────────────────────────────── #
 
@@ -183,13 +184,10 @@ def main(config: DownloadConfig) -> None:
     if config.max_sequences is not None:
         seq_names = seq_names[: config.max_sequences]
 
-    print(f"Downloading {len(seq_names)} sequences to {config.output_dir}")
     print(f"Data types: {config.data_types}")
-
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, seq_name in enumerate(seq_names):
-        print(f"\n[{i + 1}/{len(seq_names)}] {seq_name}")
+    for seq_name in tqdm(seq_names, desc="Downloading sequences"):
         ok: bool = download_sequence(
             sequence_name=seq_name,
             sequence_urls=url_json.sequences[seq_name],
@@ -197,9 +195,5 @@ def main(config: DownloadConfig) -> None:
             data_types=config.data_types,
             verify=config.verify_sha1,
         )
-        if ok:
-            print(f"  [OK] {seq_name}")
-        else:
-            print(f"  [PARTIAL] {seq_name}")
-
-    print(f"\nDone. Downloaded {len(seq_names)} sequences to {config.output_dir}")
+        status: str = "OK" if ok else "PARTIAL"
+        tqdm.write(f"  [{status}] {seq_name}")

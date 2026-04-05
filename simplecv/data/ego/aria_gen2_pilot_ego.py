@@ -7,6 +7,7 @@ Reuses HOT3D calibration and trajectory parsers since the MPS format is identica
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,8 +18,8 @@ from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
 from simplecv.data.hot3d_utils import (
-    Hot3dSequenceCalibration,
-    Hot3dStreamCalibration,
+    AriaSequenceCalibration,
+    AriaStreamCalibration,
     load_calibration,
     lookup_nearest_poses,
     parse_mps_closed_loop_trajectory,
@@ -87,13 +88,13 @@ class AriaGen2PilotEgoSequence(BaseEgoSequence[AriaGen2PilotConfig]):
         seq_dir: Path = self._sequence_dir()
 
         # Load calibration
-        cal: Hot3dSequenceCalibration = self._load_calibration(seq_dir)
-        cal_by_label: dict[str, Hot3dStreamCalibration] = {s.stream_label: s for s in cal.streams}
+        cal: AriaSequenceCalibration = self._load_calibration(seq_dir)
+        cal_by_label: dict[str, AriaStreamCalibration] = {s.stream_label: s for s in cal.streams}
 
         # Load trajectory
-        traj_ts_ns: Int64[ndarray, "n_poses"]
-        world_T_device_all: Float32[ndarray, "n_poses 4 4"]
-        traj_ts_ns, world_T_device_all = self._load_trajectory(seq_dir)
+        traj_result: tuple[Int64[ndarray, "n_poses"], Float32[ndarray, "n_poses 4 4"]] = self._load_trajectory(seq_dir)
+        traj_ts_ns: Int64[ndarray, "n_poses"] = traj_result[0]
+        world_T_device_all: Float32[ndarray, "n_poses 4 4"] = traj_result[1]
 
         # Load VRS device-time timestamps per stream
         vrs_ts_path: Path = seq_dir / SIMPLECV_DIR / "timestamps_ns.json"
@@ -126,7 +127,7 @@ class AriaGen2PilotEgoSequence(BaseEgoSequence[AriaGen2PilotConfig]):
         all_cam_dict: dict[str, list[Fisheye62Parameters]] = {}
 
         for label in self._ego_streams:
-            stream_cal: Hot3dStreamCalibration | None = cal_by_label.get(label)
+            stream_cal: AriaStreamCalibration | None = cal_by_label.get(label)
             assert stream_cal is not None, f"No calibration found for stream '{label}'"
 
             device_T_camera: Float32[ndarray, "4 4"] = np.array(stream_cal.device_T_camera, dtype=np.float32)
@@ -156,11 +157,21 @@ class AriaGen2PilotEgoSequence(BaseEgoSequence[AriaGen2PilotConfig]):
                 try:
                     cam_T_world: Float32[ndarray, "4 4"] = np.linalg.inv(world_T_camera)
                 except np.linalg.LinAlgError:
+                    warnings.warn(
+                        f"Singular world_T_camera for '{label}' at frame {frame_idx}, "
+                        f"reusing previous pose.",
+                        stacklevel=2,
+                    )
                     cam_T_world = prev_cam_T_world
                 else:
                     if np.all(np.isfinite(cam_T_world)):
                         prev_cam_T_world = cam_T_world
                     else:
+                        warnings.warn(
+                            f"Non-finite cam_T_world for '{label}' at frame {frame_idx}, "
+                            f"reusing previous pose.",
+                            stacklevel=2,
+                        )
                         cam_T_world = prev_cam_T_world
 
                 extrinsics: Extrinsics = Extrinsics(
@@ -175,7 +186,7 @@ class AriaGen2PilotEgoSequence(BaseEgoSequence[AriaGen2PilotConfig]):
 
         return all_cam_dict
 
-    def _load_calibration(self, seq_dir: Path) -> Hot3dSequenceCalibration:
+    def _load_calibration(self, seq_dir: Path) -> AriaSequenceCalibration:
         """Load calibration, preferring preprocessed cache with correct dimensions."""
         preprocessed: Path = seq_dir / SIMPLECV_DIR / "calibration.json"
         if preprocessed.exists():

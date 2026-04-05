@@ -8,6 +8,7 @@ tracking providing full 21-landmark 3D hand keypoints in device frame.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Generator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -201,26 +202,25 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
         xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
         xyzc_stack[:, :, 3] = np.float32(0.0)
 
-        prev_landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
+        n_gaps_left: int = 0
+        n_gaps_right: int = 0
 
         for frame_idx in range(num_frames):
             landmarks_lr: Float32[ndarray, "2 21 3"] = np.full((2, 21, 3), np.nan, dtype=np.float32)
 
-            # Left hand
+            # Left hand — NaN if not detected (confidence <= 0)
             l_conf: float = float(left_conf_aligned[frame_idx])
             if l_conf > 0:
                 landmarks_lr[0] = left_aligned[frame_idx]
-                prev_landmarks_lr[0] = left_aligned[frame_idx]
             else:
-                landmarks_lr[0] = prev_landmarks_lr[0]
+                n_gaps_left += 1
 
-            # Right hand
+            # Right hand — NaN if not detected (confidence <= 0)
             r_conf: float = float(right_conf_aligned[frame_idx])
             if r_conf > 0:
                 landmarks_lr[1] = right_aligned[frame_idx]
-                prev_landmarks_lr[1] = right_aligned[frame_idx]
             else:
-                landmarks_lr[1] = prev_landmarks_lr[1]
+                n_gaps_right += 1
 
             xyzc_stack[frame_idx] = assembly21_to_coco133(landmarks_lr)
 
@@ -240,6 +240,19 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
                     xyzc_stack[frame_idx, wrist_indices[hand_idx], 3] = np.float32(conf)
                     if not np.isnan(xyzc_stack[frame_idx, thumb_base_indices[hand_idx], :3]).all():
                         xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(conf)
+
+        if n_gaps_left > 0:
+            warnings.warn(
+                f"Left hand not detected in {n_gaps_left}/{num_frames} frames "
+                f"({n_gaps_left / num_frames * 100:.0f}%). Those frames have NaN keypoints.",
+                stacklevel=2,
+            )
+        if n_gaps_right > 0:
+            warnings.warn(
+                f"Right hand not detected in {n_gaps_right}/{num_frames} frames "
+                f"({n_gaps_right / num_frames * 100:.0f}%). Those frames have NaN keypoints.",
+                stacklevel=2,
+            )
 
         # Normalize timestamps to 0-based video timeline
         vrs_start_ns: np.int64 = np.int64(vrs_ref_ts[0])
