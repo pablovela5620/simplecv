@@ -67,8 +67,14 @@ def pick_ffmpeg_encoder() -> str:
 
     Prefers NVENC GPU (``av1_nvenc`` > ``hevc_nvenc``) then CPU fallback
     (``libsvtav1``).
+
+    Raises ``RuntimeError`` if ffmpeg is not installed.
     """
+    import shutil
     import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not found on PATH. Install ffmpeg to preprocess Aria Gen2 VRS files.")
 
     result = subprocess.run(
         ["ffmpeg", "-hide_banner", "-encoders"],
@@ -76,6 +82,9 @@ def pick_ffmpeg_encoder() -> str:
         text=True,
         timeout=10,
     )
+    if result.returncode:
+        raise RuntimeError(f"ffmpeg -encoders failed: {result.stderr[:200]}")
+
     encoders: str = result.stdout
 
     for candidate in ["av1_nvenc", "hevc_nvenc"]:
@@ -125,9 +134,11 @@ def ffmpeg_transcode(
 
     cmd: list[str] = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        # -r before -i sets the input framerate so ffmpeg doesn't assume
+        # a default (25fps) and resample/duplicate frames.
+        "-r", str(fps),
         "-f", input_format, "-i", str(input_path),
         *encoder_args,
-        "-r", str(fps),
         str(output_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)

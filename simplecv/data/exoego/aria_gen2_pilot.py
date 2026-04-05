@@ -180,8 +180,14 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
         vrs_ts_path: Path = seq_dir / "_simplecv" / "timestamps_ns.json"
         assert vrs_ts_path.exists(), f"VRS timestamps not found at {vrs_ts_path}"
         vrs_ts_data: dict = json.loads(vrs_ts_path.read_text())
-        first_stream: str = next(iter(vrs_ts_data))
-        vrs_ref_ts: Int64[ndarray, "n_video"] = np.array(vrs_ts_data[first_stream], dtype=np.int64)
+        rgb_stream_name: str = "camera-rgb"
+        if rgb_stream_name not in vrs_ts_data:
+            available_streams: list[str] = list(vrs_ts_data.keys())
+            raise KeyError(
+                f"RGB timestamps missing from {vrs_ts_path}: expected key "
+                f"{rgb_stream_name!r}, found {available_streams!r}"
+            )
+        vrs_ref_ts: Int64[ndarray, "n_video"] = np.array(vrs_ts_data[rgb_stream_name], dtype=np.int64)
 
         # Nearest-neighbor: for each video frame, find closest hand tracking frame
         insertion: Int64[ndarray, "n_video"] = np.searchsorted(hand_ts_ns, vrs_ref_ts, side="left").astype(np.int64)
@@ -195,7 +201,6 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
         right_aligned: Float32[ndarray, "n_video 21 3"] = right_world[aligned_idx]
         left_conf_aligned: Float32[ndarray, "n_video"] = left_conf[aligned_idx]
         right_conf_aligned: Float32[ndarray, "n_video"] = right_conf[aligned_idx]
-        hand_ts_aligned: Int64[ndarray, "n_video"] = hand_ts_ns[aligned_idx]
 
         # ── Map to COCO-133 ───────────────────────────────────────────────
         num_frames: int = len(vrs_ref_ts)
@@ -254,9 +259,10 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
                 stacklevel=2,
             )
 
-        # Normalize timestamps to 0-based video timeline
-        vrs_start_ns: np.int64 = np.int64(vrs_ref_ts[0])
-        normalized_ts: Int64[ndarray, "num_frames"] = hand_ts_aligned - vrs_start_ns
+        # Labels are aligned one-per-video-frame, so their normalized
+        # timestamps follow the video timeline exactly rather than the
+        # nearest hand sample timestamps (which may have small jitter).
+        normalized_ts: Int64[ndarray, "num_frames"] = (vrs_ref_ts - vrs_ref_ts[0]).astype(np.int64)
 
         return ExoEgoLabels(
             xyzc_stack=xyzc_stack,

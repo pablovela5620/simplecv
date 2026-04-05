@@ -42,7 +42,15 @@ def verify_sha1(file_path: Path, expected_sha1: str) -> bool:
 
 
 def extract_zip(zip_path: Path, extract_dir: Path) -> None:
-    """Extract a ZIP file and remove the archive."""
+    """Extract a ZIP file and remove the archive.
+
+    Validates member paths to prevent Zip Slip (path traversal).
+    """
+    extract_root: Path = extract_dir.resolve()
     with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.infolist():
+            member_path: Path = (extract_root / member.filename).resolve()
+            if extract_root not in member_path.parents and member_path != extract_root:
+                raise ValueError(f"Unsafe ZIP member path {member.filename!r} in {zip_path}")
         zf.extractall(extract_dir)
     zip_path.unlink()

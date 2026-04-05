@@ -1,12 +1,9 @@
 """One-time VRS → AV1 MP4 conversion for Aria Gen2 Pilot sequences.
 
 Aria Gen2 encodes video streams as H.265 inside VRS (unlike Gen1 which uses
-JPEG). The SLAM cameras use monochrome (gray8) H.265 Rext profile which
-neither Rerun nor NVDEC can decode, so we transcode to yuv420p AV1 via
-ffmpeg + NVENC (~4s per 10k-frame stream).
-
-For the RGB stream, the download provides a preview MP4 which is copied
-directly (timestamps still extracted from VRS for pose alignment).
+JPEG). All streams (RGB + SLAM) use monochrome (gray8) H.265 Rext profile
+which neither Rerun nor NVDEC can decode, so we transcode to yuv420p AV1
+via ffmpeg + NVENC (~4s per 10k-frame SLAM stream, ~8s for RGB).
 
 Usage:
     pixi run preprocess-aria-gen2-pilot --root /mnt/8tb/data/aria-gen2-pilot
@@ -73,22 +70,26 @@ class PreprocessConfig:
 # ── VRS helpers ───────────────────────────────────────────────────────── #
 
 
-def _read_vrs_stream(
-    vrs_path: Path, stream_id: str, label: str,
-) -> tuple[list[bytes], list[int]]:
-    """Read raw image blocks + nanosecond timestamps from a VRS stream."""
+def _stream_vrs_to_file(
+    vrs_path: Path, stream_id: str, label: str, dest: Path,
+) -> list[int]:
+    """Stream raw image blocks from VRS directly to a file, collecting timestamps.
+
+    Writes encoded blocks as they're read instead of buffering in memory,
+    keeping peak RAM bounded regardless of stream size.
+    """
     reader: pyvrs.SyncVRSReader = pyvrs.SyncVRSReader(str(vrs_path))
     info: dict = reader.get_stream_info(stream_id)
     n_frames: int = info["data_records_count"]
     filtered = reader.filtered_by_fields(stream_ids=stream_id, record_types="data")
 
-    image_blocks: list[bytes] = []
     timestamps_ns: list[int] = []
-    for rec in tqdm(filtered, total=n_frames, desc=f"Reading {label}", leave=False):
-        if rec.n_image_blocks > 0:
-            image_blocks.append(rec.image_blocks[0].tobytes())
-            timestamps_ns.append(int(rec.timestamp * 1e9))
-    return image_blocks, timestamps_ns
+    with open(dest, "wb") as f:
+        for rec in tqdm(filtered, total=n_frames, desc=f"Reading {label}", leave=False):
+            if rec.n_image_blocks > 0:
+                f.write(rec.image_blocks[0].tobytes())
+                timestamps_ns.append(int(rec.timestamp * 1e9))
+    return timestamps_ns
 
 
 def _get_vrs_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int]:
@@ -99,7 +100,6 @@ def _get_vrs_stream_dimensions(vrs_path: Path, stream_id: str) -> tuple[int, int
         if rec.image_specs:
             spec = rec.image_specs[0]
             return spec.width, spec.height
-        break
     raise ValueError(f"Could not determine dimensions for stream {stream_id}")
 
 
@@ -137,33 +137,32 @@ def transcode_h265_stream_to_mp4(
     label: str = ARIA_GEN2_STREAM_ID_TO_LABEL.get(stream_id, stream_id)
     cq: int | None = None if label == "camera-rgb" else _CQ_SLAM
 
+    # Stream VRS directly to temp file (no in-memory buffering)
     t0: float = time.perf_counter()
-    nal_units, timestamps_ns = _read_vrs_stream(vrs_path, stream_id, label)
+    tmp_h265: Path = Path(tempfile.mktemp(suffix=".h265"))
+    timestamps_ns: list[int] = _stream_vrs_to_file(vrs_path, stream_id, label, tmp_h265)
     t_read: float = time.perf_counter() - t0
 
-    if not nal_units:
+    if not timestamps_ns:
         print(f"  [WARN] No frames in stream {stream_id}")
+        tmp_h265.unlink(missing_ok=True)
         return []
 
-    # Write Annex-B bitstream to temp file, transcode via ffmpeg
+    # Transcode via ffmpeg
     t1: float = time.perf_counter()
-    with tempfile.NamedTemporaryFile(suffix=".h265", delete=False) as tmp:
-        tmp.write(b"".join(nal_units))
-        tmp_path: Path = Path(tmp.name)
-
     ffmpeg_transcode(
-        input_path=tmp_path,
+        input_path=tmp_h265,
         output_path=output_path,
         input_format="hevc",
         fps=_fps_from_timestamps(timestamps_ns),
         encoder=encoder,
         cq=cq,
     )
-    tmp_path.unlink()
+    tmp_h265.unlink()
 
     t_transcode: float = time.perf_counter() - t1
     print(
-        f"  {label}: {len(nal_units)} frames → {output_path.name} "
+        f"  {label}: {len(timestamps_ns)} frames → {output_path.name} "
         f"[{encoder}, cq={cq}] ({t_read + t_transcode:.1f}s: read {t_read:.1f}s, transcode {t_transcode:.1f}s)"
     )
     return timestamps_ns

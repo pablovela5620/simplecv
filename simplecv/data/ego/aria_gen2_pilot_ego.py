@@ -81,8 +81,7 @@ class AriaGen2PilotEgoSequence(BaseEgoSequence[AriaGen2PilotConfig]):
     def load_ego_cams(self) -> dict[str, list[Fisheye62Parameters]]:
         """Load per-frame fisheye camera parameters for all ego cameras.
 
-        Calibration: prefer online_calibration.jsonl (MPS-refined), fall back
-        to camera_models.json.
+        Calibration: online_calibration.jsonl (MPS-refined).
         Trajectory: MPS closed_loop_trajectory.csv (device-time domain, 1kHz).
         """
         seq_dir: Path = self._sequence_dir()
