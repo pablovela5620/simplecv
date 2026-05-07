@@ -1,5 +1,5 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system",
-    "python-envs.pythonProjects": [],
-    "chatgpt.openOnStartup": true
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "chatgpt.openOnStartup": true,
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
