@@ -18760,7 +18760,7 @@ packages:
 - pypi: ./
   name: simplecv
   version: 0.7.2
-  sha256: d659a315aaf5653d75d53b7d06ce3e2697747d5cee26f508064e73383d012fe2
+  sha256: a19bee25d1188f80a88682651959a141a92431d9e42bd8e88a8daa605f177026
   requires_dist:
   - jaxtyping>=0.2.36,<0.3.0
   - numpy>=2.0

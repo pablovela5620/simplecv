@@ -280,6 +280,10 @@ index-url = "https://pypi.org/simple"
 find-links = [{ url = "https://build.rerun.io/commit/3505806/wheels/" }]
 prerelease-mode = "allow"
 
+[tool.pixi.feature.rerun-prerelease.tasks]
+catalog-review = { cmd = "python tools/catalog_review.py", description = "Mount ExoEgo catalog with experimental review tables" }
+table-blueprints-demo = { cmd = "python tools/table_blueprints_demo.py", description = "Run the upstream-style Rerun table blueprint demo" }
+
 [tool.pixi.environments]
 default = { features = [] }
 cuda129 = { features = [
