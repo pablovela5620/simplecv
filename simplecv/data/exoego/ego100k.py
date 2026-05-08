@@ -102,6 +102,10 @@ class Ego100KSequence(BaseExoEgoSequence[Egocentric100KConfig]):
         """Yield exactly one sequence for the configured factory/worker."""
         yield cls(cfg)
 
+    @classmethod
+    def num_sequences_for_config(cls, cfg: Egocentric100KConfig) -> int:
+        return 1
+
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
         return rr.ViewCoordinates.RDF

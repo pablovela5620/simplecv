@@ -1646,7 +1646,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/pybind11-global-3.0.1-pyhc7ab6ef_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pycparser-2.22-pyh29332c3_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/pygments-2.19.2-pyhd8ed1ab_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.50.0-h2b88eb6_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.64.0-h2b88eb6_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pyserde-0.20.1-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/pysocks-1.7.1-pyha55dd90_7.conda
       - conda: https://prefix.dev/conda-forge/noarch/pytest-8.4.2-pyhcf101f3_1.conda
@@ -14729,18 +14729,19 @@ packages:
   name: pyrealsense2
   version: 2.53.1.4623
   sha256: f30aaa13460dec96a78a3df7975274cd2f3dcc66b4c8149cae4f3c7da0f9fb8f
-- conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.50.0-h2b88eb6_0.conda
-  sha256: b2986a00a551ae1c9c5624a153a9bde90ef12cfdb887ca01fe0760be119138dc
-  md5: 61e6cf88b395c7af0e1e21490dbf4cdf
+- conda: https://prefix.dev/conda-forge/linux-64/pyrefly-0.64.0-h2b88eb6_0.conda
+  sha256: fcb259e185ad2fe9bee9cdb7d531a770fb7c9adea8db2232af44a5cb965129e2
+  md5: 61ad7da8e192aa83259a7f399f01c3d1
   depends:
-  - __glibc >=2.17,<3.0.a0
   - libgcc >=14
+  - __glibc >=2.17,<3.0.a0
   constrains:
   - __glibc >=2.17
   license: MIT
+  license_family: MIT
   purls: []
-  size: 9883406
-  timestamp: 1769598586573
+  size: 10954978
+  timestamp: 1778116779525
 - conda: https://prefix.dev/conda-forge/noarch/pyserde-0.20.1-pyhd8ed1ab_0.conda
   sha256: a3af70ef83a4010e71933df3162d7a086c42a5a7fd6d1b6020adecc2730affcf
   md5: c468b661f7fd8a17e7cf302dbed7844e
@@ -16281,7 +16282,7 @@ packages:
 - pypi: ./
   name: simplecv
   version: 0.7.2
-  sha256: cf73d24ad209ae657d702cc4522bf545f648463f38195782b27e9d07cc82f681
+  sha256: 525f4760fba43b7f44a6e2ac26e8b30bca42ee17c6aad98bff3cd53fb4199f30
   requires_dist:
   - jaxtyping>=0.2.36,<0.3.0
   - numpy>=2.0

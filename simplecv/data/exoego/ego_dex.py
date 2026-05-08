@@ -17,6 +17,7 @@ from simplecv.data.ego.ego_dex import EgoDexSequence as EgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, avp_to_coco_hands
 
 
@@ -35,6 +36,10 @@ class EgoDexSequence(BaseExoEgoSequence[EgoDexConfig]):
     def __init__(self, cfg: EgoDexConfig) -> None:
         self._ego_stream_names: list[str] = []
         super().__init__(cfg)
+
+    @classmethod
+    def sequence_identity_for_config(cls, cfg: EgoDexConfig) -> SequenceIdentity:
+        return SequenceIdentity(dataset="ego-dex", parts=(cfg.split, cfg.sequence_name, f"episode_{cfg.episode:04d}"))
 
     def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
         canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
@@ -143,20 +148,28 @@ class EgoDexSequence(BaseExoEgoSequence[EgoDexConfig]):
             - Prints subject ID and sequence name for each iteration using `icecream.ic`.
             - Pauses execution for user input after each sequence (likely for debugging).
         """
-        root: Path = cfg.root_directory
-        sequence_dirs: list[Path] = natsorted(
-            [d for d in (root / cfg.split).iterdir() if d.is_dir()],
-        )
-        for sequence_dir in sequence_dirs:
-            episodes_int: list[int] = natsorted([int(episode.stem) for episode in sequence_dir.glob("*.hdf5")])
-            for episode in episodes_int:
-                new_cfg = replace(
-                    cfg,
-                    sequence_name=sequence_dir.name,
-                    episode=episode,
-                )
+        for sequence_dir, episode in cls._iter_episode_specs(cfg):
+            new_cfg = replace(
+                cfg,
+                sequence_name=sequence_dir.name,
+                episode=episode,
+            )
 
-                yield cls(new_cfg)
+            yield cls(new_cfg)
+
+    @classmethod
+    def num_sequences_for_config(cls, cfg: EgoDexConfig) -> int:
+        return len(cls._iter_episode_specs(cfg))
+
+    @staticmethod
+    def _iter_episode_specs(cfg: EgoDexConfig) -> list[tuple[Path, int]]:
+        root: Path = cfg.root_directory
+        sequence_dirs: list[Path] = natsorted([d for d in (root / cfg.split).iterdir() if d.is_dir()])
+        return [
+            (sequence_dir, episode)
+            for sequence_dir in sequence_dirs
+            for episode in natsorted([int(episode_path.stem) for episode_path in sequence_dir.glob("*.hdf5")])
+        ]
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:

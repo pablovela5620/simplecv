@@ -222,7 +222,13 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
             "e4": [],
         }
         ego_cam: EgoExtri211 | EgoExtri843
-        for _, ego_cam in tqdm(ego_extri_cameras.items(), desc="Processing ego cameras"):
+        for _, ego_cam in tqdm(
+            ego_extri_cameras.items(),
+            desc="Processing ego cameras",
+            disable=not self.config.verbose,
+            leave=False,
+            position=1,
+        ):
             for key in ego_fisheye_dict:
                 cam_T_world = getattr(ego_cam, key)
                 extri: Extrinsics = Extrinsics(

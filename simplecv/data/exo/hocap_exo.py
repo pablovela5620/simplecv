@@ -169,7 +169,15 @@ class HocapExoSequence(BaseExoSequence[HocapConfig]):
 
         xyz_list: list[Float32[ndarray, "2 21 3"]] = []
         uv_stack_dict: dict[str, Float32[ndarray, "num_frames 2 21 2"]] = {}
-        for cam_idx, exo_cam in enumerate(tqdm(self.exo_cam_list, desc="Loading 3D labels")):
+        for cam_idx, exo_cam in enumerate(
+            tqdm(
+                self.exo_cam_list,
+                desc="Loading 3D labels",
+                disable=not self.config.verbose,
+                leave=False,
+                position=1,
+            )
+        ):
             camera_label_path: Path = label_path / exo_cam.name
             assert camera_label_path.exists(), f"Path {camera_label_path} does not exist."
             npz_paths: list[Path] = sorted(camera_label_path.glob("*.npz"))
@@ -221,7 +229,13 @@ class HocapExoSequence(BaseExoSequence[HocapConfig]):
 
         video_path_list: list[Path] = []
         # Load video paths for each exo camera, in
-        for exo_cam in tqdm(self.load_exo_cams(), desc="Loading videos"):
+        for exo_cam in tqdm(
+            self.load_exo_cams(),
+            desc="Loading videos",
+            disable=not self.config.verbose,
+            leave=False,
+            position=1,
+        ):
             img_dir: Path = sequence_path / exo_cam.name
             assert img_dir.exists(), f"Path {img_dir} does not exist."
             video_path: Path = img_dir / "output.mp4"
@@ -245,7 +259,13 @@ class HocapExoSequence(BaseExoSequence[HocapConfig]):
         assert sequence_path.exists(), f"Path {sequence_path} does not exist."
         # First, collect all depth paths per camera
         camera_depth_paths: dict[ExoCameraIDs, list[Path]] = {}
-        for exo_cam in tqdm(self.exo_cam_list, desc="Indexing depth images"):
+        for exo_cam in tqdm(
+            self.exo_cam_list,
+            desc="Indexing depth images",
+            disable=not self.config.verbose,
+            leave=False,
+            position=1,
+        ):
             depth_dir: Path = sequence_path / exo_cam.name
             assert depth_dir.exists(), f"Path {depth_dir} does not exist."
             depth_paths: list[Path] = sorted(depth_dir.glob("*.png"))
@@ -296,7 +316,8 @@ class HocapExoSequence(BaseExoSequence[HocapConfig]):
             match hocap_intri.serial:
                 # ego perspective
                 case serial if "hololens" in serial:
-                    print(f"Found HoloLens camera: {hocap_intri.serial}")
+                    if self.config.verbose:
+                        tqdm.write(f"Found HoloLens camera: {hocap_intri.serial}")
                 # exo perspective
                 case _:
                     intri = Intrinsics(

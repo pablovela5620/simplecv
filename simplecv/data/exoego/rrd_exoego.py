@@ -395,6 +395,10 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     def iter_episode_sequences(cls, cfg: RRDExoEgoConfig) -> Generator["RRDSequence", None, None]:
         raise NotImplementedError("RRDSequence.iter_episode_sequences is not implemented.")
 
+    @classmethod
+    def num_sequences_for_config(cls, cfg: RRDExoEgoConfig) -> int:
+        raise NotImplementedError("RRDSequence.num_sequences_for_config is not implemented.")
+
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
         """Get mapping from joint ID to joint name."""

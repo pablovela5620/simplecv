@@ -10,6 +10,7 @@ from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from serde.json import from_json
+from tqdm import tqdm
 
 from simplecv.apis.view_umetrack_data import UmeTrackAnnotation
 from simplecv.data.ego.base_ego import BaseEgoSequence
@@ -17,6 +18,7 @@ from simplecv.data.ego.umetrack_ego import UmeTrackEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, SingleHandPose, landmarks_from_hand_pose
 
@@ -40,6 +42,19 @@ class UmeTrackSequence(BaseExoEgoSequence[UmeTrackConfig]):
         self._ego_stream_names: list[str] = []
         self._exo_stream_names: list[str] = []
         super().__init__(cfg)
+
+    @classmethod
+    def sequence_identity_for_config(cls, cfg: UmeTrackConfig) -> SequenceIdentity:
+        return SequenceIdentity(
+            dataset="umetrack",
+            parts=(
+                cfg.data_type,
+                cfg.hand_interaction,
+                cfg.split,
+                f"user_{cfg.user:02d}",
+                f"recording_{cfg.recording_id:02d}",
+            ),
+        )
 
     def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
         canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
@@ -174,9 +189,35 @@ class UmeTrackSequence(BaseExoEgoSequence[UmeTrackConfig]):
         Yields:
             Instances of :class:`UmeTrackSequence`, one per recording discovered on disk.
         """
+        for data_type, hand_interaction, split, user_id, recording_id, recording_dir in cls._iter_episode_specs(cfg):
+            episode_cfg: UmeTrackConfig = replace(
+                cfg,
+                data_type=data_type,
+                hand_interaction=hand_interaction,
+                split=split,
+                user=user_id,
+                recording_id=recording_id,
+                sequence_name=(
+                    f"{data_type}/{hand_interaction}/{split}/"
+                    f"user_{user_id:02d}/recording_{recording_id:02d}"
+                ),
+            )
+
+            try:
+                yield cls(episode_cfg)
+            except Exception as exc:  # pragma: no cover - defensive skip for corrupted recordings
+                tqdm.write(f"[skip] {recording_dir}: {exc}")
+
+    @classmethod
+    def num_sequences_for_config(cls, cfg: UmeTrackConfig) -> int:
+        return len(cls._iter_episode_specs(cfg))
+
+    @staticmethod
+    def _iter_episode_specs(cfg: UmeTrackConfig) -> list[tuple[str, str, str, int, int, Path]]:
         root_dir: Path = cfg.root_directory
         assert root_dir.exists(), f"UmeTrack root directory {root_dir} does not exist."
 
+        episode_specs: list[tuple[str, str, str, int, int, Path]] = []
         data_type_dirs: list[Path] = natsorted([d for d in root_dir.iterdir() if d.is_dir()])
         for data_type_dir in data_type_dirs:
             data_type: str = data_type_dir.name
@@ -208,24 +249,10 @@ class UmeTrackSequence(BaseExoEgoSequence[UmeTrackConfig]):
                                 recording_id: int = int(recording_dir.name.split("_")[-1])
                             except ValueError:
                                 continue
-
-                            episode_cfg: UmeTrackConfig = replace(
-                                cfg,
-                                data_type=data_type,
-                                hand_interaction=hand_interaction,
-                                split=split,
-                                user=user_id,
-                                recording_id=recording_id,
-                                sequence_name=(
-                                    f"{data_type}/{hand_interaction}/{split}/"
-                                    f"user_{user_id:02d}/recording_{recording_id:02d}"
-                                ),
+                            episode_specs.append(
+                                (data_type, hand_interaction, split, user_id, recording_id, recording_dir)
                             )
-
-                            try:
-                                yield cls(episode_cfg)
-                            except Exception as exc:  # pragma: no cover - defensive skip for corrupted recordings
-                                print(f"[skip] {recording_dir}: {exc}")
+        return episode_specs
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:

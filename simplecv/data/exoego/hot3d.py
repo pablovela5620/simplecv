@@ -19,12 +19,14 @@ from jaxtyping import Float32, Int, Int64
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
+from tqdm import tqdm
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.hot3d_ego import Hot3dEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.hot3d_utils import build_4x4, detect_headset, load_timecode_to_devicetime_mapping, quat_wxyz_to_matrix
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, SingleHandPose, landmarks_from_hand_pose
@@ -60,6 +62,10 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
 
     def _sequence_dir(self) -> Path:
         return Path(self.config.root_directory) / self.config.sequence_name
+
+    @classmethod
+    def sequence_identity_for_config(cls, cfg: Hot3dConfig) -> SequenceIdentity:
+        return SequenceIdentity(dataset=f"hot3d-{cfg.headset}", parts=(cfg.sequence_name,))
 
     def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
         canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
@@ -357,6 +363,22 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         Yields one ``Hot3dSequence`` per sequence folder that contains
         at least one preprocessed stream MP4 under ``_simplecv/``.
         """
+        for seq_dir in cls._iter_sequence_dirs(cfg):
+            episode_cfg: Hot3dConfig = replace(
+                cfg,
+                sequence_name=seq_dir.name,
+            )
+            try:
+                yield cls(episode_cfg)
+            except Exception as exc:  # pragma: no cover
+                tqdm.write(f"[skip] {seq_dir.name}: {exc}")
+
+    @classmethod
+    def num_sequences_for_config(cls, cfg: Hot3dConfig) -> int:
+        return len(cls._iter_sequence_dirs(cfg))
+
+    @staticmethod
+    def _iter_sequence_dirs(cfg: Hot3dConfig) -> list[Path]:
         root: Path = cfg.root_directory
         assert root.exists(), f"HOT3D root directory {root} does not exist."
 
@@ -365,20 +387,7 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
             simplecv_dir: Path = d / "_simplecv"
             return simplecv_dir.is_dir() and any(simplecv_dir.glob("*.mp4"))
 
-        seq_dirs: list[Path] = natsorted([
-            d for d in root.iterdir()
-            if d.is_dir() and _has_preprocessed_streams(d)
-        ])
-
-        for seq_dir in seq_dirs:
-            episode_cfg: Hot3dConfig = replace(
-                cfg,
-                sequence_name=seq_dir.name,
-            )
-            try:
-                yield cls(episode_cfg)
-            except Exception as exc:  # pragma: no cover
-                print(f"[skip] {seq_dir.name}: {exc}")
+        return natsorted([d for d in root.iterdir() if d.is_dir() and _has_preprocessed_streams(d)])
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
