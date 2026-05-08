@@ -27,7 +27,12 @@ from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
-from simplecv.data.hot3d_utils import build_4x4, detect_headset, load_timecode_to_devicetime_mapping, quat_wxyz_to_matrix
+from simplecv.data.hot3d_utils import (
+    build_4x4,
+    detect_headset,
+    load_timecode_to_devicetime_mapping,
+    quat_wxyz_to_matrix,
+)
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, SingleHandPose, landmarks_from_hand_pose
 
@@ -175,11 +180,17 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         insertion_indices: Int64[ndarray, "n_video"] = np.searchsorted(
             devicetime_ns_all, vrs_ref_ts, side="left"
         ).astype(np.int64)
-        left_indices: Int64[ndarray, "n_video"] = np.clip(insertion_indices - 1, 0, len(devicetime_ns_all) - 1).astype(np.int64)
-        right_indices: Int64[ndarray, "n_video"] = np.clip(insertion_indices, 0, len(devicetime_ns_all) - 1).astype(np.int64)
+        left_indices: Int64[ndarray, "n_video"] = np.clip(insertion_indices - 1, 0, len(devicetime_ns_all) - 1).astype(
+            np.int64
+        )
+        right_indices: Int64[ndarray, "n_video"] = np.clip(insertion_indices, 0, len(devicetime_ns_all) - 1).astype(
+            np.int64
+        )
         left_deltas: Int64[ndarray, "n_video"] = np.abs(vrs_ref_ts - devicetime_ns_all[left_indices])
         right_deltas: Int64[ndarray, "n_video"] = np.abs(devicetime_ns_all[right_indices] - vrs_ref_ts)
-        rgb_label_indices: Int64[ndarray, "n_video"] = np.where(left_deltas <= right_deltas, left_indices, right_indices).astype(np.int64)
+        rgb_label_indices: Int64[ndarray, "n_video"] = np.where(
+            left_deltas <= right_deltas, left_indices, right_indices
+        ).astype(np.int64)
 
         frame_data_filtered: list[dict] = [frame_data[int(i)] for i in rgb_label_indices]
         devicetime_ns_filtered: Int64[ndarray, "n_video"] = devicetime_ns_all[rgb_label_indices]
@@ -224,9 +235,7 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                     # Step 2: Run UmeTrack forward kinematics to get 21 hand landmarks.
                     # landmarks_from_hand_pose applies the hand model skeleton + skinning
                     # with X-flip for right hand (hand_idx=1).
-                    joint_angles: Float32[ndarray, "22"] = np.array(
-                        pose_data["joint_angles"], dtype=np.float32
-                    )
+                    joint_angles: Float32[ndarray, "22"] = np.array(pose_data["joint_angles"], dtype=np.float32)
                     hand_pose: SingleHandPose = SingleHandPose(
                         joint_angles=joint_angles,
                         wrist_xform=wrist_xform,
