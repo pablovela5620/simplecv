@@ -276,13 +276,13 @@ pyrealsense2 = "==2.53.1.4623"
 # T265 diagnostics helpers (run with: pixi run -e t265 <task>)
 t265-enum = { cmd = "rs-enumerate-devices", description = "List RealSense devices using librealsense CLI" }
 
-[tool.pixi.feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.32.0a1+dev", extras = ["datafusion"] }
+# [tool.pixi.feature.rerun-prerelease.pypi-dependencies]
+# rerun-sdk = { version = "==0.32.0a1+dev", extras = ["datafusion"] }
 
-[tool.pixi.feature.rerun-prerelease.pypi-options]
-index-url = "https://pypi.org/simple"
-find-links = [{ url = "https://build.rerun.io/commit/3505806/wheels/" }]
-prerelease-mode = "allow"
+# [tool.pixi.feature.rerun-prerelease.pypi-options]
+# index-url = "https://pypi.org/simple"
+# find-links = [{ url = "https://build.rerun.io/commit/3505806/wheels/" }]
+# prerelease-mode = "allow"
 
 [tool.pixi.environments]
 default = { features = [] }
@@ -293,7 +293,7 @@ t265 = { features = ["t265"], no-default-feature = true }
 gpu = { features = ["cuda129"], solve-group = "cuda129" }
 dev = { features = ["dev", "cuda129"], solve-group = "cuda129" }
 notebook = { features = ["notebook"] }
-rerun-prerelease = { features = ["rerun-prerelease", "dev"] }
+# rerun-prerelease = { features = ["rerun-prerelease", "dev"] }
 
 
 # Minimal environment for running data extraction notebooks without heavy ML deps
