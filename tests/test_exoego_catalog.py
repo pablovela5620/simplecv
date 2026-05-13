@@ -1,8 +1,23 @@
+from __future__ import annotations
+
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
-from simplecv.apis.exoego_forge_catalog import DEFAULT_CATALOG_DATASETS, build_exoego_catalog_blueprint, discover_rrd_uris
+from simplecv.apis.exoego_forge_catalog import (
+    ASSEMBLY101_LARGE_CATALOG_DATASETS,
+    ASSEMBLY101_LARGE_RRD_ROOT,
+    DEFAULT_CATALOG_DATASETS,
+    Assembly101LargeCatalogConfig,
+    _assembly101_dataset_dir,
+    _register_default_dataset_blueprint,
+    build_assembly101_table_card_blueprint,
+    build_exoego_catalog_blueprint,
+    build_rrd_index_rows_from_dataset,
+    build_rrd_index_rows_from_paths,
+    discover_rrd_uris,
+)
 from simplecv.data.exoego.aria_gen2_pilot import AriaGen2PilotConfig, AriaGen2PilotSequence
 from simplecv.data.exoego.assembly101 import Assembly101Config, Assembly101Sequence
 from simplecv.data.exoego.ego_dex import EgoDexConfig, EgoDexSequence
@@ -101,6 +116,137 @@ def test_discover_rrd_uris_groups_by_dataset(tmp_path: Path) -> None:
     assert uris["aria-gen2"] == [aria_rrd.resolve().as_uri()]
     assert uris["hocap"] == [hocap_rrd.resolve().as_uri()]
     assert uris["hot3d-aria"] == [hot3d_aria_rrd.resolve().as_uri()]
+
+
+def test_assembly101_large_catalog_config_filters_to_assembly101(tmp_path: Path) -> None:
+    assembly_rrd: Path = tmp_path / "assembly101" / "all" / "seq_01.rrd"
+    hocap_rrd: Path = tmp_path / "hocap" / "subject_8" / "20231024_180733.rrd"
+    for path in (assembly_rrd, hocap_rrd):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a real rrd")
+
+    config: Assembly101LargeCatalogConfig = Assembly101LargeCatalogConfig()
+    uris: dict[str, list[str]] = discover_rrd_uris(tmp_path, datasets=config.datasets)
+
+    assert config.rrd_root == ASSEMBLY101_LARGE_RRD_ROOT
+    assert config.datasets == ASSEMBLY101_LARGE_CATALOG_DATASETS
+    assert config.datasets == ("assembly101",)
+    assert set(config.datasets).issubset(DEFAULT_CATALOG_DATASETS)
+    assert uris == {"assembly101": [assembly_rrd.resolve().as_uri()]}
+
+
+class _FakeSegmentTable:
+    def __init__(self, table: pa.Table) -> None:
+        self._table: pa.Table = table
+
+    def collect(self) -> list[pa.RecordBatch]:
+        return self._table.to_batches()
+
+
+class _FakeDatasetEntry:
+    def __init__(self, table: pa.Table) -> None:
+        self._table: pa.Table = table
+
+    def segment_table(self) -> _FakeSegmentTable:
+        return _FakeSegmentTable(self._table)
+
+    def segment_url(self, recording_id: str) -> str:
+        return f"rerun+http://127.0.0.1:9988/dataset/fake?segment_id={recording_id}"
+
+
+class _FakeBlueprintDatasetEntry:
+    def __init__(self) -> None:
+        self.registered_blueprints: list[tuple[str, bool]] = []
+
+    def register_blueprint(self, blueprint_uri: str, *, set_default: bool) -> None:
+        self.registered_blueprints.append((blueprint_uri, set_default))
+
+
+class _FakeServer:
+    pass
+
+
+def test_build_rrd_index_rows_from_paths(tmp_path: Path) -> None:
+    first_rrd: Path = tmp_path / "assembly101" / "all" / "seq_01.rrd"
+    second_rrd: Path = tmp_path / "assembly101" / "all" / "nested" / "seq_02.rrd"
+    for path in (first_rrd, second_rrd):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a real rrd")
+
+    rows = build_rrd_index_rows_from_paths(tmp_path)
+
+    assert [row.id for row in rows] == [0, 1]
+    assert [row.sequence_key for row in rows] == ["all/nested/seq_02", "all/seq_01"]
+    assert rows[0].recording_uri == str(second_rrd.resolve())
+    assert rows[1].path == str(first_rrd.resolve())
+    assert [row.size_bytes for row in rows] == [len(b"not a real rrd"), len(b"not a real rrd")]
+
+
+def test_assembly101_dataset_dir_accepts_direct_optimized_root(tmp_path: Path) -> None:
+    optimized_root: Path = tmp_path / "assembly101" / "optimized"
+    all_dir: Path = optimized_root / "all"
+    all_dir.mkdir(parents=True)
+
+    assert _assembly101_dataset_dir(optimized_root) == optimized_root.resolve()
+
+
+def test_assembly101_dataset_dir_accepts_catalog_root(tmp_path: Path) -> None:
+    dataset_dir: Path = tmp_path / "assembly101"
+    all_dir: Path = dataset_dir / "all"
+    all_dir.mkdir(parents=True)
+
+    assert _assembly101_dataset_dir(tmp_path) == dataset_dir.resolve()
+
+
+def test_register_default_dataset_blueprint_registers_full_segment_blueprint() -> None:
+    dataset_entry = _FakeBlueprintDatasetEntry()
+    server = _FakeServer()
+
+    blueprint_path: Path = _register_default_dataset_blueprint(
+        server,  # type: ignore[arg-type]
+        dataset_entry,
+        dataset_name="assembly101",
+    )
+
+    assert blueprint_path.is_file()
+    assert dataset_entry.registered_blueprints == [(blueprint_path.resolve().as_uri(), True)]
+
+
+def test_build_rrd_index_rows_from_registered_dataset_segments(tmp_path: Path) -> None:
+    first_rrd: Path = tmp_path / "assembly101" / "all" / "seq_01.rrd"
+    second_rrd: Path = tmp_path / "assembly101" / "all" / "nested" / "seq_02.rrd"
+    for path in (first_rrd, second_rrd):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a real rrd")
+
+    segment_table: pa.Table = pa.table(
+        {
+            "rerun_segment_id": [
+                "assembly101__all__seq_01",
+                "assembly101__all__nested__seq_02",
+            ],
+            "property:info:sequence_key": [
+                ["all/seq_01"],
+                ["all/nested/seq_02"],
+            ],
+        }
+    )
+    rows = build_rrd_index_rows_from_dataset(
+        _FakeDatasetEntry(segment_table),
+        dataset_dir=tmp_path / "assembly101",
+    )
+
+    assert [row.id for row in rows] == [0, 1]
+    assert [row.sequence_key for row in rows] == ["all/nested/seq_02", "all/seq_01"]
+    assert rows[0].recording_uri.endswith("segment_id=assembly101__all__nested__seq_02")
+    assert rows[1].path == str(first_rrd.resolve())
+    assert [row.size_bytes for row in rows] == [len(b"not a real rrd"), len(b"not a real rrd")]
+
+
+def test_assembly101_table_card_blueprint_builds() -> None:
+    blueprint = build_assembly101_table_card_blueprint(timeline="video_time")
+
+    assert blueprint is not None
 
 
 def test_catalog_blueprints_exist_for_default_datasets() -> None:
