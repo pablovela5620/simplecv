@@ -5,11 +5,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rerun as rr
+import rerun.experimental as rre
 from jaxtyping import Float32, Int, UInt8
 from numpy import ndarray
 from rerun.catalog import Schema
 from rerun.components.view_coordinates import ViewCoordinates
-from rerun.recording import Recording, load_recording
 
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.rrd_ego import RRDEgoSequence
@@ -29,11 +29,11 @@ class RRDExoEgoConfig(BaseExoEgoDatasetConfig):
 
 
 class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
-    _recording: Recording | None = None
+    _recording: rre.LazyStore | None = None
 
     def __init__(self, cfg: RRDExoEgoConfig) -> None:
         # Load once and share with ego/exo/labels.
-        self._recording = load_recording(str(cfg.rrd_path))
+        self._recording = rre.RrdReader(cfg.rrd_path).store()
         self._query_session = RRDQuerySession(cfg.rrd_path)
         super().__init__(cfg)
 
@@ -146,7 +146,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
         if self._recording is None:
-            self._recording = load_recording(str(rrd_path))
+            self._recording = rre.RrdReader(rrd_path).store()
 
         timeline: str = "video_time"
         entity_path: str = "world/gt/coco133_xyz"
@@ -197,7 +197,7 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
         if not rrd_path.exists():
             return None
 
-        recording: Recording | None = self._recording
+        recording: rre.LazyStore | None = self._recording
         assert recording is not None, f"RRD recording at {rrd_path} could not be loaded."
         schema: Schema = recording.schema()
         entity_path: str = "world/gt/env_mesh"

@@ -8,18 +8,18 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import rerun.experimental as rre
 from jaxtyping import Float32
 from numpy import ndarray
-from rerun.recording import Recording
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.exo.base_exo import BaseExoSequence, ExoData
-from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 from simplecv.rerun_log_utils import (
     extract_asset_video_blob_fast,
     mux_h264_to_mp4,
     read_h264_samples_from_rrd,
 )
+from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 from simplecv.video_io import TorchCodecMultiVideoReader
 
 if TYPE_CHECKING:
@@ -46,13 +46,13 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
     and decodes in-memory using TorchCodec (~30x faster than disk-based remuxing).
     """
 
-    _recording: Recording | None = None
+    _recording: rre.LazyStore | None = None
     _video_blobs: dict[str, bytes] | None = None
 
     def __init__(
         self,
         cfg: RRDExoEgoConfig,
-        recording: Recording | None = None,
+        recording: rre.LazyStore | None = None,
         query_session: RRDQuerySession | None = None,
     ) -> None:
         self._recording = recording
@@ -168,7 +168,7 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         intrinsics/extrinsics get `None` so the list stays synchronized with video readers.
         """
         assert self._recording is not None, "Recording must be provided by caller"
-        recording: Recording = self._recording
+        recording: rre.LazyStore = self._recording
         schema = recording.schema()
         timeline: str = getattr(self, "_video_timeline", self._select_timeline(schema))
         camera_streams: list[_RRDCameraStream] = getattr(

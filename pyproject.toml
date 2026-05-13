@@ -15,7 +15,7 @@ dependencies = [
     "opencv-python>=4.10.0",
     "pyserde>=0.20.0,<0.30",
     "typing-extensions>=4.1.0,<4.13.0",
-    "rerun-sdk[datafusion]>=0.30",
+    "rerun-sdk[datafusion]>=0.32",
     "tyro>=0.9.1",
     "tqdm",
     "hf-transfer>=0.1.9",
@@ -68,6 +68,10 @@ description = "Download Aria Gen2 Pilot sequences from CDN URLs"
 [tool.pixi.tasks.preprocess-aria-gen2-pilot]
 cmd = "python tools/preprocess_aria_gen2_pilot.py"
 description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for simplecv"
+
+[tool.pixi.tasks.catalog-assembly101-large]
+cmd = "python tools/catalog_assembly101_large.py"
+description = "Host a lightweight URL index for the generated full-size Assembly101 RRD catalog"
 
 [tool.pixi.tasks._download-example-polycam-data]
 cmd = """
@@ -223,7 +227,7 @@ beartype = ">=0.21.0,<0.22"
 ruff = ">=0.12.7,<0.13"
 pytest = ">=8.3.3,<9"
 hypothesis = ">=6.112.1,<7"
-pyrefly = "==0.64.0"
+pyrefly = ">=1.0.0"
 types-tqdm = ">=4.67.0,<5"
 pyarrow-stubs = "*"
 
@@ -279,10 +283,6 @@ rerun-sdk = { version = "==0.32.0a1+dev", extras = ["datafusion"] }
 index-url = "https://pypi.org/simple"
 find-links = [{ url = "https://build.rerun.io/commit/3505806/wheels/" }]
 prerelease-mode = "allow"
-
-[tool.pixi.feature.rerun-prerelease.tasks]
-catalog-review = { cmd = "python tools/catalog_review.py", description = "Mount ExoEgo catalog with experimental review tables" }
-table-blueprints-demo = { cmd = "python tools/table_blueprints_demo.py", description = "Run the upstream-style Rerun table blueprint demo" }
 
 [tool.pixi.environments]
 default = { features = [] }
