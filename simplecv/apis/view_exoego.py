@@ -209,35 +209,16 @@ def create_container(
         spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
     )
 
-    def _per_camera_panel(video_log_path: Path) -> rrb.ContainerLike:
-        """Side-by-side view of VideoStream vs AssetVideo for the same camera.
-
-        Tagged with explicit ``contents`` (entity-path filter) so each pane
-        renders only its own archetype — without the filter both videos
-        land in the same Spatial2DView and stack on top of each other.
-        """
-        stream_path: Path = video_log_path
-        asset_path: Path = video_log_path.parent / "video_assetvideo"
-        return rrb.Horizontal(
-            contents=[
-                rrb.Spatial2DView(
-                    origin=f"{stream_path}",
-                    name="VideoStream",
-                    contents=[f"+ {stream_path}/**"],
-                ),
-                rrb.Spatial2DView(
-                    origin=f"{asset_path}",
-                    name="AssetVideo",
-                    contents=[f"+ {asset_path}/**"],
-                ),
-            ],
-        )
-
     if ego_video_log_paths is not None:
         ego_video_log_paths = [p for p in ego_video_log_paths if _should_include(p)]
     if ego_video_log_paths:
         ego_view = rrb.Vertical(
-            contents=[_per_camera_panel(p) for p in ego_video_log_paths]
+            contents=[
+                rrb.Tabs(
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                )
+                for video_log_path in ego_video_log_paths
+            ]
         )
         main_view = rrb.Horizontal(
             contents=[main_view, ego_view],
@@ -249,8 +230,10 @@ def create_container(
     if exo_video_log_paths:
         exo_view = rrb.Horizontal(
             contents=[
-                _per_camera_panel(p)
-                for p in exo_video_log_paths[:max_exo_videos_to_log]
+                rrb.Tabs(
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                )
+                for video_log_path in exo_video_log_paths[:max_exo_videos_to_log]
             ]
         )
         main_view = rrb.Vertical(
@@ -845,15 +828,6 @@ def setup_scene(
             exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
                 video_source, video_log_path, timeline=timeline, recording=recording
             )
-            # Also log via AssetVideo at a sibling path for A/B comparison.
-            asset_video_log_path: Path = cam_log_path / "pinhole" / "video_assetvideo"
-            log_video(
-                video_source,
-                asset_video_log_path,
-                timeline=timeline,
-                method="asset_video",
-                recording=recording,
-            )
             exo_timestamp_list.append(exo_timestamps_ns)
         exo_video_log_paths = exo_video_log_path_list
 
@@ -884,15 +858,6 @@ def setup_scene(
             # Log video asset which is referred to by frame references.
             ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
                 video_source, ego_video_log_path, timeline=timeline, recording=recording
-            )
-            # Also log via AssetVideo at a sibling path for A/B comparison.
-            ego_asset_video_log_path: Path = cam_log_path / "pinhole" / "video_assetvideo"
-            log_video(
-                video_source,
-                ego_asset_video_log_path,
-                timeline=timeline,
-                method="asset_video",
-                recording=recording,
             )
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list

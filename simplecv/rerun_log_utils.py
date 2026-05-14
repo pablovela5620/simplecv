@@ -217,6 +217,23 @@ def log_pinhole(
 
 VideoLogMethod = Literal["video_stream", "asset_video"]
 
+_CODEC_MAP: dict[str, rr.VideoCodec] = {
+    "h264": rr.VideoCodec.H264,
+    "hevc": rr.VideoCodec.H265,
+    "h265": rr.VideoCodec.H265,
+    "av1": rr.VideoCodec.AV1,
+    "vp9": rr.VideoCodec.VP9,
+    "vp8": rr.VideoCodec.VP8,
+}
+"""PyAV ``codec_context.name`` → rerun ``VideoCodec`` for codecs that ``rr.VideoStream`` ingests."""
+
+_BSF_FOR_CODEC: dict[str, str] = {
+    "h264": "h264_mp4toannexb",
+    "hevc": "hevc_mp4toannexb",
+    "h265": "hevc_mp4toannexb",
+}
+"""H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
+
 
 def log_video(
     video_source: Path | bytes,
@@ -285,71 +302,94 @@ def _log_video_stream(
     *,
     recording: rr.RecordingStream | None,
 ) -> Int[ndarray, "num_frames"]:
-    """Decode the source MP4 and re-encode to a rerun-friendly H.264 stream.
+    """Bit-preserving VideoStream: demux MP4, apply h264_mp4toannexb bsf, log samples.
 
-    We always emit H.264 with ``repeat_headers=1`` so SPS/PPS appears with
-    every keyframe — the rerun viewer's decoder needs a self-contained
-    stream and a bsf-only path doesn't reliably produce that. Slight
-    re-encoding quality loss is accepted for reliable rendering.
+    No pixel decode, no re-encode — the encoded NAL units from the source
+    are logged verbatim (only the MP4 length-prefix framing is rewritten
+    to Annex B start codes).
+
+    Critical: samples are indexed on the rerun timeline by their **DTS**
+    (decode timestamp), not PTS. Rerun stores time-indexed samples sorted
+    by timeline value, and the H.264 decoder needs them in decode order
+    to reconstruct B/P frames. With PTS-indexed storage on a B-frame
+    stream, reference frames arrive after their dependents and the
+    decoder produces garbage. The mirror direction
+    (:func:`mux_h264_to_mp4`) already works on bytes-by-DTS — the
+    read-back ``times`` column there is decode time, not display time.
+    Returning PTS (display order) preserves AssetVideo-equivalent return
+    contract for callers aligning other timeline data with the video.
     """
     source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
     container: av.container.InputContainer = av.open(source_handle, mode="r")
 
     pts_ns_list: list[int] = []
+    dts_ns_list: list[int] = []
+    samples: list[bytes] = []
+    is_keyframes: list[bool] = []
     try:
         in_stream: av.video.stream.VideoStream = container.streams.video[0]
-        source_time_base: Fraction = Fraction(in_stream.time_base)
+        codec_name: str = in_stream.codec_context.name
+        codec: rr.VideoCodec | None = _CODEC_MAP.get(codec_name)
+        if codec is None:
+            raise ValueError(
+                f"Codec {codec_name!r} is not supported by rr.VideoStream. "
+                f"Pass method='asset_video', or transcode the source to H.264/H.265/AV1 "
+                f"(see simplecv.video_encoder.VideoEncoder for an NVENC-accelerated path)."
+            )
+
+        bsf_name: str | None = _BSF_FOR_CODEC.get(codec_name)
+        bsf: av.BitStreamFilterContext | None = (
+            av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
+        )
 
         rr.log(
             str(video_log_path),
-            rr.VideoStream(codec=rr.VideoCodec.H264),
+            rr.VideoStream(codec=codec),
             static=True,
             recording=recording,
         )
 
-        encoder: av.VideoCodecContext = av.CodecContext.create("libx264", "w")
-        encoder.width = in_stream.codec_context.width
-        encoder.height = in_stream.codec_context.height
-        encoder.pix_fmt = "yuv420p"
-        encoder.time_base = in_stream.time_base
-        encoder.max_b_frames = 0  # rr.VideoStream does not support b-frames.
-        encoder.options = {
-            "preset": "ultrafast",
-            "g": "64",
-            "repeat_headers": "1",  # SPS/PPS in every keyframe.
-        }
-        encoder.open()
-
+        # The bsf preserves both pts and dts but may drop time_base; the
+        # input stream's time_base is the source of truth for both.
+        time_base: Fraction = Fraction(in_stream.time_base)
         ns_scale: Fraction = Fraction(1_000_000_000, 1)
-
-        def _log_packet(packet: av.Packet) -> None:
-            if packet.pts is None:
-                return
-            # Round-to-nearest matches rerun's AssetVideo computation;
-            # plain int() would truncate and drift by 1 ns per frame.
-            pts_ns: int = round(packet.pts * source_time_base * ns_scale)
-            pts_ns_list.append(pts_ns)
-            rr.set_time(
-                timeline,
-                duration=np.timedelta64(pts_ns, "ns"),
-                recording=recording,
+        # First DTS may be negative (B-frame leading-frame convention);
+        # normalize so the rerun timeline starts at 0.
+        first_dts: int | None = None
+        for raw_packet in container.demux(in_stream):
+            if raw_packet.pts is None or raw_packet.dts is None:
+                continue
+            filtered_packets: list[av.Packet] = (
+                bsf.filter(raw_packet) if bsf is not None else [raw_packet]
             )
-            rr.log(
-                str(video_log_path),
-                rr.VideoStream.from_fields(
-                    sample=bytes(packet),
-                    is_keyframe=packet.is_keyframe,
-                ),
-                recording=recording,
-            )
-
-        for frame in container.decode(in_stream):
-            for packet in encoder.encode(frame):
-                _log_packet(packet)
-        for packet in encoder.encode(None):
-            _log_packet(packet)
+            for packet in filtered_packets:
+                if packet.pts is None or packet.dts is None:
+                    continue
+                if first_dts is None:
+                    first_dts = packet.dts
+                # Round-to-nearest matches rerun's AssetVideo computation;
+                # plain int() would truncate and drift by 1 ns per frame.
+                pts_ns_list.append(round(packet.pts * time_base * ns_scale))
+                dts_ns_list.append(round((packet.dts - first_dts) * time_base * ns_scale))
+                samples.append(bytes(packet))
+                is_keyframes.append(packet.is_keyframe)
     finally:
         container.close()
+
+    # Batched columnar logging — one rerun API call instead of per-packet.
+    # Indexing by DTS keeps samples in decode order so the H.264 decoder
+    # can reconstruct B/P frames; ``mux_h264_to_mp4`` reads them back in
+    # the same order.
+    dts_ns_array: ndarray = np.asarray(dts_ns_list, dtype=np.int64)
+    rr.send_columns(
+        str(video_log_path),
+        indexes=[rr.TimeColumn(timeline, duration=1e-9 * dts_ns_array)],
+        columns=rr.VideoStream.columns(
+            sample=samples,
+            is_keyframe=is_keyframes,
+        ),
+        recording=recording,
+    )
 
     frame_timestamps_ns: Int[ndarray, "num_frames"] = np.sort(
         np.asarray(pts_ns_list, dtype=np.int64)
