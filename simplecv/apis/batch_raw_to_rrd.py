@@ -53,17 +53,18 @@ class BatchConvertConfig:
     """When >1, dispatch per-sequence ingestion to a process pool of this size.
     Sequences are independent so this scales nearly linearly until the box
     runs out of cores or memory."""
-    log_labels: bool = False
-    """When ``False``, skip ``log_exoego_batch`` — the heavy 3D-keypoint and
-    per-camera 2D projection logging step. The resulting RRDs match the
-    `data/exoego-forge-catalog` GT at the schema-set and per-frame value
-    level (see ``tools/validate_assembly101_rrd_parity.py``) and are within
-    the 15 % filesize tolerance documented in §4 of the goal contract. The
-    GT catalog itself was clearly generated without these columns —
-    `schema.component_columns()` on a GT RRD lists zero
-    ``coco133_xyz/uv`` or ``Pinhole`` entries — so producing them here is
-    pure waste. Re-enable when you specifically need 3D/2D keypoint
-    streams in the produced .rrd."""
+    log_labels: bool = True
+    """Whether ``visualize_exo_ego`` runs the heavy ``log_exoego_batch``
+    step that emits 3D keypoint streams (``coco133_xyz``) and per-camera
+    2D projection streams (``coco133_uv``, ``KeypointConfidence``,
+    pinhole intrinsics). These DO live in the GT catalog at
+    ``data/exoego-forge-catalog/assembly101/all/`` — they're stored in
+    the file's *blueprint* substore rather than the recording substore,
+    which is why an earlier version of this tool incorrectly defaulted
+    to ``False`` (the validator only inspected the recording store and
+    missed ~217 k rows of GT keypoint data per sequence). ``True`` is
+    the correct default; flip to ``False`` only if you've explicitly
+    decided to ship keypoint-free RRDs."""
 
 
 def _estimate_job_size(seq_cfg: BaseExoEgoDatasetConfig) -> int:
