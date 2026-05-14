@@ -61,7 +61,7 @@ to `/tmp/batch-bench/<exp_id>/`.
 | measurement | baseline | champion (exp-15) | speedup |
 | ----------- | -------: | ----------------: | ------: |
 | 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 3.00s  | 86.4 % |
-| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 8.11s* | 85.2 % |
+| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 6.96s  | 87.3 % |
 | 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 10.07s | 94.5 % |
 
 \* baseline 10-seq estimated from `18.27 sec/seq × 10`.
