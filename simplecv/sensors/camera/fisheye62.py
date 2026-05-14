@@ -224,12 +224,30 @@ def project_kannala_brandt_diagonal(
         uv_norm[..., 0] = (uv_norm[..., 0] - cx[:, None]) / fx[:, None]
         uv_norm[..., 1] = (uv_norm[..., 1] - cy[:, None]) / fy[:, None]
 
-        for frame_idx, distortion in enumerate(distortions):
-            if distortion is None:
-                continue
-            frame_flat: Float[ndarray, "_ 2"] = uv_norm[frame_idx].reshape(-1, 2)
-            distorted_flat = apply_radial_tangential_distortion(distortion, frame_flat)
-            uv_norm[frame_idx] = distorted_flat.reshape(-1, 2)
+        # Fast path: ego cameras typically share one ``Fisheye62Parameters``
+        # distortion object across every frame. When all per-frame distortions
+        # are the same object AND no frame is ``None``, the distortion math
+        # is pure numpy and trivially batches — replace ~n_frames calls with
+        # a single one over the flattened (n_frames * n_points, 2) buffer.
+        first_distortion: KannalaBrandtDistortion | None = distortions[0]
+        all_same_distortion: bool = (
+            first_distortion is not None
+            and all(d is first_distortion for d in distortions)
+        )
+        if all_same_distortion:
+            assert first_distortion is not None
+            flat: Float[ndarray, "_ 2"] = uv_norm.reshape(-1, 2)
+            distorted_flat: Float[ndarray, "_ 2"] = apply_radial_tangential_distortion(
+                first_distortion, flat
+            )
+            uv_norm = distorted_flat.reshape(uv_norm.shape)
+        else:
+            for frame_idx, distortion in enumerate(distortions):
+                if distortion is None:
+                    continue
+                frame_flat: Float[ndarray, "_ 2"] = uv_norm[frame_idx].reshape(-1, 2)
+                distorted_flat = apply_radial_tangential_distortion(distortion, frame_flat)
+                uv_norm[frame_idx] = distorted_flat.reshape(-1, 2)
 
         uv[..., 0] = uv_norm[..., 0] * fx[:, None] + cx[:, None]
         uv[..., 1] = uv_norm[..., 1] * fy[:, None] + cy[:, None]
