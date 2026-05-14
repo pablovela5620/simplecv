@@ -217,23 +217,6 @@ def log_pinhole(
 
 VideoLogMethod = Literal["video_stream", "asset_video"]
 
-_CODEC_MAP: dict[str, rr.VideoCodec] = {
-    "h264": rr.VideoCodec.H264,
-    "hevc": rr.VideoCodec.H265,
-    "h265": rr.VideoCodec.H265,
-    "av1": rr.VideoCodec.AV1,
-    "vp9": rr.VideoCodec.VP9,
-    "vp8": rr.VideoCodec.VP8,
-}
-"""PyAV ``codec_context.name`` → rerun ``VideoCodec`` for codecs that ``rr.VideoStream`` ingests."""
-
-_BSF_FOR_CODEC: dict[str, str] = {
-    "h264": "h264_mp4toannexb",
-    "hevc": "hevc_mp4toannexb",
-    "h265": "hevc_mp4toannexb",
-}
-"""H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
-
 
 def log_video(
     video_source: Path | bytes,
@@ -302,65 +285,69 @@ def _log_video_stream(
     *,
     recording: rr.RecordingStream | None,
 ) -> Int[ndarray, "num_frames"]:
-    """Demux MP4 codec samples into ``rr.VideoStream`` and emit per-sample PTS."""
+    """Decode the source MP4 and re-encode to a rerun-friendly H.264 stream.
+
+    We always emit H.264 with ``repeat_headers=1`` so SPS/PPS appears with
+    every keyframe — the rerun viewer's decoder needs a self-contained
+    stream and a bsf-only path doesn't reliably produce that. Slight
+    re-encoding quality loss is accepted for reliable rendering.
+    """
     source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
     container: av.container.InputContainer = av.open(source_handle, mode="r")
 
     pts_ns_list: list[int] = []
     try:
         in_stream: av.video.stream.VideoStream = container.streams.video[0]
-        codec_name: str = in_stream.codec_context.name
-        codec: rr.VideoCodec | None = _CODEC_MAP.get(codec_name)
-        if codec is None:
-            raise ValueError(
-                f"Codec {codec_name!r} is not supported by rr.VideoStream. "
-                f"Pass method='asset_video', or transcode the source to H.264/H.265/AV1 "
-                f"(see simplecv.video_encoder.VideoEncoder for an NVENC-accelerated path)."
-            )
-
-        bsf_name: str | None = _BSF_FOR_CODEC.get(codec_name)
-        bsf: av.BitStreamFilterContext | None = (
-            av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
-        )
+        source_time_base: Fraction = Fraction(in_stream.time_base)
 
         rr.log(
             str(video_log_path),
-            rr.VideoStream(codec=codec),
+            rr.VideoStream(codec=rr.VideoCodec.H264),
             static=True,
             recording=recording,
         )
 
-        # bsf output packets carry pts but may lose time_base; use the input
-        # stream's time_base as the source of truth (the bsf does not change
-        # timing — only NAL-unit framing).
-        time_base: Fraction = Fraction(in_stream.time_base)
+        encoder: av.VideoCodecContext = av.CodecContext.create("libx264", "w")
+        encoder.width = in_stream.codec_context.width
+        encoder.height = in_stream.codec_context.height
+        encoder.pix_fmt = "yuv420p"
+        encoder.time_base = in_stream.time_base
+        encoder.max_b_frames = 0  # rr.VideoStream does not support b-frames.
+        encoder.options = {
+            "preset": "ultrafast",
+            "g": "64",
+            "repeat_headers": "1",  # SPS/PPS in every keyframe.
+        }
+        encoder.open()
+
         ns_scale: Fraction = Fraction(1_000_000_000, 1)
-        for raw_packet in container.demux(in_stream):
-            if raw_packet.pts is None:
-                continue
-            filtered_packets: list[av.Packet] = (
-                bsf.filter(raw_packet) if bsf is not None else [raw_packet]
+
+        def _log_packet(packet: av.Packet) -> None:
+            if packet.pts is None:
+                return
+            # Round-to-nearest matches rerun's AssetVideo computation;
+            # plain int() would truncate and drift by 1 ns per frame.
+            pts_ns: int = round(packet.pts * source_time_base * ns_scale)
+            pts_ns_list.append(pts_ns)
+            rr.set_time(
+                timeline,
+                duration=np.timedelta64(pts_ns, "ns"),
+                recording=recording,
             )
-            for packet in filtered_packets:
-                if packet.pts is None:
-                    continue
-                # Round-to-nearest matches rerun's AssetVideo computation;
-                # plain int() would truncate and drift by 1 ns per frame.
-                pts_ns: int = round(packet.pts * time_base * ns_scale)
-                pts_ns_list.append(pts_ns)
-                rr.set_time(
-                    timeline,
-                    duration=np.timedelta64(pts_ns, "ns"),
-                    recording=recording,
-                )
-                rr.log(
-                    str(video_log_path),
-                    rr.VideoStream.from_fields(
-                        sample=bytes(packet),
-                        is_keyframe=packet.is_keyframe,
-                    ),
-                    recording=recording,
-                )
+            rr.log(
+                str(video_log_path),
+                rr.VideoStream.from_fields(
+                    sample=bytes(packet),
+                    is_keyframe=packet.is_keyframe,
+                ),
+                recording=recording,
+            )
+
+        for frame in container.decode(in_stream):
+            for packet in encoder.encode(frame):
+                _log_packet(packet)
+        for packet in encoder.encode(None):
+            _log_packet(packet)
     finally:
         container.close()
 

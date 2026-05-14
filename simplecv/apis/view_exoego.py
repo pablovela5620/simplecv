@@ -828,6 +828,15 @@ def setup_scene(
             exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
                 video_source, video_log_path, timeline=timeline, recording=recording
             )
+            # Also log via AssetVideo at a sibling path for A/B comparison.
+            asset_video_log_path: Path = cam_log_path / "pinhole" / "video_assetvideo"
+            log_video(
+                video_source,
+                asset_video_log_path,
+                timeline=timeline,
+                method="asset_video",
+                recording=recording,
+            )
             exo_timestamp_list.append(exo_timestamps_ns)
         exo_video_log_paths = exo_video_log_path_list
 
@@ -858,6 +867,15 @@ def setup_scene(
             # Log video asset which is referred to by frame references.
             ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
                 video_source, ego_video_log_path, timeline=timeline, recording=recording
+            )
+            # Also log via AssetVideo at a sibling path for A/B comparison.
+            ego_asset_video_log_path: Path = cam_log_path / "pinhole" / "video_assetvideo"
+            log_video(
+                video_source,
+                ego_asset_video_log_path,
+                timeline=timeline,
+                method="asset_video",
+                recording=recording,
             )
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
