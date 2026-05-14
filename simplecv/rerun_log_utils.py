@@ -236,6 +236,49 @@ _BSF_FOR_CODEC_ID: dict[int, str] = {
 }
 """H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
 
+_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex(
+    "0a0c00000062ea7ffbf804330080"
+)
+"""Aria Gen2 RGB AV1 sequence-header OBU that trips rerun 0.32's GOP detector.
+
+The semantic sequence-header fields end after 11 bytes, followed by a full
+trailing-bits byte. Rerun parses the sequence header but does not seek to the
+declared OBU size afterwards, so it mistakes that trailing byte for the next
+OBU header and never reaches the keyframe OBU.
+"""
+
+_ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex(
+    "0a0c02000061753ffdfc02198040"
+)
+"""Decoder-equivalent sequence header whose parser cursor reaches byte 12.
+
+This preserves profile, level, coded dimensions, bit depth, chroma sampling,
+and frame-tool flags. It only sets ``initial_display_delay_present_flag`` and
+then clears ``initial_display_delay_present_for_this_op``. That inserts one
+syntax bit before the remaining fields, so scuffle's bit reader consumes the
+final byte that contains AV1 trailing bits. Dav1d decodes the stream
+identically, and rerun's scanner reaches the following keyframe OBU.
+"""
+
+
+def _normalize_av1_sample_for_rerun(sample: bytes) -> bytes:
+    """Return AV1 low-overhead OBU bytes that rerun can scan for GOP starts.
+
+    Rerun 0.32 expects raw low-overhead AV1 OBUs and recomputes sync frames
+    from the sample bytes. The aria-gen2 RGB MP4 stores a valid 12-byte
+    sequence-header payload whose final byte is only AV1 trailing bits. Rerun's
+    detector currently leaves that byte unread after parsing the sequence
+    header, so keyframe samples are classified as non-sync before dav1d can
+    decode them. Rewrite only that exact sequence header; all other AV1 streams
+    stay byte-preserving.
+    """
+    if sample.startswith(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU):
+        return (
+            _ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU
+            + sample[len(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU):]
+        )
+    return sample
+
 
 def log_video(
     video_source: Path | bytes,
@@ -267,28 +310,7 @@ def log_video(
     """
     if method == "asset_video":
         return _log_asset_video(video_source, video_log_path, timeline, recording=recording)
-    # AV1 sources are silently routed through the AssetVideo path: rerun's
-    # AV1 GOP detector (scuffle-av1 sequence-header parser) doesn't render
-    # our PyAV-demuxed AV1 samples in the viewer even though the bytes are
-    # valid LOBF (verified via ``av.open(...format='obu')`` decode). The
-    # whole-MP4-blob AssetVideo path uses rerun's own MP4 demuxer + dav1d
-    # and works on every AV1 source we've tested (aria-gen2, assembly101).
-    # The bsf path stays default for H.264/H.265 where it works.
-    if _source_is_av1(video_source):
-        return _log_asset_video(video_source, video_log_path, timeline, recording=recording)
     return _log_video_stream(video_source, video_log_path, timeline, recording=recording)
-
-
-def _source_is_av1(video_source: Path | bytes) -> bool:
-    """Quick codec probe without decoding pixels."""
-    source_handle: io.BytesIO | str = (
-        io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
-    )
-    container = av.open(source_handle, mode="r")
-    try:
-        return int(container.streams.video[0].codec_context.codec.id) == 225  # AV_CODEC_ID_AV1
-    finally:
-        container.close()
 
 
 def _log_asset_video(
@@ -325,11 +347,12 @@ def _log_video_stream(
     *,
     recording: rr.RecordingStream | None,
 ) -> Int[ndarray, "num_frames"]:
-    """Bit-preserving VideoStream: demux MP4, apply h264_mp4toannexb bsf, log samples.
+    """Demux MP4 samples into ``rr.VideoStream`` without pixel decode.
 
-    No pixel decode, no re-encode — the encoded NAL units from the source
-    are logged verbatim (only the MP4 length-prefix framing is rewritten
-    to Annex B start codes).
+    No pixel decode, no re-encode. H.264/H.265 MP4 length-prefix framing is
+    rewritten to Annex B start codes. AV1 low-overhead OBUs are logged as-is
+    except for the exact aria-gen2 RGB sequence-header compatibility rewrite in
+    :func:`_normalize_av1_sample_for_rerun`.
 
     Critical: samples are indexed on the rerun timeline by their **DTS**
     (decode timestamp), not PTS. Rerun stores time-indexed samples sorted
@@ -389,13 +412,16 @@ def _log_video_stream(
             for packet in filtered_packets:
                 if packet.pts is None or packet.dts is None:
                     continue
+                sample: bytes = bytes(packet)
+                if codec_id == 225:  # AV_CODEC_ID_AV1
+                    sample = _normalize_av1_sample_for_rerun(sample)
                 if first_dts is None:
                     first_dts = packet.dts
                 # Round-to-nearest matches rerun's AssetVideo computation;
                 # plain int() would truncate and drift by 1 ns per frame.
                 pts_ns_list.append(round(packet.pts * time_base * ns_scale))
                 dts_ns_list.append(round((packet.dts - first_dts) * time_base * ns_scale))
-                samples.append(bytes(packet))
+                samples.append(sample)
                 is_keyframes.append(packet.is_keyframe)
     finally:
         container.close()
