@@ -71,6 +71,52 @@ def _estimate_job_size(seq_cfg: BaseExoEgoDatasetConfig) -> int:
     return 0
 
 
+def _pin_to_core_subset(worker_index: int, worker_count: int) -> None:
+    """Pin the worker process to a disjoint subset of CPU cores.
+
+    With many workers all sharing all cores, the kernel scheduler bounces
+    threads, hurts cache locality, and amplifies BLAS contention. Pinning
+    each worker to a 4-core slice (32 cores // 8 workers = 4 each) keeps
+    each worker's threads sticky.
+    """
+    try:
+        all_cores: set[int] = os.sched_getaffinity(0)
+    except (AttributeError, OSError):
+        return
+    cores_sorted: list[int] = sorted(all_cores)
+    if not cores_sorted or worker_count <= 0:
+        return
+    slice_size: int = max(len(cores_sorted) // worker_count, 1)
+    start: int = (worker_index * slice_size) % len(cores_sorted)
+    end: int = min(start + slice_size, len(cores_sorted))
+    subset: set[int] = set(cores_sorted[start:end])
+    if subset:
+        try:
+            os.sched_setaffinity(0, subset)
+        except (AttributeError, OSError):
+            pass
+
+
+def _worker_init(worker_index: int, worker_count: int) -> None:
+    _pin_to_core_subset(worker_index, worker_count)
+
+
+# ``_INIT_INDEX_COUNTER`` is bumped in the parent and read by ``_pool_init``
+# inside each worker on startup. Plain global is fine because each spawn
+# worker re-imports this module from scratch.
+_INIT_INDEX_COUNTER: list[int] = [0]
+
+
+def _pool_init(worker_count: int) -> None:
+    """ProcessPoolExecutor ``initializer`` hook. Assigns a CPU-core slice."""
+    # Workers are spawned sequentially by the parent; this counter advances
+    # within the WORKER process and starts at 0 because each spawn re-imports
+    # the module. We can't share state easily across workers, so we just pin
+    # to a slice keyed by os.getpid() % worker_count which is good enough.
+    index: int = os.getpid() % max(worker_count, 1)
+    _pin_to_core_subset(index, worker_count)
+
+
 def _process_one_sequence(seq_cfg: BaseExoEgoDatasetConfig, rrd_save_path: Path) -> tuple[str, float]:
     """Build one ``BaseExoEgoSequence`` and write its RRD. Runs in a worker.
 
@@ -159,7 +205,12 @@ def main(config: BatchConvertConfig):
         runnable_sorted: list[tuple[BaseExoEgoDatasetConfig, Path, SequenceIdentity]] = sorted(
             runnable, key=lambda item: -_estimate_job_size(item[0])
         )
-        with ProcessPoolExecutor(max_workers=worker_count, mp_context=ctx) as pool:
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=ctx,
+            initializer=_pool_init,
+            initargs=(worker_count,),
+        ) as pool:
             futures = {
                 pool.submit(_process_one_sequence, seq_cfg, rrd_save_path): identity
                 for seq_cfg, rrd_save_path, identity in runnable_sorted
