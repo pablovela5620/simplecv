@@ -110,23 +110,28 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
             ):
                 jobs.append((f"exo/{name}", name, video_path))
 
+        def _read_and_decode(p: Path) -> tuple[bytes, rr.AssetVideo, Int[ndarray, "n_frames"]]:
+            """Read the MP4 bytes, build the AssetVideo, extract timestamps."""
+            blob = p.read_bytes()
+            asset = rr.AssetVideo(contents=blob, media_type="video/mp4")
+            ts = asset.read_frame_timestamps_nanos()
+            return blob, asset, ts
+
         if jobs:
             with ThreadPoolExecutor(max_workers=min(len(jobs), 16)) as pool:
-                blob_bytes: list[bytes] = list(
-                    pool.map(lambda p: p.read_bytes(), [p for _, _, p in jobs])
+                results: list[tuple[bytes, rr.AssetVideo, Int[ndarray, "n_frames"]]] = list(
+                    pool.map(_read_and_decode, [p for _, _, p in jobs])
                 )
         else:
-            blob_bytes = []
+            results = []
 
         ego_blob_cache: dict[str, bytes] = {}
         exo_blob_cache: dict[str, bytes] = {}
         ego_asset_cache: dict[str, rr.AssetVideo] = {}
         exo_asset_cache: dict[str, rr.AssetVideo] = {}
-        for (stream_name, cam_name, _path), blob in zip(jobs, blob_bytes, strict=True):
-            # Build the AssetVideo once and reuse it in setup_scene's log_video
-            # call rather than letting that path re-parse the MP4 header.
-            asset: rr.AssetVideo = rr.AssetVideo(contents=blob, media_type="video/mp4")
-            timestamps: Int[ndarray, "n_frames"] = asset.read_frame_timestamps_nanos()
+        for (stream_name, cam_name, _path), (blob, asset, timestamps) in zip(
+            jobs, results, strict=True
+        ):
             stream_ts[stream_name] = timestamps
             if stream_name.startswith("ego/"):
                 self._ego_stream_names.append(stream_name)
