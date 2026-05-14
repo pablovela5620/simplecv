@@ -55,6 +55,41 @@ Visualizing RRD-based exo/ego datasets remuxes the embedded video streams once a
 - Set `SIMPLECV_VIDEO_CACHE_DISABLE=1` to opt out entirely; the remux step will run every time.
 - The cache auto-invalidates if the source `.rrd` changes (mtime or size). To reclaim disk space manually, delete the directory shown above.
 
+### Batch raw → RRD ingestion (ExoEgo Forge catalog)
+
+Convert raw on-disk recordings into the catalog `.rrd` layout used by
+`docs/optimize_batch_ingest_goal.md`. The CLI takes a dataset subcommand
+(e.g. `assembly101`, `hocap`, `aria-gen2`, ...) plus a save directory and
+optional knobs for parallelism / scope.
+
+```bash
+# 10 Assembly101 sequences, 8 worker processes, write into the
+# preferred long-term storage path on the workstation
+pixi run python tools/batch_raw_to_rrd.py \
+    --rrd-save-dir /mnt/8tb/data/exoego-forge-catalog \
+    --max-conversions 10 \
+    --num-workers 8 \
+    --force \
+    assembly101
+```
+
+**Storage location.** `--rrd-save-dir` defaults to `data/exoego-forge-catalog`
+(the in-repo path). For full-corpus ingestion, prefer
+`/mnt/8tb/data/exoego-forge-catalog` on this workstation — `data/` is on
+the smaller root volume.
+
+**Parallelism.** `--num-workers N` dispatches each sequence to a separate
+process via `ProcessPoolExecutor` (spawn). With 8 workers a 10-sequence
+Assembly101 batch finishes in ~11 s on a 32-core box (down from ~3 min
+sequentially before optimization; see
+`docs/optimize_batch_ingest_results.md`).
+
+**Skipping keypoint streams.** By default `log_labels=False`, which
+matches the existing read-only GT catalog under `data/exoego-forge-catalog/`
+(its RRDs have no `coco133_xyz`/`coco133_uv` columns). Pass `--log-labels`
+to additionally emit the 3D-keypoint and per-camera 2D projection
+streams (≈5× slower per sequence).
+
 ### Batch Processing ExoEgo from S3
 
 Process multiple ExoEgo sequences from S3 in batch. The pipeline downloads, cuts, and optionally ingests recordings.
