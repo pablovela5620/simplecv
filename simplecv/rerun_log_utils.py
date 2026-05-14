@@ -221,11 +221,11 @@ VideoLogMethod = Literal["video_stream", "asset_video"]
 # Keyed on libavcodec AVCodecID (not name) so decoder aliases like
 # ``libdav1d`` / ``libaom-av1`` resolve transparently — ``codec.id`` is stable.
 _CODEC_ID_MAP: dict[int, rr.VideoCodec] = {
-    27: rr.VideoCodec.H264,   # AV_CODEC_ID_H264
+    27: rr.VideoCodec.H264,  # AV_CODEC_ID_H264
     173: rr.VideoCodec.H265,  # AV_CODEC_ID_HEVC
-    225: rr.VideoCodec.AV1,   # AV_CODEC_ID_AV1
-    167: rr.VideoCodec.VP9,   # AV_CODEC_ID_VP9
-    139: rr.VideoCodec.VP8,   # AV_CODEC_ID_VP8
+    225: rr.VideoCodec.AV1,  # AV_CODEC_ID_AV1
+    167: rr.VideoCodec.VP9,  # AV_CODEC_ID_VP9
+    139: rr.VideoCodec.VP8,  # AV_CODEC_ID_VP8
 }
 
 # H.264/H.265 packets from MP4 (avcC/hvcC) need Annex B framing for ``rr.VideoStream``.
@@ -242,21 +242,14 @@ _BSF_FOR_CODEC_ID: dict[int, str] = {
 # decoder-equivalent that flips initial_display_delay_present_flag and
 # clears initial_display_delay_present_for_this_op; the extra syntax bit
 # consumes the trailing-bits byte without changing what dav1d decodes.
-_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex(
-    "0a0c00000062ea7ffbf804330080"
-)
-_ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex(
-    "0a0c02000061753ffdfc02198040"
-)
+_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex("0a0c00000062ea7ffbf804330080")
+_ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex("0a0c02000061753ffdfc02198040")
 
 
 def _normalize_av1_sample_for_rerun(sample: bytes) -> bytes:
     """Rewrite the aria-gen2 RGB SPS to one rerun's GOP detector can parse."""
     if sample.startswith(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU):
-        return (
-            _ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU
-            + sample[len(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU):]
-        )
+        return _ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU + sample[len(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU) :]
     return sample
 
 
@@ -303,11 +296,7 @@ def _log_asset_video(
     recording: rr.RecordingStream | None,
 ) -> Int[ndarray, "num_frames"]:
     """Embed the MP4 as an ``rr.AssetVideo`` and emit ``VideoFrameReference`` rows."""
-    video_asset = (
-        rr.AssetVideo(contents=video_source)
-        if isinstance(video_source, bytes)
-        else rr.AssetVideo(path=video_source)
-    )
+    video_asset = rr.AssetVideo(contents=video_source) if isinstance(video_source, bytes) else rr.AssetVideo(path=video_source)
 
     rr.log(str(video_log_path), video_asset, static=True, recording=recording)
 
@@ -357,9 +346,7 @@ def _log_video_stream(
             )
 
         bsf_name: str | None = _BSF_FOR_CODEC_ID.get(codec_id)
-        bsf: av.BitStreamFilterContext | None = (
-            av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
-        )
+        bsf: av.BitStreamFilterContext | None = av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
 
         rr.log(
             str(video_log_path),
@@ -370,7 +357,10 @@ def _log_video_stream(
 
         # The bsf preserves both pts and dts but may drop time_base; the
         # input stream's time_base is the source of truth for both.
-        time_base: Fraction = Fraction(in_stream.time_base)
+        in_time_base: Fraction | None = in_stream.time_base
+        if in_time_base is None:
+            raise ValueError("Input video stream has no time_base; cannot derive sample timestamps.")
+        time_base: Fraction = in_time_base
         ns_scale: Fraction = Fraction(1_000_000_000, 1)
         # First DTS may be negative (B-frame leading-frame convention);
         # normalize so the rerun timeline starts at 0.
@@ -378,9 +368,7 @@ def _log_video_stream(
         for raw_packet in container.demux(in_stream):
             if raw_packet.pts is None or raw_packet.dts is None:
                 continue
-            filtered_packets: list[av.Packet] = (
-                bsf.filter(raw_packet) if bsf is not None else [raw_packet]
-            )
+            filtered_packets: list[av.Packet] = bsf.filter(raw_packet) if bsf is not None else [raw_packet]
             for packet in filtered_packets:
                 if packet.pts is None or packet.dts is None:
                     continue
@@ -413,15 +401,11 @@ def _log_video_stream(
         recording=recording,
     )
 
-    frame_timestamps_ns: Int[ndarray, "num_frames"] = np.sort(
-        np.asarray(pts_ns_list, dtype=np.int64)
-    )
+    frame_timestamps_ns: Int[ndarray, "num_frames"] = np.sort(np.asarray(pts_ns_list, dtype=np.int64))
     return frame_timestamps_ns
 
 
-def read_video_stream_from_rrd(
-    rrd_path: str, video_entity: str, timeline: str
-) -> tuple[rr.VideoCodec, ChunkedArray, ChunkedArray]:
+def read_video_stream_from_rrd(rrd_path: str, video_entity: str, timeline: str) -> tuple[rr.VideoCodec, ChunkedArray, ChunkedArray]:
     """Read a ``rr.VideoStream`` entity back from an ``.rrd`` recording.
 
     Args:
@@ -477,9 +461,7 @@ def read_video_stream_from_rrd(
     return codec, times, samples
 
 
-def read_h264_samples_from_rrd(
-    rrd_path: str, video_entity: str, timeline: str
-) -> tuple[ChunkedArray, ChunkedArray]:
+def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) -> tuple[ChunkedArray, ChunkedArray]:
     """Read H.264 ``rr.VideoStream`` samples from an ``.rrd`` recording.
 
     Thin wrapper around :func:`read_video_stream_from_rrd` that enforces
@@ -493,6 +475,7 @@ def read_h264_samples_from_rrd(
             f"Got {hex(codec.value)}, but the value for H.264 is {hex(rr.VideoCodec.H264.value)}."
         )
     return times, samples
+
 
 def extract_asset_video_blob_fast(
     video_entity: str,

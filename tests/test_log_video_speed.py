@@ -15,7 +15,6 @@ import rerun as rr
 
 from simplecv.rerun_log_utils import log_video
 
-
 _HOCAP_BASE = Path("data/hocap/sample")
 _MAX_STREAM_TIME_S: float = 0.1
 _TRIALS: int = 5
@@ -52,13 +51,13 @@ def test_log_video_stream_ingestion_under_budget(tmp_path: Path) -> None:
     stream_times: list[float] = [_time_log(mp4, tmp_path, t) for t in range(_TRIALS)]
     stream_median: float = sorted(stream_times)[_TRIALS // 2]
     print(
-        f"VideoStream median: {stream_median*1000:.1f} ms (trials: "
-        f"{[f'{x*1000:.0f}ms' for x in stream_times]}, budget: "
-        f"{_MAX_STREAM_TIME_S*1000:.0f} ms)"
+        f"VideoStream median: {stream_median * 1000:.1f} ms (trials: "
+        f"{[f'{x * 1000:.0f}ms' for x in stream_times]}, budget: "
+        f"{_MAX_STREAM_TIME_S * 1000:.0f} ms)"
     )
 
     assert stream_median <= _MAX_STREAM_TIME_S, (
-        f"VideoStream median {stream_median*1000:.1f} ms exceeds "
-        f"{_MAX_STREAM_TIME_S*1000:.0f} ms budget — the decode+re-encode pipeline "
+        f"VideoStream median {stream_median * 1000:.1f} ms exceeds "
+        f"{_MAX_STREAM_TIME_S * 1000:.0f} ms budget — the decode+re-encode pipeline "
         f"may have been accidentally re-introduced."
     )

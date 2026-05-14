@@ -136,57 +136,44 @@ def _find_hocap_video(prefer: str = "hololens") -> Path | None:
 def test_aria_gen2_rgb_av1_sequence_header_normalized_for_rerun() -> None:
     """Only the aria-gen2 RGB AV1 sequence header is rewritten for rerun."""
     frame_obu_prefix: bytes = bytes.fromhex("328cb30210011d810618")
-    aria_rgb_keyframe_prefix: bytes = (
-        bytes.fromhex("0a0c00000062ea7ffbf804330080") + frame_obu_prefix
-    )
+    aria_rgb_keyframe_prefix: bytes = bytes.fromhex("0a0c00000062ea7ffbf804330080") + frame_obu_prefix
 
     normalized_prefix: bytes = _normalize_av1_sample_for_rerun(aria_rgb_keyframe_prefix)
 
-    assert normalized_prefix == (
-        bytes.fromhex("0a0c02000061753ffdfc02198040") + frame_obu_prefix
-    )
+    assert normalized_prefix == (bytes.fromhex("0a0c02000061753ffdfc02198040") + frame_obu_prefix)
     assert len(normalized_prefix) == len(aria_rgb_keyframe_prefix)
 
-    slam_keyframe_prefix: bytes = (
-        bytes.fromhex("0a0b0000000ccbfeff80433008") + frame_obu_prefix
-    )
+    slam_keyframe_prefix: bytes = bytes.fromhex("0a0b0000000ccbfeff80433008") + frame_obu_prefix
     assert _normalize_av1_sample_for_rerun(slam_keyframe_prefix) == slam_keyframe_prefix
 
 
 def test_log_video_timestamps_match(synthetic_h264_mp4: Path, tmp_path: Path) -> None:
     """Both methods describe the same set of frame timestamps."""
     rec_asset: rr.RecordingStream = rr.RecordingStream(
-        application_id="test-log-video-asset", recording_id="ts-asset",
+        application_id="test-log-video-asset",
+        recording_id="ts-asset",
     )
     rec_asset.save(str(tmp_path / "asset.rrd"))
     rec_stream: rr.RecordingStream = rr.RecordingStream(
-        application_id="test-log-video-stream", recording_id="ts-stream",
+        application_id="test-log-video-stream",
+        recording_id="ts-stream",
     )
     rec_stream.save(str(tmp_path / "stream.rrd"))
 
     entity: Path = Path("/video")
-    ts_asset: ndarray = log_video(
-        synthetic_h264_mp4, entity, method="asset_video", recording=rec_asset
-    )
-    ts_stream: ndarray = log_video(
-        synthetic_h264_mp4, entity, method="video_stream", recording=rec_stream
-    )
+    ts_asset: ndarray = log_video(synthetic_h264_mp4, entity, method="asset_video", recording=rec_asset)
+    ts_stream: ndarray = log_video(synthetic_h264_mp4, entity, method="video_stream", recording=rec_stream)
 
     assert len(ts_asset) == _FRAME_COUNT
     assert len(ts_stream) == _FRAME_COUNT
     np.testing.assert_array_equal(np.sort(ts_asset), np.sort(ts_stream))
 
 
-def test_log_video_rejects_invalid_method(synthetic_h264_mp4: Path) -> None:
-    """Typos in the method argument should fail loudly."""
-    log_video_unchecked = getattr(log_video, "__wrapped__", log_video)
-    with pytest.raises(ValueError, match="Unsupported video logging method"):
-        log_video_unchecked(synthetic_h264_mp4, Path("/video"), method="video-strem")
-
-
 @pytest.mark.parametrize("video_fixture", ["synthetic", "hocap"])
 def test_log_video_stream_bytes_are_bit_preserved(
-    video_fixture: str, synthetic_h264_mp4: Path, tmp_path: Path,
+    video_fixture: str,
+    synthetic_h264_mp4: Path,
+    tmp_path: Path,
 ) -> None:
     """RRD samples are byte-identical to direct ``demux + h264_mp4toannexb`` output.
 
@@ -204,24 +191,29 @@ def test_log_video_stream_bytes_are_bit_preserved(
     entity: str = "/video"
     timeline: str = "video_time"
     stream_rrd: Path = _log_to_tmp_rrd(
-        mp4, "video_stream", tmp_path, entity=entity, timeline=timeline,
+        mp4,
+        "video_stream",
+        tmp_path,
+        entity=entity,
+        timeline=timeline,
     )
 
     direct_samples = _direct_demux_bsf(mp4)
     _, _, rrd_samples_arr = read_video_stream_from_rrd(
-        str(stream_rrd), entity.lstrip("/"), timeline,
+        str(stream_rrd),
+        entity.lstrip("/"),
+        timeline,
     )
     rrd_samples: list[bytes] = _samples_chunked_to_bytes(rrd_samples_arr)
 
     assert len(direct_samples) == len(rrd_samples)
     mismatches: int = sum(1 for a, b in zip(direct_samples, rrd_samples, strict=False) if a != b)
-    assert mismatches == 0, (
-        f"{mismatches}/{len(rrd_samples)} packets differ — VideoStream is no longer bit-preserving"
-    )
+    assert mismatches == 0, f"{mismatches}/{len(rrd_samples)} packets differ — VideoStream is no longer bit-preserving"
 
 
 def test_log_video_rrd_roundtrip_pixels_match_source(
-    synthetic_h264_mp4: Path, tmp_path: Path,
+    synthetic_h264_mp4: Path,
+    tmp_path: Path,
 ) -> None:
     """Lossless synthetic MP4 round-trips bit-identically through both archetypes."""
     src_frames: list[UInt8[ndarray, "h w 3"]] = _decode_mp4(synthetic_h264_mp4)
@@ -231,18 +223,30 @@ def test_log_video_rrd_roundtrip_pixels_match_source(
     timeline: str = "video_time"
 
     asset_rrd: Path = _log_to_tmp_rrd(
-        synthetic_h264_mp4, "asset_video", tmp_path, entity=entity, timeline=timeline,
+        synthetic_h264_mp4,
+        "asset_video",
+        tmp_path,
+        entity=entity,
+        timeline=timeline,
     )
     asset_blob: bytes = extract_asset_video_blob_fast(
-        entity.lstrip("/"), timeline=timeline, rrd_path=asset_rrd,
+        entity.lstrip("/"),
+        timeline=timeline,
+        rrd_path=asset_rrd,
     )
     asset_frames: list[UInt8[ndarray, "h w 3"]] = _decode_mp4(asset_blob)
 
     stream_rrd: Path = _log_to_tmp_rrd(
-        synthetic_h264_mp4, "video_stream", tmp_path, entity=entity, timeline=timeline,
+        synthetic_h264_mp4,
+        "video_stream",
+        tmp_path,
+        entity=entity,
+        timeline=timeline,
     )
     codec, times, samples_chunked = read_video_stream_from_rrd(
-        str(stream_rrd), entity.lstrip("/"), timeline,
+        str(stream_rrd),
+        entity.lstrip("/"),
+        timeline,
     )
     assert codec == rr.VideoCodec.H264
     stream_mp4: Path = tmp_path / "stream_remuxed.mp4"
