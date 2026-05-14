@@ -217,20 +217,22 @@ def log_pinhole(
 
 VideoLogMethod = Literal["video_stream", "asset_video"]
 
-_CODEC_MAP: dict[str, rr.VideoCodec] = {
-    "h264": rr.VideoCodec.H264,
-    "hevc": rr.VideoCodec.H265,
-    "h265": rr.VideoCodec.H265,
-    "av1": rr.VideoCodec.AV1,
-    "vp9": rr.VideoCodec.VP9,
-    "vp8": rr.VideoCodec.VP8,
+_CODEC_ID_MAP: dict[int, rr.VideoCodec] = {
+    27: rr.VideoCodec.H264,   # AV_CODEC_ID_H264
+    173: rr.VideoCodec.H265,  # AV_CODEC_ID_HEVC
+    225: rr.VideoCodec.AV1,   # AV_CODEC_ID_AV1
+    167: rr.VideoCodec.VP9,   # AV_CODEC_ID_VP9
+    139: rr.VideoCodec.VP8,   # AV_CODEC_ID_VP8
 }
-"""PyAV ``codec_context.name`` → rerun ``VideoCodec`` for codecs that ``rr.VideoStream`` ingests."""
+"""libavcodec ``AVCodecID`` → rerun ``VideoCodec`` for codecs that ``rr.VideoStream`` ingests.
 
-_BSF_FOR_CODEC: dict[str, str] = {
-    "h264": "h264_mp4toannexb",
-    "hevc": "hevc_mp4toannexb",
-    "h265": "hevc_mp4toannexb",
+Keyed on codec ID (not name) so we handle decoder aliases like ``libdav1d`` /
+``libaom-av1`` for AV1 transparently — ``codec_context.name`` returns the
+decoder family, which varies, but ``codec.id`` is stable."""
+
+_BSF_FOR_CODEC_ID: dict[int, str] = {
+    27: "h264_mp4toannexb",
+    173: "hevc_mp4toannexb",
 }
 """H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
 
@@ -328,16 +330,17 @@ def _log_video_stream(
     is_keyframes: list[bool] = []
     try:
         in_stream: av.video.stream.VideoStream = container.streams.video[0]
+        codec_id: int = int(in_stream.codec_context.codec.id)
         codec_name: str = in_stream.codec_context.name
-        codec: rr.VideoCodec | None = _CODEC_MAP.get(codec_name)
+        codec: rr.VideoCodec | None = _CODEC_ID_MAP.get(codec_id)
         if codec is None:
             raise ValueError(
-                f"Codec {codec_name!r} is not supported by rr.VideoStream. "
+                f"Codec {codec_name!r} (id={codec_id}) is not supported by rr.VideoStream. "
                 f"Pass method='asset_video', or transcode the source to H.264/H.265/AV1 "
                 f"(see simplecv.video_encoder.VideoEncoder for an NVENC-accelerated path)."
             )
 
-        bsf_name: str | None = _BSF_FOR_CODEC.get(codec_name)
+        bsf_name: str | None = _BSF_FOR_CODEC_ID.get(codec_id)
         bsf: av.BitStreamFilterContext | None = (
             av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
         )
