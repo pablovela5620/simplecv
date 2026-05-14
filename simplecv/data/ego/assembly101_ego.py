@@ -248,6 +248,12 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
         n_frames: int = n_frames_total
         ego_fisheye_dict: dict[str, list[Fisheye62Parameters]] = {k: [] for k in cam_keys}
 
+        # Only the full per-frame `Fisheye62Parameters` list is used when
+        # `self.config.load_labels` is True (the fisheye projection
+        # dereferences each frame's `extrinsics.cam_T_world`). When False,
+        # the cam list only needs `[0]` + `len`, so we can skip the
+        # ~n_frames inv and projection-matrix einsum below for frames 1..N.
+        compute_per_frame_inv: bool = self.config.load_labels
         for key in cam_keys:
             world_xform: Float32[ndarray, "n_frames 4 4"] = per_alias_stack[key]
             world_R_cam_stack: Float32[ndarray, "n_frames 3 3"] = world_xform[:, :3, :3]
@@ -261,17 +267,28 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
             world_T_cam_stack[:, :3, :3] = world_R_cam_stack
             world_T_cam_stack[:, :3, 3] = world_t_cam_stack
             world_T_cam_stack[:, 3, 3] = 1.0
-            cam_T_world_stack: Float32[ndarray, "n_frames 4 4"] = np.linalg.inv(
-                world_T_cam_stack
-            )
 
-            cam_R_world_stack: Float32[ndarray, "n_frames 3 3"] = cam_T_world_stack[:, :3, :3]
-            cam_t_world_stack: Float32[ndarray, "n_frames 3"] = cam_T_world_stack[:, :3, 3]
-            # Per-frame 3x4 projection matrix: K @ cam_T_world[:3, :].
-            k_matrix: Float32[ndarray, "3 3"] = intrinsics.k_matrix
-            projection_matrix_stack: Float32[ndarray, "n_frames 3 4"] = np.einsum(
-                "ij,fjk->fik", k_matrix, cam_T_world_stack[:, :3, :]
-            )
+            if compute_per_frame_inv:
+                cam_T_world_stack: Float32[ndarray, "n_frames 4 4"] = np.linalg.inv(
+                    world_T_cam_stack
+                )
+                cam_R_world_stack: Float32[ndarray, "n_frames 3 3"] = cam_T_world_stack[:, :3, :3]
+                cam_t_world_stack: Float32[ndarray, "n_frames 3"] = cam_T_world_stack[:, :3, 3]
+                k_matrix: Float32[ndarray, "3 3"] = intrinsics.k_matrix
+                projection_matrix_stack: Float32[ndarray, "n_frames 3 4"] = np.einsum(
+                    "ij,fjk->fik", k_matrix, cam_T_world_stack[:, :3, :]
+                )
+            else:
+                # Only need the frame-0 inverse for the representative
+                # Fisheye62Parameters built below.
+                cam_T_world_0: Float32[ndarray, "4 4"] = np.linalg.inv(world_T_cam_stack[0])
+                cam_T_world_stack = np.broadcast_to(cam_T_world_0, world_T_cam_stack.shape)
+                cam_R_world_stack = cam_T_world_stack[:, :3, :3]
+                cam_t_world_stack = cam_T_world_stack[:, :3, 3]
+                projection_matrix_stack = np.broadcast_to(
+                    intrinsics.k_matrix @ cam_T_world_0[:3, :],
+                    (n_frames, 3, 4),
+                )
 
             # When labels won't be projected (log_labels=False on the batch
             # config flips ``self.config.load_labels`` off too — see
