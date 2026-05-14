@@ -200,37 +200,51 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
             / f"{self.config.sequence_name}.json"
         )
         assert extrinsics_ego_path.exists(), f"File {extrinsics_ego_path} does not exist"
-        with open(extrinsics_ego_path) as f:
-            extrinsics_ego: dict[str, Any] = json.load(f)
+        with open(extrinsics_ego_path, "rb") as f:
+            extrinsics_ego_raw: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
 
-        schema: type[EgoExtri843] | type[EgoExtri211] = pick_schema(extrinsics_ego)
-        extrinsics_text: str = extrinsics_ego_path.read_text()
-        if schema is EgoExtri843:
-            raw_ego_cameras: dict[str, EgoExtri843] = from_json(dict[str, EgoExtri843], extrinsics_text)
-            ego_extri_cameras: dict[str, EgoExtri843 | EgoExtri211] = {
-                key: raw_ego_cameras[key] for key in sorted(raw_ego_cameras, key=int)
+        # Resolve the serial→alias map. The dataset ships extrinsics keyed by
+        # raw camera serial like ``21176875:mono10bit`` or ``84346135:mono10bit``;
+        # we group everything onto the four canonical aliases e1..e4 below.
+        first_frame_dict: dict[str, list[list[float]]] = next(iter(extrinsics_ego_raw.values()))
+        first_serial_key: str = next(iter(first_frame_dict.keys()))
+        if first_serial_key.startswith("8"):
+            serial_to_alias: dict[str, str] = {
+                "84346135:mono10bit": "e1",
+                "84347414:mono10bit": "e2",
+                "84355350:mono10bit": "e3",
+                "84358933:mono10bit": "e4",
             }
         else:
-            raw_ego_cameras_211: dict[str, EgoExtri211] = from_json(dict[str, EgoExtri211], extrinsics_text)
-            ego_extri_cameras = {key: raw_ego_cameras_211[key] for key in sorted(raw_ego_cameras_211, key=int)}
+            serial_to_alias = {
+                "21176875:mono10bit": "e1",
+                "21176623:mono10bit": "e2",
+                "21110305:mono10bit": "e3",
+                "21179183:mono10bit": "e4",
+            }
 
-        # Build a single Extrinsics per frame per cam by:
-        #   1. Stacking all per-frame world-from-cam matrices into batched arrays.
-        #   2. Batch-inverting once with ``np.linalg.inv`` on a (N, 4, 4) stack
-        #      instead of one inversion per frame.
-        #   3. Bypassing ``Extrinsics.__post_init__`` (which would otherwise
-        #      perform a separate scalar inverse for every frame) by using
-        #      ``object.__new__`` and setting the dataclass fields directly.
-        # On Assembly101 this saves ~5s/3-seq.
+        # Sort frame keys by integer value once, then bulk-fill numpy arrays
+        # directly from the parsed JSON. Skipping pyserde here saves ~0.4 s
+        # of beartype + dict-walk per sequence; on a 16k-frame sequence this
+        # is the largest remaining chunk after exp-12.
+        frame_keys_sorted: list[str] = sorted(extrinsics_ego_raw.keys(), key=int)
+        n_frames_total: int = len(frame_keys_sorted)
+        # Pre-allocate one (n_frames, 4, 4) stack per cam alias.
+        per_alias_stack: dict[str, Float32[ndarray, "n_frames 4 4"]] = {
+            alias: np.empty((n_frames_total, 4, 4), dtype=np.float32)
+            for alias in ("e1", "e2", "e3", "e4")
+        }
+        for i, frame_key in enumerate(frame_keys_sorted):
+            frame_dict: dict[str, list[list[float]]] = extrinsics_ego_raw[frame_key]
+            for serial, alias in serial_to_alias.items():
+                per_alias_stack[alias][i] = frame_dict[serial]
+
         cam_keys: tuple[str, str, str, str] = ("e1", "e2", "e3", "e4")
-        ego_cam_list: list[EgoExtri211 | EgoExtri843] = list(ego_extri_cameras.values())
-        n_frames: int = len(ego_cam_list)
+        n_frames: int = n_frames_total
         ego_fisheye_dict: dict[str, list[Fisheye62Parameters]] = {k: [] for k in cam_keys}
 
         for key in cam_keys:
-            world_xform: Float32[ndarray, "n_frames 4 4"] = np.stack(
-                [getattr(c, key) for c in ego_cam_list]
-            )
+            world_xform: Float32[ndarray, "n_frames 4 4"] = per_alias_stack[key]
             world_R_cam_stack: Float32[ndarray, "n_frames 3 3"] = world_xform[:, :3, :3]
             world_t_cam_stack: Float32[ndarray, "n_frames 3"] = (
                 world_xform[:, :3, 3] * np.float32(1e-3)
