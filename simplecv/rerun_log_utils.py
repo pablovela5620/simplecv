@@ -7,10 +7,11 @@ import sys
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import av
+import numpy as np
 import rerun as rr
 from jaxtyping import Int
 from numpy import ndarray
@@ -214,26 +215,67 @@ def log_pinhole(
     )
 
 
+VideoLogMethod = Literal["video_stream", "asset_video"]
+
+_CODEC_MAP: dict[str, rr.VideoCodec] = {
+    "h264": rr.VideoCodec.H264,
+    "hevc": rr.VideoCodec.H265,
+    "h265": rr.VideoCodec.H265,
+    "av1": rr.VideoCodec.AV1,
+    "vp9": rr.VideoCodec.VP9,
+    "vp8": rr.VideoCodec.VP8,
+}
+"""PyAV ``codec_context.name`` → rerun ``VideoCodec`` for codecs that ``rr.VideoStream`` ingests."""
+
+_BSF_FOR_CODEC: dict[str, str] = {
+    "h264": "h264_mp4toannexb",
+    "hevc": "hevc_mp4toannexb",
+    "h265": "hevc_mp4toannexb",
+}
+"""H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
+
+
 def log_video(
     video_source: Path | bytes,
     video_log_path: Path,
     timeline: str = "video_time",
     *,
+    method: VideoLogMethod = "video_stream",
     recording: rr.RecordingStream | None = None,
 ) -> Int[ndarray, "num_frames"]:
     """
-    Logs a video asset and its frame timestamps.
+    Logs a video and its frame timestamps.
 
     Args:
         video_source: Path to video file or raw video bytes.
         video_log_path: The entity path where the video log will be saved.
         timeline: Timeline name for frame timestamps.
+        method: ``"video_stream"`` (default) demuxes encoded codec samples into
+            ``rr.VideoStream``. ``"asset_video"`` embeds the whole MP4 blob via
+            ``rr.AssetVideo`` + ``rr.VideoFrameReference``; kept for validation
+            and as a fallback for codecs unsupported by ``rr.VideoStream``.
         recording: Optional specific recording stream to log to.
 
     Returns:
-        Frame timestamps in nanoseconds.
+        Frame timestamps in nanoseconds, sorted ascending.
+
+    Raises:
+        ValueError: When ``method="video_stream"`` and the source codec is not
+            supported by ``rr.VideoStream``.
     """
-    # Create AssetVideo from path or bytes
+    if method == "asset_video":
+        return _log_asset_video(video_source, video_log_path, timeline, recording=recording)
+    return _log_video_stream(video_source, video_log_path, timeline, recording=recording)
+
+
+def _log_asset_video(
+    video_source: Path | bytes,
+    video_log_path: Path,
+    timeline: str,
+    *,
+    recording: rr.RecordingStream | None,
+) -> Int[ndarray, "num_frames"]:
+    """Embed the MP4 as an ``rr.AssetVideo`` and emit ``VideoFrameReference`` rows."""
     video_asset = (
         rr.AssetVideo(contents=video_source)
         if isinstance(video_source, bytes)
@@ -242,12 +284,10 @@ def log_video(
 
     rr.log(str(video_log_path), video_asset, static=True, recording=recording)
 
-    # Send automatically determined video frame timestamps.
     frame_timestamps_ns: Int[ndarray, "num_frames"] = video_asset.read_frame_timestamps_nanos()
 
     rr.send_columns(
         f"{video_log_path}",
-        # Note timeline values don't have to be the same as the video timestamps.
         indexes=[rr.TimeColumn(timeline, duration=1e-9 * frame_timestamps_ns)],
         columns=rr.VideoFrameReference.columns_nanos(frame_timestamps_ns),
         recording=recording,
@@ -255,13 +295,100 @@ def log_video(
     return frame_timestamps_ns
 
 
-def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) -> tuple[ChunkedArray, ChunkedArray]:
-    """Load recording data and query video stream."""
+def _log_video_stream(
+    video_source: Path | bytes,
+    video_log_path: Path,
+    timeline: str,
+    *,
+    recording: rr.RecordingStream | None,
+) -> Int[ndarray, "num_frames"]:
+    """Demux MP4 codec samples into ``rr.VideoStream`` and emit per-sample PTS."""
+    source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
+    container: av.container.InputContainer = av.open(source_handle, mode="r")
 
+    pts_ns_list: list[int] = []
+    try:
+        in_stream: av.video.stream.VideoStream = container.streams.video[0]
+        codec_name: str = in_stream.codec_context.name
+        codec: rr.VideoCodec | None = _CODEC_MAP.get(codec_name)
+        if codec is None:
+            raise ValueError(
+                f"Codec {codec_name!r} is not supported by rr.VideoStream. "
+                f"Pass method='asset_video', or transcode the source to H.264/H.265/AV1 "
+                f"(see simplecv.video_encoder.VideoEncoder for an NVENC-accelerated path)."
+            )
+
+        bsf_name: str | None = _BSF_FOR_CODEC.get(codec_name)
+        bsf: av.BitStreamFilterContext | None = (
+            av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
+        )
+
+        rr.log(
+            str(video_log_path),
+            rr.VideoStream(codec=codec),
+            static=True,
+            recording=recording,
+        )
+
+        # bsf output packets carry pts but may lose time_base; use the input
+        # stream's time_base as the source of truth (the bsf does not change
+        # timing — only NAL-unit framing).
+        time_base: Fraction = Fraction(in_stream.time_base)
+        ns_scale: Fraction = Fraction(1_000_000_000, 1)
+        for raw_packet in container.demux(in_stream):
+            if raw_packet.pts is None:
+                continue
+            filtered_packets: list[av.Packet] = (
+                bsf.filter(raw_packet) if bsf is not None else [raw_packet]
+            )
+            for packet in filtered_packets:
+                if packet.pts is None:
+                    continue
+                # Round-to-nearest matches rerun's AssetVideo computation;
+                # plain int() would truncate and drift by 1 ns per frame.
+                pts_ns: int = round(packet.pts * time_base * ns_scale)
+                pts_ns_list.append(pts_ns)
+                rr.set_time(
+                    timeline,
+                    duration=np.timedelta64(pts_ns, "ns"),
+                    recording=recording,
+                )
+                rr.log(
+                    str(video_log_path),
+                    rr.VideoStream.from_fields(
+                        sample=bytes(packet),
+                        is_keyframe=packet.is_keyframe,
+                    ),
+                    recording=recording,
+                )
+    finally:
+        container.close()
+
+    frame_timestamps_ns: Int[ndarray, "num_frames"] = np.sort(
+        np.asarray(pts_ns_list, dtype=np.int64)
+    )
+    return frame_timestamps_ns
+
+
+def read_video_stream_from_rrd(
+    rrd_path: str, video_entity: str, timeline: str
+) -> tuple[rr.VideoCodec, ChunkedArray, ChunkedArray]:
+    """Read a ``rr.VideoStream`` entity back from an ``.rrd`` recording.
+
+    Args:
+        rrd_path: Path to the recording on disk.
+        video_entity: Entity path where ``rr.VideoStream`` was logged.
+        timeline: Timeline used as the sample index when the stream was logged.
+
+    Returns:
+        ``(codec, times, samples)``. ``codec`` is the static codec component.
+        ``times`` is the per-sample timeline column (nanoseconds). ``samples``
+        is the per-sample encoded byte column (Annex B for H.264/H.265,
+        OBU/IVF-style for AV1/VP9).
+    """
     normalized_entity: str = video_entity.lstrip("/")
     query_session = RRDQuerySession(Path(rrd_path))
 
-    # Make sure this is H.264 encoded.
     codec_table = query_session.read_arrow(
         contents=normalized_entity,
         selectors=[f"{normalized_entity}:VideoStream:codec"],
@@ -284,29 +411,38 @@ def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) 
         codec_column,
         component_name=f"{normalized_entity}:VideoStream:codec",
     )
-    codec_value = int(np.asarray(codec_value_raw).reshape(-1)[0])
-    if codec_value != rr.VideoCodec.H264.value:
-        raise ValueError(
-            f"Video stream codec is not H.264 at {video_entity} for timeline {timeline}. "
-            f"Got {hex(codec_value)}, but the value for H.264 is {hex(rr.VideoCodec.H264.value)}."
-        )
-    else:
-        print(f"Video stream codec is H.264 at {video_entity} for timeline {timeline}.")
+    codec_value: int = int(np.asarray(codec_value_raw).reshape(-1)[0])
+    codec: rr.VideoCodec = rr.VideoCodec(codec_value)
 
-    # Get the video stream
     timestamps_and_samples = query_session.read_arrow(
         contents=normalized_entity,
         selectors=[f"{normalized_entity}:VideoStream:sample"],
         index=timeline,
     )
     if timestamps_and_samples.num_rows == 0:
-        raise ValueError(f"No H.264 samples found at {video_entity} for timeline {timeline}.")
+        raise ValueError(f"No video samples found at {video_entity} for timeline {timeline}.")
 
-    times = timestamps_and_samples.column(0)
-    samples = timestamps_and_samples.column(1)
+    times: ChunkedArray = timestamps_and_samples.column(0)
+    samples: ChunkedArray = timestamps_and_samples.column(1)
 
-    print(f"Retrieved {len(samples)} video samples.")
+    return codec, times, samples
 
+
+def read_h264_samples_from_rrd(
+    rrd_path: str, video_entity: str, timeline: str
+) -> tuple[ChunkedArray, ChunkedArray]:
+    """Read H.264 ``rr.VideoStream`` samples from an ``.rrd`` recording.
+
+    Thin wrapper around :func:`read_video_stream_from_rrd` that enforces
+    H.264. Kept for back-compat with callers that assume H.264 (e.g.
+    :func:`mux_h264_to_mp4`).
+    """
+    codec, times, samples = read_video_stream_from_rrd(rrd_path, video_entity, timeline)
+    if codec != rr.VideoCodec.H264:
+        raise ValueError(
+            f"Video stream codec is not H.264 at {video_entity} for timeline {timeline}. "
+            f"Got {hex(codec.value)}, but the value for H.264 is {hex(rr.VideoCodec.H264.value)}."
+        )
     return times, samples
 
 def extract_asset_video_blob_fast(
