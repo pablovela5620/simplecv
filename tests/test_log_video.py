@@ -36,12 +36,12 @@ from jaxtyping import UInt8
 from numpy import ndarray
 
 from simplecv.rerun_log_utils import (
+    _normalize_av1_sample_for_rerun,
     extract_asset_video_blob_fast,
     log_video,
     mux_h264_to_mp4,
     read_video_stream_from_rrd,
 )
-
 
 _FRAME_COUNT: int = 12
 _WIDTH: int = 64
@@ -192,6 +192,26 @@ def _find_hocap_video(prefer: str = "hololens") -> Path | None:
 # ─────────────────────────── Tests ────────────────────────────
 
 
+def test_aria_gen2_rgb_av1_sequence_header_normalized_for_rerun() -> None:
+    """Only the aria-gen2 RGB AV1 sequence header is rewritten for rerun."""
+    frame_obu_prefix: bytes = bytes.fromhex("328cb30210011d810618")
+    aria_rgb_keyframe_prefix: bytes = (
+        bytes.fromhex("0a0c00000062ea7ffbf804330080") + frame_obu_prefix
+    )
+
+    normalized_prefix: bytes = _normalize_av1_sample_for_rerun(aria_rgb_keyframe_prefix)
+
+    assert normalized_prefix == (
+        bytes.fromhex("0a0c02000061753ffdfc02198040") + frame_obu_prefix
+    )
+    assert len(normalized_prefix) == len(aria_rgb_keyframe_prefix)
+
+    slam_keyframe_prefix: bytes = (
+        bytes.fromhex("0a0b0000000ccbfeff80433008") + frame_obu_prefix
+    )
+    assert _normalize_av1_sample_for_rerun(slam_keyframe_prefix) == slam_keyframe_prefix
+
+
 def test_log_video_timestamps_match(synthetic_h264_mp4: Path, tmp_path: Path) -> None:
     """Both methods describe the same set of frame timestamps."""
     rec_asset: rr.RecordingStream = rr.RecordingStream(
@@ -256,7 +276,7 @@ def test_log_video_stream_bytes_are_bit_preserved(
         f"Sample count differs: direct demux+bsf={len(direct_samples)}, "
         f"RRD round-trip={len(rrd_samples)}"
     )
-    mismatches: int = sum(1 for a, b in zip(direct_samples, rrd_samples) if a != b)
+    mismatches: int = sum(1 for a, b in zip(direct_samples, rrd_samples, strict=False) if a != b)
     assert mismatches == 0, (
         f"{mismatches}/{len(rrd_samples)} packets differ in bytes between "
         f"direct demux+bsf and RRD round-trip — VideoStream is no longer bit-preserving"

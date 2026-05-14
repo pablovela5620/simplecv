@@ -18,8 +18,8 @@ from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
-from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value, unwrap_singleton_lists
 from simplecv.rerun_custom_types import PinholeWithDistortion
+from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value, unwrap_singleton_lists
 
 
 def _default_cache_root() -> Path:
