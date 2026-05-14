@@ -34,16 +34,25 @@ to disk, reusing video MP4 blobs, eager prefetch, etc.).
 
 ## 2. Stopping Condition (Hard Deadline)
 
-Stop work at **07:00 AM America/Chicago (CDT)** on the date the run begins.
+Stop work at the **next 07:00 AM America/Los_Angeles (Pacific Time)**. In
+summer this is 07:00 PDT (= 09:00 CDT); in winter it is 07:00 PST
+(= 09:00 CST). Use the IANA zone, not a fixed UTC offset.
 
 At every checkpoint, compute remaining time with:
 
 ```bash
-date -d "$(date +%Y-%m-%d) 07:00 CDT" +%s
-date +%s
+python3 -c "
+import datetime, zoneinfo
+pt = zoneinfo.ZoneInfo('America/Los_Angeles')
+now = datetime.datetime.now(pt)
+target = now.replace(hour=7, minute=0, second=0, microsecond=0)
+if target <= now:
+    target += datetime.timedelta(days=1)
+print(int((target - now).total_seconds()))
+"
 ```
 
-If `now >= deadline`, the agent **must**:
+If the remaining-seconds value above is `<= 0`, the agent **must**:
 
 1. Print the leaderboard and the absolute best configuration (§6).
 2. Update `docs/optimize_batch_ingest_results.md` with the final entry.
@@ -148,7 +157,7 @@ the next experiment.
 Create and continuously update `docs/optimize_batch_ingest_results.md` with
 this schema (markdown table). Append-only; never rewrite history.
 
-| exp_id | timestamp_cdt | hypothesis | files_touched | wall_seconds_3seq | wall_seconds_10seq | sec_per_seq | speedup_vs_baseline_pct | parity | champion | notes |
+| exp_id | timestamp_pt | hypothesis | files_touched | wall_seconds_3seq | wall_seconds_10seq | sec_per_seq | speedup_vs_baseline_pct | parity | champion | notes |
 | ------ | ------------- | ---------- | ------------- | ----------------- | ------------------ | ----------- | ----------------------- | ------ | -------- | ----- |
 
 Definitions:
@@ -170,7 +179,7 @@ champion's diff.
 Print a compact status block to stdout at every checkpoint with:
 
 ```
-[checkpoint] now=<HH:MM CDT> deadline=07:00 remaining=<HHhMMm>
+[checkpoint] now=<HH:MM PT> deadline=07:00 PT remaining=<HHhMMm>
   baseline_sec_per_seq=<x>
   champion_sec_per_seq=<y>  speedup=<z%>
   last_experiment=<exp_id> parity=<PASS|FAIL> wall=<s>
@@ -258,7 +267,7 @@ Document every idea you actually try, even if you abandon it.
 >    `simplecv.rrd_query_utils.RRDQuerySession` and the dataframe API
 >    described at https://rerun.io/docs/howto/query-and-transform/get-data-out.
 >    The 10 GT RRDs are read-only.
-> 3. Run experiments in a loop until **07:00 AM CDT today**. After each
+> 3. Run experiments in a loop until **07:00 AM Pacific Time (America/Los_Angeles)**. After each
 >    experiment, append a row to `docs/optimize_batch_ingest_results.md`
 >    and print the checkpoint status block defined in §6 of the goal doc.
 >    On regressions or parity failures, revert to the last champion before
@@ -275,4 +284,4 @@ Document every idea you actually try, even if you abandon it.
 > Do not stop, ask for clarification, or change scope. If you finish the
 > ideas list in §8 before the deadline, profile the current champion with
 > `py-spy` and propose new experiments from the hottest stack frames. Stop
-> exactly at 07:00 CDT and print the final leaderboard.
+> exactly at 07:00 Pacific Time and print the final leaderboard.
