@@ -23,21 +23,23 @@ to `/tmp/batch-bench/<exp_id>/`.
 | exp-12 | 2026-05-14 01:45 | default `log_labels=False` so `visualize_exo_ego` skips the entire `log_exoego_batch` projection / send_columns step; the GT catalog itself has no keypoint columns so this is pure waste | `simplecv/apis/batch_raw_to_rrd.py` | 9.46 | 12.03 (8w) | 3.15 / 1.20 | 82.7 / 93.4 | PASS | (replaced by exp-13) | huge: 1-seq wall 7.89 → 4.07; eliminates ~6 s of projection math per sequence; flip `--log-labels` to restore the heavy path |
 | exp-13 | 2026-05-14 02:01 | skip pyserde in `load_ego_cams` — walk the per-frame extrinsics JSON dict directly into preallocated `(n_frames, 4, 4)` numpy stacks per cam alias | `simplecv/data/ego/assembly101_ego.py` | 8.11 | 11.34 (8w) | 2.70 / 1.13 | 85.2 / 93.8 | PASS |   | 1-seq wall 4.07 → 3.70; eliminates ~16k beartype-decorated EgoExtri*.__init__ calls per sequence |
 | exp-14 | 2026-05-14 03:23 | cache `rr.AssetVideo` objects on the sub-sequence as `_video_assets` so `setup_scene → log_video` reuses them instead of re-parsing the MP4 header | `simplecv/data/exoego/assembly101.py`, `simplecv/apis/view_exoego.py`, `simplecv/rerun_log_utils.py` | — | 10.73 (8w) | — / 1.07 | — / 94.1 | PASS |   | 1-seq wall 3.70 → 3.54; saves ~10–15 ms per video × 12 cams per sequence |
-| exp-15 | 2026-05-14 03:33 | orjson for the two big JSON parses (96 MB landmarks + per-frame ego extrinsics) | `simplecv/data/exoego/assembly101.py`, `simplecv/data/ego/assembly101_ego.py`, `pyproject.toml`, `pixi.lock` | — | 10.07 (8w) | — / 1.01 | — / 94.5 | PASS | Y | 1-seq wall 3.54 → 3.00; ~50 % faster decoding on arrays-of-arrays-of-floats |
+| exp-15 | 2026-05-14 03:33 | orjson for the two big JSON parses (96 MB landmarks + per-frame ego extrinsics) | `simplecv/data/exoego/assembly101.py`, `simplecv/data/ego/assembly101_ego.py`, `pyproject.toml`, `pixi.lock` | 6.96 | 10.07 (8w) | 2.32 / 1.01 | 87.3 / 94.5 | PASS |   | 1-seq wall 3.54 → 3.00; ~50 % faster decoding on arrays-of-arrays-of-floats |
+| exp-16 | 2026-05-14 03:36 | thread-parallel `_build_ego` / `_build_exo` / `load_labels` inside `Assembly101Sequence.__init__` | — (regressed; reverted) | — | 10.75 (8w) | — | — | PASS | (reverted) | per-thread BLAS pools fought the per-worker thread cap; net +0.4 s wall; reverted on the same commit |
+| exp-17 | 2026-05-14 03:43 | when ``--no-log-labels`` (the default), override the dataset config to ``load_labels=False`` so `BaseExoEgoSequence.__init__` skips `load_labels()` entirely — previously we parsed 96 MB of keypoints just to throw the buffer away | `simplecv/apis/batch_raw_to_rrd.py` | 6.03 | 9.38 (8w) | 2.01 / 0.94 | 89.0 / 94.9 | PASS | Y | 1-seq wall 3.00 → 2.88; 3-seq 6.96 → 6.03 |
 
 ## Leaderboard (top 5 valid by sec_per_seq, smallest = fastest)
 
 | rank | exp_id | sec_per_seq | speedup_pct | summary |
 | ---- | ------ | ----------- | ----------- | ------- |
-| 1 | exp-15 (10-seq, 8w) | 1.01 | 94.5 | exp-14 + orjson for big JSON files |
-| 2 | exp-14 (10-seq, 8w) | 1.07 | 94.1 | exp-13 + cached `rr.AssetVideo` objects |
-| 3 | exp-13 (10-seq, 8w) | 1.13 | 93.8 | exp-12 + skip pyserde in load_ego_cams |
-| 4 | exp-12 (10-seq, 8w) | 1.20 | 93.4 | default log_labels=False (skip projection logging) |
-| 5 | exp-15 (1-seq, seq)  | 3.00 | 83.6 | same code at single-sequence scale |
+| 1 | exp-17 (10-seq, 8w) | 0.94 | 94.9 | exp-15 + skip dataset-side `load_labels()` when not emitting |
+| 2 | exp-15 (10-seq, 8w) | 1.01 | 94.5 | exp-14 + orjson for big JSON files |
+| 3 | exp-14 (10-seq, 8w) | 1.07 | 94.1 | exp-13 + cached `rr.AssetVideo` objects |
+| 4 | exp-13 (10-seq, 8w) | 1.13 | 93.8 | exp-12 + skip pyserde in load_ego_cams |
+| 5 | exp-12 (10-seq, 8w) | 1.20 | 93.4 | default log_labels=False (skip projection logging) |
 
 ## Current Champion Diff Summary
 
-- **champion**: `exp-15`
+- **champion**: `exp-17`
 - **diff (vs baseline)**: 12 cumulative optimizations stacked on top of the original `tools/batch_raw_to_rrd.py assembly101` flow:
   1. **exp-01** parallel MP4 byte preload + `_video_blobs` reuse + explicit `media_type="video/mp4"`
   2. **exp-02** vectorized per-frame `nanmean` in `_ConfidenceAwareColumnList.partition`
@@ -54,14 +56,16 @@ to `/tmp/batch-bench/<exp_id>/`.
   13. **exp-13** skip pyserde in `load_ego_cams`, walk extrinsics JSON directly into numpy stacks
   14. **exp-14** cache the `rr.AssetVideo` objects on the sub-sequence as `_video_assets` so `setup_scene → log_video` reuses them
   15. **exp-15** `orjson.loads` for the two big JSON files (landmarks + ego extrinsics)
+  16. **exp-16** thread-parallel sub-init (reverted — BLAS-thread contention with the per-worker thread cap)
+  17. **exp-17** flip the dataset config's `load_labels=False` whenever the visualization-level `log_labels` is False, so `BaseExoEgoSequence.__init__` skips the 96 MB JSON parse entirely
 - The parity validator (`tools/validate_assembly101_rrd_parity.py`) fails on missing GT columns and on numeric drift in sampled ego translations; it tolerates extras (deterministic static-metadata that the GT lacks) and a 15 % filesize delta.
 
 ## Headline Numbers
 
-| measurement | baseline | champion (exp-15) | speedup |
+| measurement | baseline | champion (exp-17) | speedup |
 | ----------- | -------: | ----------------: | ------: |
-| 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 3.00s  | 86.4 % |
-| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 6.96s  | 87.3 % |
-| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 10.07s | 94.5 % |
+| 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 2.88s  | 87.0 % |
+| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 6.03s  | 89.0 % |
+| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 9.38s  | 94.9 % |
 
 \* baseline 10-seq estimated from `18.27 sec/seq × 10`.
