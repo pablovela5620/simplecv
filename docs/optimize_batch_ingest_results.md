@@ -25,21 +25,23 @@ to `/tmp/batch-bench/<exp_id>/`.
 | exp-14 | 2026-05-14 03:23 | cache `rr.AssetVideo` objects on the sub-sequence as `_video_assets` so `setup_scene → log_video` reuses them instead of re-parsing the MP4 header | `simplecv/data/exoego/assembly101.py`, `simplecv/apis/view_exoego.py`, `simplecv/rerun_log_utils.py` | — | 10.73 (8w) | — / 1.07 | — / 94.1 | PASS |   | 1-seq wall 3.70 → 3.54; saves ~10–15 ms per video × 12 cams per sequence |
 | exp-15 | 2026-05-14 03:33 | orjson for the two big JSON parses (96 MB landmarks + per-frame ego extrinsics) | `simplecv/data/exoego/assembly101.py`, `simplecv/data/ego/assembly101_ego.py`, `pyproject.toml`, `pixi.lock` | 6.96 | 10.07 (8w) | 2.32 / 1.01 | 87.3 / 94.5 | PASS |   | 1-seq wall 3.54 → 3.00; ~50 % faster decoding on arrays-of-arrays-of-floats |
 | exp-16 | 2026-05-14 03:36 | thread-parallel `_build_ego` / `_build_exo` / `load_labels` inside `Assembly101Sequence.__init__` | — (regressed; reverted) | — | 10.75 (8w) | — | — | PASS | (reverted) | per-thread BLAS pools fought the per-worker thread cap; net +0.4 s wall; reverted on the same commit |
-| exp-17 | 2026-05-14 03:43 | when ``--no-log-labels`` (the default), override the dataset config to ``load_labels=False`` so `BaseExoEgoSequence.__init__` skips `load_labels()` entirely — previously we parsed 96 MB of keypoints just to throw the buffer away | `simplecv/apis/batch_raw_to_rrd.py` | 6.03 | 9.38 (8w) | 2.01 / 0.94 | 89.0 / 94.9 | PASS | Y | 1-seq wall 3.00 → 2.88; 3-seq 6.96 → 6.03 |
+| exp-17 | 2026-05-14 03:43 | when ``--no-log-labels`` (the default), override the dataset config to ``load_labels=False`` so `BaseExoEgoSequence.__init__` skips `load_labels()` entirely — previously we parsed 96 MB of keypoints just to throw the buffer away | `simplecv/apis/batch_raw_to_rrd.py` | 6.03 | 9.38 (8w) | 2.01 / 0.94 | 89.0 / 94.9 | PASS |   | 1-seq wall 3.00 → 2.88; 3-seq 6.96 → 6.03 |
+| exp-18 | 2026-05-14 03:53 | stash per-cam ``(world_t_cam, world_R_cam)`` stacks on the ego sequence as ``_cam_batched_stacks`` so ``view_exoego.setup_scene`` skips rebuilding them from per-frame `Fisheye62Parameters` attribute lookups | `simplecv/data/ego/assembly101_ego.py`, `simplecv/apis/view_exoego.py` | — | 9.37 (8w) | — / 0.94 | — / 94.9 | PASS |   | wall change at noise; removes a duplicate ~16k-iter list-comp |
+| exp-19 | 2026-05-14 04:04 | when `load_labels=False`, return ``[rep_fp] * n_frames`` per cam (16k references to one shared `Fisheye62Parameters`) instead of allocating 64k unique objects; keeps the full per-frame allocation behind ``--log-labels`` because the fisheye projection still derefs per-frame extrinsics | `simplecv/data/ego/assembly101_ego.py` | — | 9.03 (8w) | — / 0.90 | — / 95.1 | PASS | Y | 1-seq wall 2.88 → 2.61; saves ~0.2 s/seq of pure Python (~64k object allocations gone); `--log-labels` path verified 3/3 |
 
 ## Leaderboard (top 5 valid by sec_per_seq, smallest = fastest)
 
 | rank | exp_id | sec_per_seq | speedup_pct | summary |
 | ---- | ------ | ----------- | ----------- | ------- |
-| 1 | exp-17 (10-seq, 8w) | 0.94 | 94.9 | exp-15 + skip dataset-side `load_labels()` when not emitting |
-| 2 | exp-15 (10-seq, 8w) | 1.01 | 94.5 | exp-14 + orjson for big JSON files |
-| 3 | exp-14 (10-seq, 8w) | 1.07 | 94.1 | exp-13 + cached `rr.AssetVideo` objects |
-| 4 | exp-13 (10-seq, 8w) | 1.13 | 93.8 | exp-12 + skip pyserde in load_ego_cams |
-| 5 | exp-12 (10-seq, 8w) | 1.20 | 93.4 | default log_labels=False (skip projection logging) |
+| 1 | exp-19 (10-seq, 8w) | 0.90 | 95.1 | exp-17 + shared rep `Fisheye62Parameters` refs when not projecting |
+| 2 | exp-17 (10-seq, 8w) | 0.94 | 94.9 | exp-15 + skip dataset-side `load_labels()` when not emitting |
+| 3 | exp-15 (10-seq, 8w) | 1.01 | 94.5 | exp-14 + orjson for big JSON files |
+| 4 | exp-14 (10-seq, 8w) | 1.07 | 94.1 | exp-13 + cached `rr.AssetVideo` objects |
+| 5 | exp-13 (10-seq, 8w) | 1.13 | 93.8 | exp-12 + skip pyserde in load_ego_cams |
 
 ## Current Champion Diff Summary
 
-- **champion**: `exp-17`
+- **champion**: `exp-19`
 - **diff (vs baseline)**: 12 cumulative optimizations stacked on top of the original `tools/batch_raw_to_rrd.py assembly101` flow:
   1. **exp-01** parallel MP4 byte preload + `_video_blobs` reuse + explicit `media_type="video/mp4"`
   2. **exp-02** vectorized per-frame `nanmean` in `_ConfidenceAwareColumnList.partition`
@@ -58,15 +60,17 @@ to `/tmp/batch-bench/<exp_id>/`.
   15. **exp-15** `orjson.loads` for the two big JSON files (landmarks + ego extrinsics)
   16. **exp-16** thread-parallel sub-init (reverted — BLAS-thread contention with the per-worker thread cap)
   17. **exp-17** flip the dataset config's `load_labels=False` whenever the visualization-level `log_labels` is False, so `BaseExoEgoSequence.__init__` skips the 96 MB JSON parse entirely
+  18. **exp-18** stash per-cam `(world_t_cam, world_R_cam)` stacks on the ego sequence as `_cam_batched_stacks` so `setup_scene` reuses them
+  19. **exp-19** when ``load_labels=False``, return `[rep_fp] * n_frames` per cam (shared Fisheye62Parameters reference) — saves ~64k unique-object allocations
 - The parity validator (`tools/validate_assembly101_rrd_parity.py`) fails on missing GT columns and on numeric drift in sampled ego translations; it tolerates extras (deterministic static-metadata that the GT lacks) and a 15 % filesize delta.
 
 ## Headline Numbers
 
-| measurement | baseline | champion (exp-17) | speedup |
+| measurement | baseline | champion (exp-19) | speedup |
 | ----------- | -------: | ----------------: | ------: |
-| 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 2.83s  | 87.2 % |
-| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 6.00s  | 89.1 % |
-| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 9.38s  | 94.9 % |
+| 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 2.61s  | 88.2 % |
+| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 6.00s* | 89.1 % |
+| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 9.03s  | 95.1 % |
 | 30-seq wall (`--max-conversions 30 --num-workers 8`)  | ≈548s* | 29.85s | 94.6 % |
 
 \* baseline 10-/30-seq estimated from `18.27 sec/seq × N`.
