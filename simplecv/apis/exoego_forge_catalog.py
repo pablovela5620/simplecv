@@ -1,16 +1,14 @@
 """Utilities for serving ExoEgo Forge RRD files through a Rerun catalog.
 
-The module has two entry points:
-
-* ``main`` mounts converted ExoEgo Forge recordings as catalog datasets.
-* ``main_large_index`` hosts a lightweight Assembly101 table whose rows point
-  at full-size RRD recordings, so the viewer can load one recording on demand.
+The public ``main`` entrypoint mounts converted ExoEgo Forge recordings as
+catalog datasets and creates one on-demand table per source dataset.
 """
 
 from __future__ import annotations
 
 import atexit
 import base64
+import subprocess
 import tempfile
 import time
 import weakref
@@ -29,28 +27,17 @@ from tqdm import tqdm
 from simplecv.apis.view_exoego import create_container
 
 APPLICATION_ID: str = "exoego-forge"
-ASSEMBLY101_LARGE_RRD_ROOT: Path = Path("/home/pablo/0Dev/personal/simplecv/data/exoego-forge-catalog/assembly101/all")
-"""Generated full-size Assembly101 RRD root before Rerun manifest optimization."""
-ASSEMBLY101_LARGE_OPTIMIZED_RRD_ROOT: Path = Path(
-    "/home/pablo/0Dev/personal/simplecv/data/exoego-forge-catalog/assembly101/optimized"
-)
-"""Manifest-optimized full-size Assembly101 RRD root used for larger-than-RAM viewer testing."""
-ASSEMBLY101_LARGE_CATALOG_DATASETS: tuple[str, ...] = ("assembly101",)
-"""Dataset filter for the full-size Assembly101 catalog preset."""
-ASSEMBLY101_LARGE_INDEX_TABLE_NAME: str = "assembly101_large_rrds"
-"""Catalog table name for the lightweight full-size Assembly101 RRD index."""
+"""Rerun application id used by converted ExoEgo Forge recordings."""
 TABLE_BLUEPRINT_METADATA_KEY: bytes = b"rerun:table_blueprint"
 """Arrow schema metadata key used by Rerun for experimental table blueprints."""
 MARKER_FLAG_COLUMN: str = "marker_flag"
 """Boolean table flag column used by the Rerun table UI."""
-ASSEMBLY101_CARD_PREVIEW_START_SECONDS: float = 0.45
-"""Start of the absolute ``video_time`` window used by Assembly101 table-card previews."""
-ASSEMBLY101_CARD_PREVIEW_END_SECONDS: float = 0.55
-"""End of the absolute ``video_time`` window used by Assembly101 table-card previews."""
-ASSEMBLY101_CARD_PREVIEW_VIDEO_KIND: str = "ego"
-"""Assembly101 camera group used for the single 2D video table-card preview."""
-ASSEMBLY101_CARD_PREVIEW_VIDEO_CAMERA: str = "e3"
-"""Assembly101 camera name used for the single 2D video table-card preview."""
+TABLE_CARD_PREVIEW_START_SECONDS: float = 0.0
+"""Start of the absolute ``video_time`` loop used by table-card previews."""
+TABLE_CARD_PREVIEW_END_SECONDS: float = 10.0
+"""End of the absolute ``video_time`` loop used by table-card previews."""
+DEFAULT_CATALOG_RRD_CACHE_DIR: Path = Path("~/.cache/simplecv/exoego-forge-catalog-optimized")
+"""Default persistent cache root for catalog-compatible optimized RRD copies."""
 
 DEFAULT_CATALOG_DATASETS: tuple[str, ...] = (
     "aria-gen2",
@@ -61,6 +48,25 @@ DEFAULT_CATALOG_DATASETS: tuple[str, ...] = (
     "umetrack",
     "ego-dex",
 )
+
+DEFAULT_CATALOG_OPTIMIZE_DATASETS: tuple[str, ...] = (
+    "aria-gen2",
+    "assembly101",
+    "hocap",
+    "hot3d-aria",
+    "hot3d-quest3",
+    "umetrack",
+    "ego-dex",
+)
+"""Datasets whose RRD chunk layout must be migrated before catalog registration.
+
+This is not a size-only optimization. Registering these source RRDs directly
+through the Rerun catalog importer can produce lossy catalog segments: visual
+component columns such as pinholes, camera transforms, 2D keypoints, and 3D
+points may be missing even though opening the same raw RRD directly in the
+viewer works. The optimized copy preserves those columns for catalog tables and
+clicked segment URLs.
+"""
 
 CATALOG_CAMERA_NAMES: dict[str, dict[str, tuple[str, ...]]] = {
     "aria-gen2": {
@@ -102,18 +108,10 @@ CATALOG_CAMERA_NAMES: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
-
-def _video_log_paths(kind: str, camera_names: tuple[str, ...]) -> list[Path]:
-    """Build relative Rerun entity paths for video streams.
-
-    Args:
-        kind: Camera group name such as ``"ego"`` or ``"exo"``.
-        camera_names: Camera stream names available for the dataset.
-
-    Returns:
-        Relative entity paths ending in ``pinhole/video``.
-    """
-    return [Path("world") / kind / camera_name / "pinhole" / "video" for camera_name in camera_names]
+CATALOG_TABLE_PREVIEW_CAMERAS: dict[str, tuple[str, str]] = {
+    "assembly101": ("ego", "e3"),
+}
+"""Dataset-specific table-card video preview overrides."""
 
 
 def build_exoego_catalog_blueprint(dataset_name: str) -> rrb.Blueprint:
@@ -126,9 +124,18 @@ def build_exoego_catalog_blueprint(dataset_name: str) -> rrb.Blueprint:
         Rerun blueprint used as the default view when opening a dataset segment.
     """
     camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES.get(dataset_name, {"ego": (), "exo": ()})
+    # Reuse the same layout helper as direct RRD viewing, so catalog segment
+    # blueprints track future view_exoego layout fixes.
+    ego_video_log_paths: list[Path] = [
+        Path("world") / "ego" / camera_name / "pinhole" / "video" for camera_name in camera_names["ego"]
+    ]
+    exo_video_log_paths: list[Path] = [
+        Path("world") / "exo" / camera_name / "pinhole" / "video" for camera_name in camera_names["exo"]
+    ]
     container: rrb.ContainerLike = create_container(
-        ego_video_log_paths=_video_log_paths("ego", camera_names["ego"]),
-        exo_video_log_paths=_video_log_paths("exo", camera_names["exo"]),
+        ego_video_log_paths=ego_video_log_paths,
+        exo_video_log_paths=exo_video_log_paths,
+        skip_camera_names=frozenset(),
     )
     return rrb.Blueprint(
         rrb.Horizontal(
@@ -168,12 +175,55 @@ def _register_default_dataset_blueprint(
     return blueprint_path
 
 
+def discover_rrd_paths(
+    rrd_root: Path,
+    *,
+    datasets: tuple[str, ...] = DEFAULT_CATALOG_DATASETS,
+) -> dict[str, list[Path]]:
+    """Discover local RRD paths grouped by first-level catalog dataset directory.
+
+    Args:
+        rrd_root: Directory containing one subdirectory per dataset.
+        datasets: Dataset directory names to include. An empty tuple scans all
+            first-level directories under ``rrd_root``.
+
+    Returns:
+        Mapping from dataset name to absolute paths for every discovered
+        ``.rrd`` file. Datasets without RRD files are omitted.
+
+    Raises:
+        FileNotFoundError: If ``rrd_root`` does not exist or no requested
+            datasets contain RRD files.
+    """
+    root: Path = rrd_root.expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"RRD root directory does not exist: {root}")
+
+    dataset_dirs: list[Path] = (
+        [root / dataset for dataset in datasets] if datasets else sorted(d for d in root.iterdir() if d.is_dir())
+    )
+
+    paths_by_dataset: dict[str, list[Path]] = {}
+    for dataset_dir in dataset_dirs:
+        if not dataset_dir.is_dir():
+            continue
+        rrd_paths: list[Path] = sorted(path.resolve() for path in dataset_dir.rglob("*.rrd"))
+        if rrd_paths:
+            paths_by_dataset[dataset_dir.name] = rrd_paths
+
+    if not paths_by_dataset:
+        dataset_desc: str = ", ".join(datasets) if datasets else "all first-level directories"
+        raise FileNotFoundError(f"No RRD files found under {root} for datasets: {dataset_desc}")
+
+    return paths_by_dataset
+
+
 def discover_rrd_uris(
     rrd_root: Path,
     *,
     datasets: tuple[str, ...] = DEFAULT_CATALOG_DATASETS,
 ) -> dict[str, list[str]]:
-    """Discover local RRD files grouped by first-level catalog dataset directory.
+    """Discover local RRD URIs grouped by first-level catalog dataset directory.
 
     Args:
         rrd_root: Directory containing one subdirectory per dataset.
@@ -188,27 +238,68 @@ def discover_rrd_uris(
         FileNotFoundError: If ``rrd_root`` does not exist or no requested
             datasets contain RRD files.
     """
-    root: Path = rrd_root.expanduser().resolve()
-    if not root.exists():
-        raise FileNotFoundError(f"RRD root directory does not exist: {root}")
-
-    dataset_dirs: list[Path] = (
-        [root / dataset for dataset in datasets] if datasets else sorted(d for d in root.iterdir() if d.is_dir())
-    )
-
-    uris_by_dataset: dict[str, list[str]] = {}
-    for dataset_dir in dataset_dirs:
-        if not dataset_dir.is_dir():
-            continue
-        rrd_paths: list[Path] = sorted(dataset_dir.rglob("*.rrd"))
-        if rrd_paths:
-            uris_by_dataset[dataset_dir.name] = [path.resolve().as_uri() for path in rrd_paths]
-
-    if not uris_by_dataset:
-        dataset_desc: str = ", ".join(datasets) if datasets else "all first-level directories"
-        raise FileNotFoundError(f"No RRD files found under {root} for datasets: {dataset_desc}")
-
+    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=datasets)
+    uris_by_dataset: dict[str, list[str]] = {
+        dataset_name: [path.as_uri() for path in rrd_paths]
+        for dataset_name, rrd_paths in paths_by_dataset.items()
+    }
     return uris_by_dataset
+
+
+def _optimize_rrd_for_catalog(source_path: Path, *, rrd_root: Path, cache_root: Path) -> Path:
+    """Build or reuse a catalog-compatible optimized RRD copy.
+
+    ``rerun rrd optimize`` rewrites the recording into a chunk layout that the
+    catalog importer indexes correctly. Without this step, some ExoEgo Forge
+    datasets register as incomplete catalog segments: table previews and opened
+    segment URLs can lose camera frustums, pinholes, hand keypoints, and other
+    visual columns despite the raw RRD containing them.
+
+    Args:
+        source_path: Original source RRD path.
+        rrd_root: Root used to preserve relative dataset paths in the cache.
+        cache_root: Directory where optimized RRDs are stored.
+
+    Returns:
+        Path to a catalog-compatible RRD copy.
+
+    Raises:
+        ValueError: If ``source_path`` is not under ``rrd_root``.
+        RuntimeError: If Rerun cannot optimize the source RRD.
+    """
+    source_resolved: Path = source_path.expanduser().resolve()
+    rrd_root_resolved: Path = rrd_root.expanduser().resolve()
+    cache_root_resolved: Path = cache_root.expanduser().resolve()
+    try:
+        relative_path: Path = source_resolved.relative_to(rrd_root_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"Cannot optimize {source_resolved} for the catalog cache because it is not under "
+            f"RRD root {rrd_root_resolved}."
+        ) from exc
+    optimized_path: Path = cache_root_resolved / relative_path
+    if optimized_path.exists() and optimized_path.stat().st_mtime_ns >= source_resolved.stat().st_mtime_ns:
+        return optimized_path
+
+    optimized_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path = optimized_path.with_suffix(f"{optimized_path.suffix}.tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    completed_process: subprocess.CompletedProcess[str] = subprocess.run(
+        ["rerun", "rrd", "optimize", str(source_resolved), "-o", str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed_process.returncode != 0:
+        raise RuntimeError(
+            f"Failed to optimize {source_resolved} for Rerun catalog registration.\n"
+            f"{completed_process.stderr.strip()}"
+        )
+
+    tmp_path.replace(optimized_path)
+    return optimized_path
 
 
 def mount_catalog(
@@ -218,8 +309,17 @@ def mount_catalog(
     port: int | None = None,
     application_id: str = APPLICATION_ID,
     show_progress: bool = True,
+    optimize_for_catalog: bool = True,
+    catalog_rrd_cache_dir: Path = DEFAULT_CATALOG_RRD_CACHE_DIR,
+    optimize_datasets: tuple[str, ...] = DEFAULT_CATALOG_OPTIMIZE_DATASETS,
 ) -> rr.server.Server:
     """Mount local ExoEgo Forge RRDs as one Rerun catalog dataset per source.
+
+    The default path registers optimized cache copies rather than raw source
+    RRDs. Keep this enabled unless you are explicitly debugging Rerun catalog
+    import behavior: raw registration has been observed to drop important
+    visual columns from nontrivial recordings even though direct ``rerun
+    file.rrd`` playback still looks correct.
 
     Args:
         rrd_root: Directory containing local RRD files grouped by dataset.
@@ -228,6 +328,10 @@ def mount_catalog(
         port: gRPC port for the Rerun server. If ``None``, Rerun chooses a port.
         application_id: Rerun application id used for registered blueprints.
         show_progress: Whether to show a ``tqdm`` progress bar while registering.
+        optimize_for_catalog: Whether to register optimized cache copies. Turning
+            this off can recreate the catalog schema-loss bug described above.
+        catalog_rrd_cache_dir: Persistent cache root for optimized RRD copies.
+        optimize_datasets: Dataset names to optimize before registration.
 
     Returns:
         Running Rerun server with discovered RRD files registered as datasets.
@@ -235,9 +339,9 @@ def mount_catalog(
     Raises:
         FileNotFoundError: If no matching RRD files are found.
     """
-    uris_by_dataset: dict[str, list[str]] = discover_rrd_uris(rrd_root, datasets=datasets)
-    dataset_names: list[str] = sorted(uris_by_dataset)
-    total_files: int = sum(len(uris_by_dataset[name]) for name in dataset_names)
+    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=datasets)
+    dataset_names: list[str] = sorted(paths_by_dataset)
+    total_files: int = sum(len(paths_by_dataset[name]) for name in dataset_names)
 
     print(
         f"Mounting catalog from {rrd_root.expanduser().resolve()} "
@@ -250,10 +354,23 @@ def mount_catalog(
 
     iterator = tqdm(dataset_names, desc="register", unit="dataset", disable=not show_progress)
     for dataset_name in iterator:
-        uris: list[str] = uris_by_dataset[dataset_name]
-        iterator.set_postfix_str(f"{dataset_name} ({len(uris)} files)")
+        source_paths: list[Path] = paths_by_dataset[dataset_name]
+        if optimize_for_catalog and dataset_name in optimize_datasets:
+            iterator.set_postfix_str(f"{dataset_name} optimize ({len(source_paths)} files)")
+            registration_paths: list[Path] = [
+                _optimize_rrd_for_catalog(path, rrd_root=rrd_root, cache_root=catalog_rrd_cache_dir)
+                for path in source_paths
+            ]
+        else:
+            registration_paths = source_paths
+
+        uris: list[str] = [path.as_uri() for path in registration_paths]
+        iterator.set_postfix_str(f"{dataset_name} register ({len(uris)} files)")
         dataset = client.get_dataset(dataset_name)
-        dataset.register(uris, layer_name="base", on_duplicate=OnDuplicateSegmentLayer.ERROR).wait()  # type: ignore[attr-defined]
+        # Keep registration batched for importer throughput. REPLACE is intentional:
+        # it makes reruns idempotent when the same segment ids already have a "base"
+        # layer instead of failing halfway through catalog startup.
+        dataset.register(uris, layer_name="base", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
         _register_default_dataset_blueprint(
             server,
             dataset,
@@ -266,6 +383,8 @@ def mount_catalog(
 
 @dataclass
 class CatalogConfig:
+    """Config for the general ExoEgo Forge catalog index server."""
+
     rrd_root: Path = Path("data/exoego-forge-catalog")
     """Directory containing ``<dataset>/**/*.rrd`` files."""
     datasets: tuple[str, ...] = DEFAULT_CATALOG_DATASETS
@@ -274,20 +393,20 @@ class CatalogConfig:
     """gRPC port for the catalog server."""
     application_id: str = APPLICATION_ID
     """Application id used to save default dataset blueprints. Must match converted RRDs."""
+    optimize_for_catalog: bool = True
+    """Register optimized cache copies to avoid lossy Rerun catalog segment imports."""
+    catalog_rrd_cache_dir: Path = DEFAULT_CATALOG_RRD_CACHE_DIR
+    """Persistent cache directory for catalog-compatible optimized RRD copies."""
+    optimize_datasets: tuple[str, ...] = DEFAULT_CATALOG_OPTIMIZE_DATASETS
+    """Dataset names whose RRDs should be optimized before catalog registration.
+
+    Removing a dataset here can make its catalog table/segment schema incomplete
+    even when the underlying raw RRD opens correctly in the viewer.
+    """
     open_browser: bool = False
     """Also host a web viewer and open it."""
     web_port: int = 9091
     """Web viewer port. Only used when ``open_browser`` is true."""
-
-
-@dataclass
-class Assembly101LargeCatalogConfig(CatalogConfig):
-    """Catalog config for viewing only the generated full-size Assembly101 RRD dataset."""
-
-    rrd_root: Path = ASSEMBLY101_LARGE_RRD_ROOT
-    """Directory containing the generated ``assembly101/**/*.rrd`` files."""
-    datasets: tuple[str, ...] = ASSEMBLY101_LARGE_CATALOG_DATASETS
-    """Dataset directories to mount. This preset intentionally mounts only Assembly101."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,8 +415,10 @@ class RRDIndexRow:
 
     id: int
     """Stable row id after sorting by sequence key."""
+    dataset: str
+    """Source ExoEgo Forge dataset name."""
     sequence_key: str
-    """Human-readable sequence key under the Assembly101 dataset."""
+    """Human-readable sequence key under the source dataset."""
     recording_uri: str
     """Catalog segment URL used by the Rerun table preview column."""
     path: str
@@ -308,100 +429,49 @@ class RRDIndexRow:
     """User-editable marker flag column for table review workflows."""
 
 
-@dataclass
-class Assembly101LargeIndexConfig:
-    """Config for a lightweight index of the generated full-size Assembly101 RRD dataset."""
-
-    rrd_root: Path = ASSEMBLY101_LARGE_OPTIMIZED_RRD_ROOT
-    """Manifest-optimized directory containing ``assembly101/**/*.rrd`` files."""
-    port: int = 9988
-    """gRPC port for the catalog server."""
-    table_name: str = ASSEMBLY101_LARGE_INDEX_TABLE_NAME
-    """Name of the lightweight RRD URL table to create."""
-    open_browser: bool = False
-    """Also host a web viewer and open it."""
-    web_port: int = 9091
-    """Web viewer port. Only used when ``open_browser`` is true."""
-
-
-def _assembly101_dataset_dir(rrd_root: Path, *, dataset_name: str = "assembly101") -> Path:
-    """Resolve the Assembly101 dataset directory from a catalog or direct root.
+def table_name_for_dataset(dataset_name: str) -> str:
+    """Build the catalog table name for one source dataset.
 
     Args:
-        rrd_root: Either a catalog root containing ``assembly101/`` or the
-            Assembly101 dataset root itself.
-        dataset_name: Dataset directory name to look for under ``rrd_root``.
+        dataset_name: Source dataset name.
 
     Returns:
-        Resolved dataset root. This directory usually contains ``all/`` for
-        Assembly101 recordings.
-
-    Raises:
-        FileNotFoundError: If neither supported directory layout exists.
+        Catalog table name using underscores instead of dashes.
     """
-    root: Path = rrd_root.expanduser().resolve()
-    dataset_dir: Path = root / dataset_name
-    if dataset_dir.is_dir():
-        return dataset_dir
-
-    if root.is_dir() and ((root / "all").is_dir() or any(root.glob("*.rrd"))):
-        return root
-
-    optimize_command: str = (
-        "pixi run rerun rrd optimize "
-        f"{ASSEMBLY101_LARGE_RRD_ROOT} -o {ASSEMBLY101_LARGE_OPTIMIZED_RRD_ROOT}"
-    )
-    raise FileNotFoundError(
-        f"Manifest-optimized Assembly101 dataset directory does not exist: {dataset_dir}\n"
-        f"Create it with: {optimize_command}"
-    )
+    dataset_slug: str = dataset_name.replace("-", "_")
+    return f"{dataset_slug}_table"
 
 
-def _assembly101_registration_dir(dataset_dir: Path) -> Path:
-    """Choose the directory to register with Rerun for Assembly101 segments.
-
-    Args:
-        dataset_dir: Resolved Assembly101 dataset root.
-
-    Returns:
-        The ``all/`` subdirectory when present, otherwise ``dataset_dir``.
-    """
-    all_dir: Path = dataset_dir / "all"
-    if all_dir.is_dir():
-        return all_dir
-    return dataset_dir
-
-
-def build_rrd_index_rows_from_paths(rrd_root: Path, *, dataset_name: str = "assembly101") -> list[RRDIndexRow]:
+def build_rrd_index_rows_from_paths(rrd_root: Path, *, dataset_name: str) -> list[RRDIndexRow]:
     """Build filesystem-only RRD index rows.
 
     This helper bypasses the Rerun catalog and is mainly useful for tests and
     diagnostics.
 
     Args:
-        rrd_root: Catalog root or direct Assembly101 dataset root to scan.
-        dataset_name: Dataset directory name to look for when ``rrd_root`` is a
-            catalog root.
+        rrd_root: Catalog root containing one subdirectory per dataset.
+        dataset_name: Dataset directory name to scan under ``rrd_root``.
 
     Returns:
         Rows sorted by filesystem path with sequence keys relative to the
         resolved dataset root.
 
     Raises:
-        FileNotFoundError: If the dataset root cannot be resolved or contains no
-            RRD files.
+        FileNotFoundError: If the catalog root is missing or the dataset
+            contains no RRD files.
     """
-    dataset_dir: Path = _assembly101_dataset_dir(rrd_root, dataset_name=dataset_name)
+    root: Path = rrd_root.expanduser().resolve()
+    dataset_dir: Path = root / dataset_name
+    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(root, datasets=(dataset_name,))
+    rrd_paths: list[Path] = paths_by_dataset[dataset_name]
 
-    rrd_paths: list[Path] = sorted(dataset_dir.rglob("*.rrd"))
-    if not rrd_paths:
-        raise FileNotFoundError(f"No RRD files found under {dataset_dir}")
     rows: list[RRDIndexRow] = []
     for idx, rrd_path in enumerate(rrd_paths):
         resolved_path: Path = rrd_path.resolve()
         sequence_key: str = resolved_path.relative_to(dataset_dir).with_suffix("").as_posix()
         row: RRDIndexRow = RRDIndexRow(
             id=idx,
+            dataset=dataset_name,
             sequence_key=sequence_key,
             recording_uri=str(resolved_path),
             path=str(resolved_path),
@@ -409,21 +479,6 @@ def build_rrd_index_rows_from_paths(rrd_root: Path, *, dataset_name: str = "asse
         )
         rows.append(row)
     return rows
-
-
-def _first_list_value(value: Any) -> Any:
-    """Return the first element from Arrow list scalars converted to Python.
-
-    Args:
-        value: Python value from ``pyarrow.Array.to_pylist()``.
-
-    Returns:
-        The first list item for non-empty lists, ``None`` for empty lists, and
-        the original value for non-list values.
-    """
-    if isinstance(value, list):
-        return value[0] if value else None
-    return value
 
 
 def _optional_segment_column_values(table: pa.Table, column_name: str) -> list[Any | None]:
@@ -438,7 +493,15 @@ def _optional_segment_column_values(table: pa.Table, column_name: str) -> list[A
     """
     if column_name not in table.schema.names:
         return [None] * table.num_rows
-    return [_first_list_value(value) for value in table.column(column_name).to_pylist()]
+    values: list[Any | None] = []
+    for value in table.column(column_name).to_pylist():
+        # Rerun catalog metadata columns can arrive as one-item Arrow lists.
+        # Empty lists represent missing metadata for that row.
+        if isinstance(value, list):
+            values.append(value[0] if value else None)
+        else:
+            values.append(value)
+    return values
 
 
 def _sequence_key_from_recording_id(dataset_name: str, recording_id: str) -> str:
@@ -461,13 +524,13 @@ def build_rrd_index_rows_from_dataset(
     dataset_entry: Any,
     *,
     dataset_dir: Path,
-    dataset_name: str = "assembly101",
+    dataset_name: str,
 ) -> list[RRDIndexRow]:
     """Build table rows from registered catalog segment URLs.
 
     Args:
         dataset_entry: Rerun catalog dataset entry containing registered
-            Assembly101 segments.
+            recording segments.
         dataset_dir: Local dataset root used to resolve file paths and sizes.
         dataset_name: Dataset prefix used when deriving sequence keys from
             recording ids.
@@ -480,32 +543,26 @@ def build_rrd_index_rows_from_dataset(
     """
     segment_batches: list[pa.RecordBatch] = dataset_entry.segment_table().collect()
     if not segment_batches:
-        raise FileNotFoundError(
-            "Registered Assembly101 dataset has no segments. "
-            "Pass the directory that directly contains optimized .rrd files to Rerun Server."
-        )
+        raise FileNotFoundError(f"Registered {dataset_name} dataset has no segments.")
     segment_table: pa.Table = pa.Table.from_batches(segment_batches)
     if segment_table.num_rows == 0:
-        raise FileNotFoundError("Registered Assembly101 dataset has no segments.")
-    recording_ids: list[str] = [
-        str(recording_id) for recording_id in segment_table.column("rerun_segment_id").to_pylist()
-    ]
-    recording_uris: list[str] = [str(dataset_entry.segment_url(recording_id)) for recording_id in recording_ids]
+        raise FileNotFoundError(f"Registered {dataset_name} dataset has no segments.")
+    recording_ids: list[str] = [str(recording_id) for recording_id in segment_table.column("rerun_segment_id").to_pylist()]
     sequence_key_values: list[Any | None] = _optional_segment_column_values(segment_table, "property:info:sequence_key")
 
     rows: list[RRDIndexRow] = []
-    for idx, (recording_id, recording_uri, sequence_key_value) in enumerate(
-        zip(recording_ids, recording_uris, sequence_key_values, strict=True)
-    ):
+    for idx, (recording_id, sequence_key_value) in enumerate(zip(recording_ids, sequence_key_values, strict=True)):
         sequence_key: str = (
             str(sequence_key_value)
             if sequence_key_value is not None
             else _sequence_key_from_recording_id(dataset_name, recording_id)
         )
         rrd_path: Path = (dataset_dir / f"{sequence_key}.rrd").resolve()
+        recording_uri: str = str(dataset_entry.segment_url(recording_id))
         size_bytes: int = rrd_path.stat().st_size if rrd_path.exists() else 0
         row: RRDIndexRow = RRDIndexRow(
             id=idx,
+            dataset=dataset_name,
             sequence_key=sequence_key,
             recording_uri=recording_uri,
             path=str(rrd_path),
@@ -515,86 +572,123 @@ def build_rrd_index_rows_from_dataset(
 
     rows.sort(key=lambda row: row.sequence_key)
     return [
-        RRDIndexRow(idx, row.sequence_key, row.recording_uri, row.path, row.size_bytes, row.marker_flag)
+        RRDIndexRow(
+            id=idx,
+            dataset=row.dataset,
+            sequence_key=row.sequence_key,
+            recording_uri=row.recording_uri,
+            path=row.path,
+            size_bytes=row.size_bytes,
+            marker_flag=row.marker_flag,
+        )
         for idx, row in enumerate(rows)
     ]
 
 
-def _require_table_blueprints() -> None:
-    """Ensure the installed Rerun SDK supports experimental table blueprints.
-
-    Raises:
-        RuntimeError: If the current Rerun SDK does not expose the experimental
-            table blueprint API used by the lightweight Assembly101 index.
-    """
-    if not hasattr(rrb, "experimental") or not hasattr(rrb.experimental, "TableBlueprint"):
-        raise RuntimeError(
-            "Experimental table blueprints require Rerun SDK 0.32 or newer. "
-            "Run from the default Pixi environment."
-        )
-
-
-def build_assembly101_table_card_blueprint(*, timeline: str = "video_time") -> rrb.Blueprint:
-    """Build the lightweight table-card blueprint for Assembly101 previews.
+def _table_preview_camera(dataset_name: str, camera_names: dict[str, tuple[str, ...]]) -> tuple[str, str] | None:
+    """Choose the 2D video preview camera for a dataset table card.
 
     Args:
+        dataset_name: Dataset key used to select an explicit override when one
+            is needed to preserve known-good visual behavior.
+        camera_names: Camera stream names available for the dataset.
+
+    Returns:
+        Camera group and name, or ``None`` if no camera stream is available.
+    """
+    configured_camera: tuple[str, str] | None = CATALOG_TABLE_PREVIEW_CAMERAS.get(dataset_name)
+    if configured_camera is not None:
+        configured_kind: str = configured_camera[0]
+        configured_name: str = configured_camera[1]
+        if configured_name in camera_names.get(configured_kind, ()):
+            return configured_camera
+
+    for kind in ("ego", "exo"):
+        camera_names_for_kind: tuple[str, ...] = camera_names[kind]
+        if camera_names_for_kind:
+            return kind, camera_names_for_kind[0]
+
+    return None
+
+
+def build_table_card_blueprint(dataset_name: str, *, timeline: str = "video_time") -> rrb.Blueprint:
+    """Build the lightweight table-card blueprint for dataset previews.
+
+    This blueprint is embedded into the Arrow schema for the table itself. It is
+    intentionally separate from the full per-recording blueprint registered on
+    each catalog dataset, so changing table cards does not alter the layout used
+    after opening a segment URL.
+
+    Args:
+        dataset_name: Dataset key used to select known ego and exo camera names.
         timeline: Timeline name used by the preview views.
 
     Returns:
-        Rerun blueprint embedded into the Assembly101 index table schema.
+        Rerun blueprint embedded into the dataset table schema.
     """
-    camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES["assembly101"]
+    camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES.get(dataset_name, {"ego": (), "exo": ()})
 
-    # The 3D card should show poses, points, and camera frustums without trying
-    # to draw every video subtree in the table preview.
+    # The 3D card should show poses, points, and camera frustums. Video entities
+    # are explicitly excluded because they render in the sibling 2D card instead.
     video_exclusion_queries: list[str] = []
     for kind in ("ego", "exo"):
         for camera_name in camera_names[kind]:
-            exclusion_query: str = f"- /world/{kind}/{camera_name}/pinhole/video/**"
-            video_exclusion_queries.append(exclusion_query)
-
-    # Use a narrow absolute window near the start so each card has a stable,
-    # cheap preview frame instead of scanning the full recording.
-    preview_start: rr.datatypes.TimeRangeBoundary = rrb.TimeRangeBoundary.absolute(
-        seconds=ASSEMBLY101_CARD_PREVIEW_START_SECONDS,
-    )
-    preview_end: rr.datatypes.TimeRangeBoundary = rrb.TimeRangeBoundary.absolute(
-        seconds=ASSEMBLY101_CARD_PREVIEW_END_SECONDS,
-    )
-    preview_time_ranges: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
-        timeline=timeline,
-        start=preview_start,
-        end=preview_end,
-    )
+            video_entity_path: str = f"/world/{kind}/{camera_name}/pinhole/video"
+            video_exclusion_queries.append(f"- {video_entity_path}")
+            video_exclusion_queries.append(f"- {video_entity_path}/**")
 
     scene_preview_view: rrb.Spatial3DView = rrb.Spatial3DView(
         origin="/",
         name="3D Preview",
         contents=["+ /**", *video_exclusion_queries],
         spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
-        time_ranges=preview_time_ranges,
     )
 
-    # The table card also includes one concrete video stream for quick visual
-    # recognition of the sequence.
-    video_origin: str = f"/world/{ASSEMBLY101_CARD_PREVIEW_VIDEO_KIND}/{ASSEMBLY101_CARD_PREVIEW_VIDEO_CAMERA}/pinhole"
-    video_preview_view: rrb.Spatial2DView = rrb.Spatial2DView(
-        origin=video_origin,
-        name=f"{ASSEMBLY101_CARD_PREVIEW_VIDEO_KIND} {ASSEMBLY101_CARD_PREVIEW_VIDEO_CAMERA}",
-        contents=f"{video_origin}/**",
+    preview_views: list[Any] = [scene_preview_view]
+    preview_camera: tuple[str, str] | None = _table_preview_camera(dataset_name, camera_names)
+    if preview_camera is not None:
+        # The table card also includes one concrete video stream for quick visual
+        # recognition of the sequence.
+        preview_video_kind: str = preview_camera[0]
+        preview_video_camera: str = preview_camera[1]
+        video_origin: str = f"/world/{preview_video_kind}/{preview_video_camera}/pinhole"
+        video_preview_view: rrb.Spatial2DView = rrb.Spatial2DView(
+            origin=video_origin,
+            name=f"{preview_video_kind} {preview_video_camera}",
+            contents=f"{video_origin}/**",
+        )
+        preview_views.append(video_preview_view)
+
+    # Keep table previews deterministic across datasets by selecting the first
+    # ten seconds and asking Rerun to play that selected window in a loop. This
+    # belongs on the TimePanel rather than the 3D view: a 3D VisibleTimeRange
+    # switches the spatial view into range-query mode and stacks temporal hand
+    # keypoints together.
+    preview_start_time: rr.datatypes.TimeInt = rr.datatypes.TimeInt(seconds=TABLE_CARD_PREVIEW_START_SECONDS)
+    preview_end_time: rr.datatypes.TimeInt = rr.datatypes.TimeInt(seconds=TABLE_CARD_PREVIEW_END_SECONDS)
+    preview_time_selection: rrb.components.AbsoluteTimeRange = rrb.components.AbsoluteTimeRange(
+        min=preview_start_time,
+        max=preview_end_time,
+    )
+    table_preview_time_panel: rrb.TimePanel = rrb.TimePanel(
+        timeline=timeline,
+        play_state="playing",
+        loop_mode="selection",
+        time_selection=preview_time_selection,
     )
 
     return rrb.Blueprint(
-        scene_preview_view,
-        video_preview_view,
+        *preview_views,
+        table_preview_time_panel,
         collapse_panels=True,
     )
 
 
-def build_rrd_index_table_blueprint(*, timeline: str = "video_time") -> str:
+def build_rrd_index_table_blueprint(dataset_name: str, *, timeline: str = "video_time") -> str:
     """Build a Rerun table blueprint with on-demand recording previews.
 
     Args:
+        dataset_name: Dataset key used to select the table-card blueprint.
         timeline: Timeline name used by the preview views.
 
     Returns:
@@ -603,9 +697,15 @@ def build_rrd_index_table_blueprint(*, timeline: str = "video_time") -> str:
     Raises:
         RuntimeError: If the installed Rerun SDK does not support table blueprints.
     """
-    _require_table_blueprints()
+    experimental_api: Any | None = getattr(rrb, "experimental", None)
+    table_blueprint_archetype: Any | None = getattr(experimental_api, "TableBlueprint", None)
+    if table_blueprint_archetype is None:
+        raise RuntimeError(
+            "Experimental table blueprints require Rerun SDK 0.32 or newer. "
+            "Run from the default Pixi environment."
+        )
 
-    blueprint: rrb.Blueprint = build_assembly101_table_card_blueprint(timeline=timeline)
+    blueprint: rrb.Blueprint = build_table_card_blueprint(dataset_name, timeline=timeline)
     blueprint_stream = RecordingStream._from_native(
         bindings.new_blueprint(
             application_id="embedded",
@@ -618,14 +718,13 @@ def build_rrd_index_table_blueprint(*, timeline: str = "video_time") -> str:
     blueprint._log_to_stream(blueprint_stream)
     blueprint_stream.log(
         "/table",
-        rrb.experimental.TableBlueprint(
+        table_blueprint_archetype(
             segment_preview_column="recording_uri",
             flag_column=MARKER_FLAG_COLUMN,
             grid_view_card_title="sequence_key",
             url_column="recording_uri",
         ),
     )
-    rrb.TimePanel(timeline=timeline)._log_to_stream(blueprint_stream)
 
     # Rerun reads this base64 payload from Arrow schema metadata to configure table cards.
     rbl_bytes: bytes = blueprint_stream.memory_recording().drain_as_bytes()
@@ -646,6 +745,7 @@ def build_rrd_index_table_schema(encoded_blueprint: str) -> pa.Schema:
     return pa.schema(
         [
             pa.field("id", pa.int64(), metadata={rr.SORBET_IS_TABLE_INDEX: "true"}),
+            pa.field("dataset", pa.utf8()),
             pa.field("sequence_key", pa.utf8()),
             pa.field("recording_uri", pa.utf8()),
             pa.field("path", pa.utf8()),
@@ -656,11 +756,19 @@ def build_rrd_index_table_schema(encoded_blueprint: str) -> pa.Schema:
     )
 
 
-def create_rrd_index_table(client: Any, *, table_name: str, rows: list[RRDIndexRow]) -> Any:
+def create_rrd_index_table(
+    client: Any,
+    *,
+    dataset_name: str,
+    table_name: str,
+    rows: list[RRDIndexRow],
+) -> Any:
     """Create or replace a lightweight RRD URL index table.
 
     Args:
         client: Rerun catalog client connected to the hosting server.
+        dataset_name: Dataset key used to build the embedded table-card
+            blueprint.
         table_name: Name of the catalog table to create.
         rows: Row records to append to the table.
 
@@ -674,11 +782,12 @@ def create_rrd_index_table(client: Any, *, table_name: str, rows: list[RRDIndexR
     if table_name in existing_table_names:
         client.get_table(table_name).delete()
 
-    encoded_blueprint: str = build_rrd_index_table_blueprint()
+    encoded_blueprint: str = build_rrd_index_table_blueprint(dataset_name)
     schema: pa.Schema = build_rrd_index_table_schema(encoded_blueprint)
     table = client.create_table(table_name, schema)
     table.append(
         id=[row.id for row in rows],
+        dataset=[row.dataset for row in rows],
         sequence_key=[row.sequence_key for row in rows],
         recording_uri=[row.recording_uri for row in rows],
         path=[row.path for row in rows],
@@ -688,84 +797,67 @@ def create_rrd_index_table(client: Any, *, table_name: str, rows: list[RRDIndexR
     return table
 
 
-def main_large_index(config: Assembly101LargeIndexConfig) -> None:
-    """Host the lightweight Assembly101 RRD URL index.
-
-    Args:
-        config: Runtime configuration for the optimized Assembly101 dataset and
-            catalog table server.
-    """
-    dataset_dir: Path = _assembly101_dataset_dir(config.rrd_root, dataset_name="assembly101")
-    registration_dir: Path = _assembly101_registration_dir(dataset_dir)
-    print(f"Serving manifest-backed Assembly101 RRD dataset from {registration_dir}.", flush=True)
-
-    with rr.server.Server(datasets={"assembly101": registration_dir}, port=config.port) as server:
-        client = server.client()
-        dataset_entry = client.get_dataset("assembly101")
-        _register_default_dataset_blueprint(
-            server,
-            dataset_entry,
-            dataset_name="assembly101",
-            application_id=APPLICATION_ID,
-        )
-        rows: list[RRDIndexRow] = build_rrd_index_rows_from_dataset(
-            dataset_entry,
-            dataset_dir=dataset_dir,
-            dataset_name="assembly101",
-        )
-        total_size_bytes: int = sum(row.size_bytes for row in rows)
-        print(f"Creating Assembly101 preview table ({len(rows)} RRDs, {total_size_bytes:,} bytes).", flush=True)
-        table = create_rrd_index_table(client, table_name=config.table_name, rows=rows)
-        catalog_url: str = server.url()
-        table_url: str = f"{catalog_url}/entry/{table.id}"
-
-        print()
-        print("-" * 72)
-        print(f"  Catalog URL:  {catalog_url}")
-        print(f"  Index table:  {table_url}")
-        print()
-        print("  Open the table with:")
-        print(f"    pixi run rerun {table_url}")
-        print()
-        print("  The table contains catalog segment URLs. Open one row to load just that recording.")
-        print("  Enable: Settings > Experimental > Table cards and blueprints")
-        print("-" * 72)
-
-        if config.open_browser:
-            rr.serve_web_viewer(web_port=config.web_port, open_browser=True, connect_to=table_url)
-            print(f"\nWeb viewer hosted at http://127.0.0.1:{config.web_port} with the table loaded.")
-
-        print("\nServer is up. Ctrl-C to stop.")
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            print("shutting down")
-
-
 def main(config: CatalogConfig) -> None:
     """Host a Rerun catalog for converted ExoEgo Forge RRD files.
 
     Args:
         config: Runtime configuration for the catalog server.
     """
+    rrd_root: Path = config.rrd_root.expanduser().resolve()
+    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=config.datasets)
+    dataset_names: list[str] = sorted(paths_by_dataset)
+
     with mount_catalog(
-        config.rrd_root, datasets=config.datasets, port=config.port, application_id=config.application_id
+        rrd_root,
+        datasets=config.datasets,
+        port=config.port,
+        application_id=config.application_id,
+        optimize_for_catalog=config.optimize_for_catalog,
+        catalog_rrd_cache_dir=config.catalog_rrd_cache_dir,
+        optimize_datasets=config.optimize_datasets,
     ) as server:
+        client = server.client()
+        table_urls_by_name: dict[str, str] = {}
+        for dataset_name in dataset_names:
+            dataset_dir: Path = rrd_root / dataset_name
+            dataset_entry = client.get_dataset(dataset_name)
+            rows: list[RRDIndexRow] = build_rrd_index_rows_from_dataset(
+                dataset_entry,
+                dataset_dir=dataset_dir,
+                dataset_name=dataset_name,
+            )
+            table_name: str = table_name_for_dataset(dataset_name)
+            total_size_bytes: int = sum(row.size_bytes for row in rows)
+            print(f"Creating {table_name} ({len(rows)} RRDs, {total_size_bytes:,} bytes).", flush=True)
+            table = create_rrd_index_table(
+                client,
+                dataset_name=dataset_name,
+                table_name=table_name,
+                rows=rows,
+            )
+            table_urls_by_name[table_name] = f"{server.url()}/entry/{table.id}"
+
         url: str = server.url()
         print()
         print("-" * 72)
         print(f"  Catalog URL:  {url}")
         print()
+        print("  Tables:")
+        for table_name, table_url in table_urls_by_name.items():
+            print(f"    {table_name}: {table_url}")
+        print()
         print("  In the Rerun viewer: + -> Open Data Source -> paste the URL")
-        print(f"  Or from a terminal:  rerun {url}")
-        print("-" * 72)
+        print("  Open a table with:")
+        print("    pixi run rerun <table-url>")
+        print()
+        print("  Enable: Settings > Experimental > Table cards and blueprints")
+        print("-" * 72, flush=True)
 
         if config.open_browser:
             rr.serve_web_viewer(web_port=config.web_port, open_browser=True, connect_to=url)
             print(f"\nWeb viewer hosted at http://127.0.0.1:{config.web_port} with the catalog loaded.")
 
-        print("\nServer is up. Ctrl-C to stop.")
+        print("\nServer is up. Ctrl-C to stop.", flush=True)
         try:
             while True:
                 time.sleep(3600)

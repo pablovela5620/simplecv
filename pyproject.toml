@@ -69,9 +69,9 @@ description = "Download Aria Gen2 Pilot sequences from CDN URLs"
 cmd = "python tools/preprocess_aria_gen2_pilot.py"
 description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for simplecv"
 
-[tool.pixi.tasks.catalog-assembly101-large]
-cmd = "python tools/catalog_assembly101_large.py"
-description = "Host a lightweight URL index for the generated full-size Assembly101 RRD catalog"
+[tool.pixi.tasks.catalog]
+cmd = "python tools/catalog.py"
+description = "Host the ExoEgo Forge RRD catalog index"
 
 [tool.pixi.tasks._download-example-polycam-data]
 cmd = """
@@ -98,19 +98,9 @@ outputs = ["data/412-hand.zip"]
 description = "Downloads an example easymocap dataset from huggingface, this may take a while"
 
 [tool.pixi.tasks._download-hocap-sample]
-cmd = """
-    test -e data/hocap/sample.zip \
-    && test -e data/hocap/sample \
-    || (
-        mkdir -p data/hocap/ \
-        && huggingface-cli download pablovela5620/hocap-sample \
-        sample.zip --repo-type dataset \
-        --local-dir data/hocap/ \
-        && unzip -o data/hocap/sample.zip -d data/hocap/
-    )
-    """
+cmd = "test -e data/hocap/sample.zip && test -e data/hocap/sample || (mkdir -p data/hocap/ && huggingface-cli download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && unzip -o data/hocap/sample.zip -d data/hocap/)"
 outputs = ["data/hocap/sample.zip", "data/hocap/sample"]
-description = "Downloads and extracts an example polycam dataset from huggingface, this may take a while"
+description = "Downloads and extracts an example HOCap dataset from huggingface, this may take a while"
 
 [tool.pixi.tasks._download-assembly101-sample]
 cmd = """
