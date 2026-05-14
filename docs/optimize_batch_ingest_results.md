@@ -1,5 +1,30 @@
 # Batch-Ingest Optimization Results — Assembly101
 
+> **RETRACTION (2026-05-14 ~04:35 PT).** Experiments **exp-12, exp-17,
+> exp-19, exp-20** were invalid. They defaulted ``log_labels=False`` and
+> the parity validator silently passed them — because the validator
+> only inspected the *recording* substore of each RRD via the catalog
+> server's ``schema.component_columns()``, while the GT keypoint streams
+> (``coco133_xyz``, ``coco133_uv``, ``KeypointConfidence``) actually
+> land in the *blueprint* substore (217 k rows/sequence). Switching
+> ``log_labels=False`` dropped those rows; the validator never noticed.
+>
+> Commit ``0efe81f`` (a) restores ``log_labels=True`` as the default and
+> (b) strengthens the validator to walk both stores via
+> ``rerun_bindings.RrdReaderInternal`` and require matching keypoint-row
+> totals.
+>
+> **True post-retraction champion (commit ``0efe81f``):**
+> * 1-seq wall: 6.87 s  (vs 22.14 s baseline → ≈ 69 %)
+> * 3-seq seq: 18.91 s  (vs 54.80 s → ≈ 65 %)
+> * 10-seq 8-worker: 31.12 s  (vs ≈ 182 s baseline → ≈ 83 %)
+> * 30-seq 8-worker: not re-measured yet
+>
+> The retracted "95.1 %" headline was a measurement artifact; the real
+> headline is roughly the exp-11 number (~84 %). Individual
+> optimizations exp-01..exp-11 + exp-13/14/15/18/21 remain valid; only
+> the gated-on-log_labels=False ones are no-ops or dead code now.
+
 Append-only log driven by `docs/optimize_batch_ingest_goal.md`. Each row is
 one experiment. The current champion is marked `Y` in the `champion`
 column. All wall-clock numbers are from `/usr/bin/time -f '%e'` on the same
@@ -29,21 +54,22 @@ to `/tmp/batch-bench/<exp_id>/`.
 | exp-18 | 2026-05-14 03:53 | stash per-cam ``(world_t_cam, world_R_cam)`` stacks on the ego sequence as ``_cam_batched_stacks`` so ``view_exoego.setup_scene`` skips rebuilding them from per-frame `Fisheye62Parameters` attribute lookups | `simplecv/data/ego/assembly101_ego.py`, `simplecv/apis/view_exoego.py` | — | 9.37 (8w) | — / 0.94 | — / 94.9 | PASS |   | wall change at noise; removes a duplicate ~16k-iter list-comp |
 | exp-19 | 2026-05-14 04:04 | when `load_labels=False`, return ``[rep_fp] * n_frames`` per cam (16k references to one shared `Fisheye62Parameters`) instead of allocating 64k unique objects; keeps the full per-frame allocation behind ``--log-labels`` because the fisheye projection still derefs per-frame extrinsics | `simplecv/data/ego/assembly101_ego.py` | — | 9.03 (8w) | — / 0.90 | — / 95.1 | PASS |   | 1-seq wall 2.88 → 2.61; saves ~0.2 s/seq of pure Python (~64k object allocations gone); `--log-labels` path verified 3/3 |
 | exp-20 | 2026-05-14 04:08 | skip the per-frame `np.linalg.inv` and projection-matrix einsum in `load_ego_cams` when `load_labels=False` — only frame 0's inverse is needed, broadcast the rest | `simplecv/data/ego/assembly101_ego.py` | — | 8.88 (8w) | — / 0.89 | — / 95.2 | PASS |   | 1-seq wall 2.61 → 2.53 |
-| exp-21 | 2026-05-14 04:10 | move `rr.AssetVideo(contents=)` construction and `read_frame_timestamps_nanos()` into the same per-MP4 ThreadPoolExecutor so the 12 inits run concurrently instead of sequentially | `simplecv/data/exoego/assembly101.py` | — | 8.94 (8w, mean of 3 trials) | — / 0.89 | — / 95.1 | PASS | Y | 1-seq wall 2.53 → 2.37 (biggest single relative drop of the recent passes); 3-trial range 8.86–8.99 |
+| exp-21 | 2026-05-14 04:10 | move `rr.AssetVideo(contents=)` construction and `read_frame_timestamps_nanos()` into the same per-MP4 ThreadPoolExecutor so the 12 inits run concurrently instead of sequentially | `simplecv/data/exoego/assembly101.py` | — | 8.94 (8w, mean of 3 trials) | — / 0.89 | — / 95.1 | PASS (broken validator) |   | the cited 8.94 s and 95.1 % were measured with the bogus parity validator + ``log_labels=False`` default; see retraction note at top of this file |
+| retraction-fix | 2026-05-14 04:35 | flip ``log_labels`` default back to ``True``; strengthen parity to walk both recording + blueprint stores and require matching keypoint-row totals | `simplecv/apis/batch_raw_to_rrd.py`, `tools/validate_assembly101_rrd_parity.py` | 18.91 | 31.12 (8w) | 6.30 / 3.11 | 65.5 / ≈83 | PASS (strict) | Y | 1-seq wall 6.87s; 30-seq scaling not re-measured. Parity now counts 217 204 keypoint rows in both GT and candidate blueprint stores |
 
 ## Leaderboard (top 5 valid by sec_per_seq, smallest = fastest)
 
 | rank | exp_id | sec_per_seq | speedup_pct | summary |
 | ---- | ------ | ----------- | ----------- | ------- |
-| 1 | exp-21 (10-seq, 8w) | 0.89 | 95.1 | exp-20 + parallel AssetVideo construction (3-trial mean 8.94 s) |
-| 2 | exp-20 (10-seq, 8w) | 0.89 | 95.2 | exp-19 + skip per-frame inv when not projecting |
-| 3 | exp-19 (10-seq, 8w) | 0.90 | 95.1 | exp-17 + shared rep `Fisheye62Parameters` refs when not projecting |
-| 4 | exp-17 (10-seq, 8w) | 0.94 | 94.9 | exp-15 + skip dataset-side `load_labels()` when not emitting |
-| 5 | exp-15 (10-seq, 8w) | 1.01 | 94.5 | exp-14 + orjson for big JSON files |
+| 1 | **retraction-fix (10-seq, 8w)** | **3.11** | **≈83** | true champion — keeps GT keypoint chunks, strict parity |
+| 2 | exp-15 (10-seq, 8w) | 1.01 | 94.5 (broken) | INVALID — measured with broken validator + `log_labels=False` |
+| 3 | exp-17/19/20/21 (10-seq, 8w) | 0.89–0.94 | 94.5–95.2 (broken) | INVALID — same root cause as exp-12 |
+| 4 | exp-13 (10-seq, 8w) | 1.13 | 93.8 (broken) | INVALID — built on exp-12 default |
+| 5 | exp-11 (10-seq, 8w) | 2.95 | 83.9 | **last valid pre-retraction row**; same ballpark as the retraction-fix champion |
 
 ## Current Champion Diff Summary
 
-- **champion**: `exp-21`
+- **champion**: `retraction-fix` (commit `0efe81f`) — same code as exp-21 minus the broken `log_labels=False` default
 - **diff (vs baseline)**: 21 cumulative optimizations (19 kept, 2 reverted attempts noted inline) stacked on top of the original `tools/batch_raw_to_rrd.py assembly101` flow:
   1. **exp-01** parallel MP4 byte preload + `_video_blobs` reuse + explicit `media_type="video/mp4"`
   2. **exp-02** vectorized per-frame `nanmean` in `_ConfidenceAwareColumnList.partition`
@@ -72,9 +98,9 @@ to `/tmp/batch-bench/<exp_id>/`.
 
 | measurement | baseline | champion (exp-21) | speedup |
 | ----------- | -------: | ----------------: | ------: |
-| 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 2.44s (3-trial mean)  | 89.0 % |
-| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | ~5.7s  | ~89.6 % |
-| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 8.92–9.00s (3-trial mean 8.96)  | 95.1 % |
-| 30-seq wall (`--max-conversions 30 --num-workers 8`)  | ≈548s* | 29.85s | 94.6 % |
+| 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 6.87s  | 69.0 % |
+| 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 18.91s | 65.5 % |
+| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 31.12s | ≈83 % |
+| 30-seq wall (`--max-conversions 30 --num-workers 8`)  | ≈548s* | not re-measured | — |
 
 \* baseline 10-/30-seq estimated from `18.27 sec/seq × N`.
