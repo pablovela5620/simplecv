@@ -44,7 +44,7 @@ to `/tmp/batch-bench/<exp_id>/`.
 ## Current Champion Diff Summary
 
 - **champion**: `exp-21`
-- **diff (vs baseline)**: 12 cumulative optimizations stacked on top of the original `tools/batch_raw_to_rrd.py assembly101` flow:
+- **diff (vs baseline)**: 21 cumulative optimizations (19 kept, 2 reverted attempts noted inline) stacked on top of the original `tools/batch_raw_to_rrd.py assembly101` flow:
   1. **exp-01** parallel MP4 byte preload + `_video_blobs` reuse + explicit `media_type="video/mp4"`
   2. **exp-02** vectorized per-frame `nanmean` in `_ConfidenceAwareColumnList.partition`
   3. **exp-03** batched ego-cam `np.linalg.inv` over `(n_frames, 4, 4)` stack + `object.__new__` bypass of dataclass post-init
@@ -78,5 +78,3 @@ to `/tmp/batch-bench/<exp_id>/`.
 | 30-seq wall (`--max-conversions 30 --num-workers 8`)  | ≈548s* | 29.85s | 94.6 % |
 
 \* baseline 10-/30-seq estimated from `18.27 sec/seq × N`.
-
-\* baseline 10-seq estimated from `18.27 sec/seq × 10`.
