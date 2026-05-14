@@ -212,6 +212,10 @@ def main(config: BatchConvertConfig):
         runnable.append((seq_cfg, rrd_save_path, identity))
 
     if config.num_workers > 1 and len(runnable) > 1:
+        # ``spawn`` only — fork would inherit rerun's global RecordingStream
+        # state from the parent process, which causes intermittent parity
+        # failures (~4/10 sequences) where some workers pick up incorrect
+        # static-component dedup state from the parent.
         ctx = get_context("spawn")
         worker_count: int = min(config.num_workers, len(runnable))
         # Submit longest-running jobs first (estimated by source-data size) so
