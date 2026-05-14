@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Generic, Self, TypeVar
 
 import cv2
 import numpy as np
@@ -15,6 +15,7 @@ from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.image_types import BGRList
 
 ConfigT = TypeVar("ConfigT", bound=BaseExoEgoDatasetConfig)
@@ -104,6 +105,22 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
     def iter_dataset(self):
         """Sugar so you can call this on an *instance*."""
         yield from self.__class__.iter_episode_sequences(self.config)
+
+    def num_sequences(self) -> int:
+        """Return how many episode sequences ``iter_dataset`` will yield."""
+        return self.__class__.num_sequences_for_config(self.config)
+
+    @property
+    def sequence_identity(self) -> SequenceIdentity:
+        """Stable catalog identity for this sequence."""
+        return self.__class__.sequence_identity_for_config(self.config)
+
+    @classmethod
+    def sequence_identity_for_config(cls: type[Self], cfg: ConfigT) -> SequenceIdentity:
+        """Build a generic identity from ``sequence_name`` when a dataset does not override it."""
+        sequence_name: str = str(getattr(cfg, "sequence_name", cls.__name__.removesuffix("Sequence")))
+        dataset_name: str = cls.__name__.removesuffix("Sequence").lower()
+        return SequenceIdentity(dataset=dataset_name, parts=(sequence_name,))
 
     @abstractmethod
     def _build_ego(self) -> BaseEgoSequence[ConfigT] | None:
@@ -282,6 +299,10 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
     @classmethod
     @abstractmethod
     def iter_episode_sequences(cls: type[Self], cfg: ConfigT) -> Generator[Self, None, None]: ...
+
+    @classmethod
+    @abstractmethod
+    def num_sequences_for_config(cls: type[Self], cfg: ConfigT) -> int: ...
 
     @property
     @abstractmethod

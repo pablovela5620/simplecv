@@ -18,6 +18,12 @@ this will drop you into the activated environment (currently only linux/macos)
 ```bash
 pixi task list
 ```
+
+### Rerun Environment
+The default Pixi environment uses the released `rerun-sdk[datafusion]>=0.32`, so normal Rerun commands and catalog tasks should run without `-e rerun-prerelease`.
+
+The `rerun-prerelease` environment is kept in `pyproject.toml` as a spare lane for testing future prerelease wheels, but avoid using it unless a specific unreleased Rerun feature is required.
+
 ### Visualize Polycam Data
 Quick example
 ```

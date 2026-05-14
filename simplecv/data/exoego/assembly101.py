@@ -20,6 +20,7 @@ from simplecv.data.exo.assembly101_exo import Assembly101ExoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 from simplecv.video_utils import Resolution
 
@@ -48,6 +49,11 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
         self._ego_stream_names: list[str] = []
         self._exo_stream_names: list[str] = []
         super().__init__(cfg)
+
+    @classmethod
+    def sequence_identity_for_config(cls, cfg: Assembly101Config) -> SequenceIdentity:
+        split: str = cfg.split or "all"
+        return SequenceIdentity(dataset="assembly101", parts=(split, cfg.sequence_name))
 
     def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
         canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
@@ -124,7 +130,15 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
         }
 
         xyz_stack_list: list[Float32[ndarray, "2 21 3"]] = []
-        for frame_number, _ in enumerate(tqdm(loaded_xyz_dict)):
+        for frame_number, _ in enumerate(
+            tqdm(
+                loaded_xyz_dict,
+                desc="Loading 3D labels",
+                disable=not self.config.verbose,
+                leave=False,
+                position=1,
+            )
+        ):
             keypoints: Hand3DKeypoints = loaded_xyz_dict[frame_number]
             xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
 
@@ -162,14 +176,7 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
             - Prints subject ID and sequence name for each iteration using `icecream.ic`.
             - Pauses execution for user input after each sequence (likely for debugging).
         """
-        root: Path = cfg.root_directory
-        videos_dir: Path = root / "videos" / "av1"
-        assert videos_dir.exists(), f"Directory {videos_dir} does not exist"
-
-        sequence_dirs: list[Path] = natsorted(
-            [d for d in videos_dir.iterdir() if d.is_dir()],
-        )
-        for sequence_dir in sequence_dirs:
+        for sequence_dir in cls._iter_sequence_dirs(cfg):
             # print(sequence_dir.name)  # Optionally use logging here
             new_cfg = replace(
                 cfg,
@@ -179,10 +186,21 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
             try:
                 seq = cls(new_cfg)  # may raise
             except Exception as e:
-                print(f"[skip] {sequence_dir.name}: {e}")
+                tqdm.write(f"[skip] {sequence_dir.name}: {e}")
                 continue  # go on to the next directory
             else:
                 yield seq
+
+    @classmethod
+    def num_sequences_for_config(cls, cfg: Assembly101Config) -> int:
+        return len(cls._iter_sequence_dirs(cfg))
+
+    @staticmethod
+    def _iter_sequence_dirs(cfg: Assembly101Config) -> list[Path]:
+        root: Path = cfg.root_directory
+        videos_dir: Path = root / "videos" / "av1-720-new"
+        assert videos_dir.exists(), f"Directory {videos_dir} does not exist"
+        return natsorted([d for d in videos_dir.iterdir() if d.is_dir()])
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:

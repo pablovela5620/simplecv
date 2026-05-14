@@ -115,7 +115,13 @@ class Assembly101ExoSequence(BaseExoSequence[Assembly101Config]):
         if self.config.resize is not None:
             exo_video_files: list[Path] = [
                 reencode_video_optimal(p, resize=self.config.resize)
-                for p in tqdm(exo_video_files, desc="Re-encoding videos")
+                for p in tqdm(
+                    exo_video_files,
+                    desc="Re-encoding videos",
+                    disable=not self.config.verbose,
+                    leave=False,
+                    position=1,
+                )
             ]
 
         return exo_video_files

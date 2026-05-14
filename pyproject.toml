@@ -15,7 +15,7 @@ dependencies = [
     "opencv-python>=4.10.0",
     "pyserde>=0.20.0,<0.30",
     "typing-extensions>=4.1.0,<4.13.0",
-    "rerun-sdk[datafusion]>=0.30",
+    "rerun-sdk[datafusion]>=0.32",
     "tyro>=0.9.1",
     "tqdm",
     "hf-transfer>=0.1.9",
@@ -69,6 +69,10 @@ description = "Download Aria Gen2 Pilot sequences from CDN URLs"
 cmd = "python tools/preprocess_aria_gen2_pilot.py"
 description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for simplecv"
 
+[tool.pixi.tasks.catalog]
+cmd = "python tools/catalog.py"
+description = "Host the ExoEgo Forge RRD catalog index"
+
 [tool.pixi.tasks._download-example-polycam-data]
 cmd = """
     test -e data/example-room-scan-poly.zip
@@ -94,19 +98,9 @@ outputs = ["data/412-hand.zip"]
 description = "Downloads an example easymocap dataset from huggingface, this may take a while"
 
 [tool.pixi.tasks._download-hocap-sample]
-cmd = """
-    test -e data/hocap/sample.zip \
-    && test -e data/hocap/sample \
-    || (
-        mkdir -p data/hocap/ \
-        && huggingface-cli download pablovela5620/hocap-sample \
-        sample.zip --repo-type dataset \
-        --local-dir data/hocap/ \
-        && unzip -o data/hocap/sample.zip -d data/hocap/
-    )
-    """
+cmd = "test -e data/hocap/sample.zip && test -e data/hocap/sample || (mkdir -p data/hocap/ && huggingface-cli download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && unzip -o data/hocap/sample.zip -d data/hocap/)"
 outputs = ["data/hocap/sample.zip", "data/hocap/sample"]
-description = "Downloads and extracts an example polycam dataset from huggingface, this may take a while"
+description = "Downloads and extracts an example HOCap dataset from huggingface, this may take a while"
 
 [tool.pixi.tasks._download-assembly101-sample]
 cmd = """
@@ -223,7 +217,7 @@ beartype = ">=0.21.0,<0.22"
 ruff = ">=0.12.7,<0.13"
 pytest = ">=8.3.3,<9"
 hypothesis = ">=6.112.1,<7"
-pyrefly = "==0.50.0"
+pyrefly = ">=1.0.0"
 types-tqdm = ">=4.67.0,<5"
 pyarrow-stubs = "*"
 
@@ -272,6 +266,14 @@ pyrealsense2 = "==2.53.1.4623"
 # T265 diagnostics helpers (run with: pixi run -e t265 <task>)
 t265-enum = { cmd = "rs-enumerate-devices", description = "List RealSense devices using librealsense CLI" }
 
+# [tool.pixi.feature.rerun-prerelease.pypi-dependencies]
+# rerun-sdk = { version = "==0.32.0a1+dev", extras = ["datafusion"] }
+
+# [tool.pixi.feature.rerun-prerelease.pypi-options]
+# index-url = "https://pypi.org/simple"
+# find-links = [{ url = "https://build.rerun.io/commit/3505806/wheels/" }]
+# prerelease-mode = "allow"
+
 [tool.pixi.environments]
 default = { features = [] }
 cuda129 = { features = [
@@ -281,6 +283,7 @@ t265 = { features = ["t265"], no-default-feature = true }
 gpu = { features = ["cuda129"], solve-group = "cuda129" }
 dev = { features = ["dev", "cuda129"], solve-group = "cuda129" }
 notebook = { features = ["notebook"] }
+# rerun-prerelease = { features = ["rerun-prerelease", "dev"] }
 
 
 # Minimal environment for running data extraction notebooks without heavy ML deps

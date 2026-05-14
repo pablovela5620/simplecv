@@ -116,6 +116,10 @@ class RobocapSequence(BaseExoEgoSequence[RobocapConfig]):
         """Yield exactly one sequence for the configured session/segment."""
         yield cls(cfg)
 
+    @classmethod
+    def num_sequences_for_config(cls, cfg: RobocapConfig) -> int:
+        return 1
+
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
         return rr.ViewCoordinates.LFD

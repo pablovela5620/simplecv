@@ -8,3 +8,4 @@ from simplecv.configs.base_config import InstantiateConfig
 class BaseExoEgoDatasetConfig(InstantiateConfig):
     load_labels: bool = True
     parent_log_path: Path = Path("world")
+    verbose: bool = False

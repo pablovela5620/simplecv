@@ -6,15 +6,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
+import rerun.experimental as rre
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from rerun.catalog import ComponentColumnDescriptor, IndexColumnDescriptor, Schema
-from rerun.recording import Recording
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, CamNameType, EgoData
-from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 from simplecv.rerun_log_utils import extract_asset_video_blob_fast
+from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 from simplecv.video_io import TorchCodecMultiVideoReader, TorchCodecVideoReader
 
 if TYPE_CHECKING:
@@ -46,13 +46,13 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
     using TorchCodec (~30x faster than disk-based remuxing).
     """
 
-    _recording: Recording | None = None
+    _recording: rre.LazyStore | None = None
     _video_blobs: dict[str, bytes] | None = None
 
     def __init__(
         self,
         cfg: RRDExoEgoConfig,
-        recording: Recording | None = None,
+        recording: rre.LazyStore | None = None,
         query_session: RRDQuerySession | None = None,
     ) -> None:
         self._recording = recording
@@ -67,7 +67,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         than as_py()) and stores them in self._video_blobs.
         """
         assert self._recording is not None, "Recording must be provided by caller"
-        recording: Recording = self._recording
+        recording: rre.LazyStore = self._recording
         schema: Schema = recording.schema()
         timelines: list[IndexColumnDescriptor] = list(schema.index_columns())
         # make sure the timeline exists
@@ -106,7 +106,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def load_ego_cams(self) -> dict[CamNameType, list[CameraParam]]:
         assert self._recording is not None, "Recording must be provided by caller"
-        recording: Recording = self._recording
+        recording: rre.LazyStore = self._recording
         schema: Schema = recording.schema()
         timelines: list[IndexColumnDescriptor] = list(schema.index_columns())
         # Component Columns

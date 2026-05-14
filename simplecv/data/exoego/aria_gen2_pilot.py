@@ -19,12 +19,14 @@ from jaxtyping import Float32, Int, Int64
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
+from tqdm import tqdm
 
 from simplecv.data.ego.aria_gen2_pilot_ego import AriaGen2PilotEgoSequence
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.hot3d_utils import lookup_nearest_poses, parse_mps_closed_loop_trajectory
 from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
 
@@ -50,6 +52,10 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
 
     def _sequence_dir(self) -> Path:
         return Path(self.config.base_directory) / self.config.sequence_name
+
+    @classmethod
+    def sequence_identity_for_config(cls, cfg: AriaGen2PilotConfig) -> SequenceIdentity:
+        return SequenceIdentity(dataset="aria-gen2", parts=(cfg.sequence_name,))
 
     def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
         canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
@@ -246,13 +252,13 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
                     if not np.isnan(xyzc_stack[frame_idx, thumb_base_indices[hand_idx], :3]).all():
                         xyzc_stack[frame_idx, thumb_base_indices[hand_idx], 3] = np.float32(conf)
 
-        if n_gaps_left > 0:
+        if self.config.verbose and n_gaps_left > 0:
             warnings.warn(
                 f"Left hand not detected in {n_gaps_left}/{num_frames} frames "
                 f"({n_gaps_left / num_frames * 100:.0f}%). Those frames have NaN keypoints.",
                 stacklevel=2,
             )
-        if n_gaps_right > 0:
+        if self.config.verbose and n_gaps_right > 0:
             warnings.warn(
                 f"Right hand not detected in {n_gaps_right}/{num_frames} frames "
                 f"({n_gaps_right / num_frames * 100:.0f}%). Those frames have NaN keypoints.",
@@ -275,19 +281,7 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
 
         Yields one ``AriaGen2PilotSequence`` per folder with preprocessed MP4s.
         """
-        root: Path = cfg.base_directory
-        assert root.exists(), f"Aria Gen2 Pilot root directory {root} does not exist."
-
-        def _has_preprocessed_streams(d: Path) -> bool:
-            simplecv_dir: Path = d / "_simplecv"
-            return simplecv_dir.is_dir() and any(simplecv_dir.glob("*.mp4"))
-
-        seq_dirs: list[Path] = natsorted([
-            d for d in root.iterdir()
-            if d.is_dir() and _has_preprocessed_streams(d)
-        ])
-
-        for seq_dir in seq_dirs:
+        for seq_dir in cls._iter_sequence_dirs(cfg):
             episode_cfg: AriaGen2PilotConfig = replace(
                 cfg,
                 sequence_name=seq_dir.name,
@@ -295,7 +289,22 @@ class AriaGen2PilotSequence(BaseExoEgoSequence[AriaGen2PilotConfig]):
             try:
                 yield cls(episode_cfg)
             except Exception as exc:  # pragma: no cover
-                print(f"[skip] {seq_dir.name}: {exc}")
+                tqdm.write(f"[skip] {seq_dir.name}: {exc}")
+
+    @classmethod
+    def num_sequences_for_config(cls, cfg: AriaGen2PilotConfig) -> int:
+        return len(cls._iter_sequence_dirs(cfg))
+
+    @staticmethod
+    def _iter_sequence_dirs(cfg: AriaGen2PilotConfig) -> list[Path]:
+        root: Path = cfg.base_directory
+        assert root.exists(), f"Aria Gen2 Pilot root directory {root} does not exist."
+
+        def _has_preprocessed_streams(d: Path) -> bool:
+            simplecv_dir: Path = d / "_simplecv"
+            return simplecv_dir.is_dir() and any(simplecv_dir.glob("*.mp4"))
+
+        return natsorted([d for d in root.iterdir() if d.is_dir() and _has_preprocessed_streams(d)])
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:

@@ -13,11 +13,10 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import rerun as rr
+import rerun.experimental as rre
 import tyro
-from rerun.recording import load_recording
 from serde.json import from_json, to_json
 from tqdm.auto import tqdm
 
@@ -26,7 +25,6 @@ from simplecv.apis.ingest_exoego_recording import (
     RawSessionMetadata,
     RecordingMetadata,
 )
-
 
 # Environment mapping (PII name → anonymized ID)
 ENVIRONMENT_MAPPING: dict[str, str] = {
@@ -99,9 +97,10 @@ def patch_rrd_metadata(rrd_path: Path, metadata: RecordingMetadata) -> bool:
     """
     try:
         # Load original recording to get app_id and recording_id
-        original_recording: Any = load_recording(str(rrd_path))
-        app_id: str = original_recording.application_id()
-        rec_id: str = original_recording.recording_id()
+        reader: rre.RrdReader = rre.RrdReader(rrd_path)
+        store_entry: rre.StoreEntry = reader.recordings()[0]
+        app_id: str = store_entry.application_id
+        rec_id: str = store_entry.recording_id
 
         # Create temporary patch RRD
         with tempfile.NamedTemporaryFile(

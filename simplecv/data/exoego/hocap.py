@@ -19,6 +19,7 @@ from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exo.hocap_exo import HocapExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.skeleton.coco_133 import LEFT_HAND_IDX, RIGHT_HAND_IDX
 
 
@@ -42,6 +43,10 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
         self._ego_stream_names: list[str] = []
         self._exo_stream_names: list[str] = []
         super().__init__(cfg)
+
+    @classmethod
+    def sequence_identity_for_config(cls, cfg: HocapConfig) -> SequenceIdentity:
+        return SequenceIdentity(dataset="hocap", parts=(f"subject_{cfg.subject_id}", cfg.sequence_name))
 
     def __getitem__(self, idx: int | None = None, ts_nano: np.timedelta64 | None = None) -> ExoEgoSample:
         canonical_idx, ts_ns = self._resolve_canonical(idx=idx, ts_nano=ts_nano)
@@ -230,21 +235,27 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
             - Prints subject ID and sequence name for each iteration using `icecream.ic`.
             - Pauses execution for user input after each sequence (likely for debugging).
         """
+        for subject_id, seq_dir in cls._iter_episode_specs(cfg):
+            new_cfg = replace(
+                cfg,
+                subject_id=subject_id,
+                sequence_name=seq_dir.name,
+            )
+            yield cls(new_cfg)
+
+    @classmethod
+    def num_sequences_for_config(cls, cfg: HocapConfig) -> int:
+        return len(cls._iter_episode_specs(cfg))
+
+    @staticmethod
+    def _iter_episode_specs(cfg: HocapConfig) -> list[tuple[str, Path]]:
         root: Path = cfg.root_directory
-
         subject_dirs: list[Path] = natsorted([d for d in root.glob("subject_*") if d.is_dir()])
-
-        # iterate through subject directories and get each sequence
-        for subj_dir in subject_dirs:
-            seq_dirs: list[Path] = natsorted([d for d in subj_dir.iterdir() if d.is_dir()])
-            subject_id: str = subj_dir.name.split("_")[-1]  # e.g., "8" from "subject_8"
-            for seq_dir in seq_dirs:
-                new_cfg = replace(
-                    cfg,
-                    subject_id=subject_id,
-                    sequence_name=seq_dir.name,
-                )
-                yield cls(new_cfg)
+        return [
+            (subj_dir.name.split("_")[-1], seq_dir)
+            for subj_dir in subject_dirs
+            for seq_dir in natsorted([d for d in subj_dir.iterdir() if d.is_dir()])
+        ]
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
