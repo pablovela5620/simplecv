@@ -9,6 +9,8 @@ def _normalize_part(value: object) -> tuple[str, ...]:
     parts: tuple[str, ...] = tuple(part for part in raw.split("/") if part)
     if any(part in {".", ".."} for part in parts):
         raise ValueError(f"Invalid sequence identity part: {value!r}")
+    if any("__" in part for part in parts):
+        raise ValueError(f"Sequence identity parts cannot contain '__': {value!r}")
     return parts
 
 
