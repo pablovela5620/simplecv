@@ -788,8 +788,12 @@ def setup_scene(
     exo_video_log_paths: list[Path] | None = None
     if exo_sequence is not None and log_exo:
         exo_video_names: list[str] = exo_sequence.exo_video_names
-        # Get video blobs if available (RRD sequences), otherwise use paths
+        # Get video blobs if available (RRD sequences), otherwise use paths.
+        # ``_video_assets`` is the preferred form: pre-built ``rr.AssetVideo``
+        # objects we can pass straight through (~10–15 ms saved per video by
+        # skipping a second MP4-header parse).
         exo_video_blobs: dict[str, bytes] | None = getattr(exo_sequence, "_video_blobs", None)
+        exo_video_assets: dict[str, rr.AssetVideo] | None = getattr(exo_sequence, "_video_assets", None)
         exo_video_files: list[Path] = exo_sequence.exo_video_paths
         assert len(exo_video_files) == len(exo_video_names), (
             f"Mismatched exo video assets ({len(exo_video_files)}) and names ({len(exo_video_names)})."
@@ -816,12 +820,14 @@ def setup_scene(
 
             video_log_path: Path = cam_log_path / "pinhole" / "video"
             exo_video_log_path_list.append(video_log_path)
-            # Use blob if available, otherwise use file path
-            video_source: bytes | Path = (
-                exo_video_blobs[stream_name]
-                if exo_video_blobs and stream_name in exo_video_blobs
-                else video_file
-            )
+            # Use prebuilt AssetVideo > bytes > path, in that preference order.
+            video_source: bytes | Path | rr.AssetVideo
+            if exo_video_assets and stream_name in exo_video_assets:
+                video_source = exo_video_assets[stream_name]
+            elif exo_video_blobs and stream_name in exo_video_blobs:
+                video_source = exo_video_blobs[stream_name]
+            else:
+                video_source = video_file
             if isinstance(video_source, Path):
                 assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.
@@ -835,8 +841,10 @@ def setup_scene(
     ego_video_log_paths: list[Path] | None = None
     if ego_sequence is not None and log_ego:
         ego_video_names: list[str] = ego_sequence.ego_video_names
-        # Get video blobs if available (RRD sequences), otherwise use paths
+        # Get video blobs/assets if available (RRD sequences or pre-built),
+        # otherwise use paths.
         ego_video_blobs: dict[str, bytes] | None = getattr(ego_sequence, "_video_blobs", None)
+        ego_video_assets: dict[str, rr.AssetVideo] | None = getattr(ego_sequence, "_video_assets", None)
         ego_video_files: list[Path] = ego_sequence.ego_video_paths
         assert len(ego_video_files) == len(ego_video_names), (
             f"Mismatched ego video assets ({len(ego_video_files)}) and names ({len(ego_video_names)})."
@@ -847,12 +855,14 @@ def setup_scene(
             cam_log_path: Path = parent_log_path / "ego" / stream_name
             ego_video_log_path: Path = cam_log_path / "pinhole" / "video"
             ego_video_log_path_list.append(ego_video_log_path)
-            # Use blob if available, otherwise use file path
-            video_source: bytes | Path = (
-                ego_video_blobs[stream_name]
-                if ego_video_blobs and stream_name in ego_video_blobs
-                else video_file
-            )
+            # Use prebuilt AssetVideo > bytes > path, in that preference order.
+            video_source: bytes | Path | rr.AssetVideo
+            if ego_video_assets and stream_name in ego_video_assets:
+                video_source = ego_video_assets[stream_name]
+            elif ego_video_blobs and stream_name in ego_video_blobs:
+                video_source = ego_video_blobs[stream_name]
+            else:
+                video_source = video_file
             if isinstance(video_source, Path):
                 assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.

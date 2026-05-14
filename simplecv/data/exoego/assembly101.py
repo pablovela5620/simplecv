@@ -119,22 +119,29 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
 
         ego_blob_cache: dict[str, bytes] = {}
         exo_blob_cache: dict[str, bytes] = {}
+        ego_asset_cache: dict[str, rr.AssetVideo] = {}
+        exo_asset_cache: dict[str, rr.AssetVideo] = {}
         for (stream_name, cam_name, _path), blob in zip(jobs, blob_bytes, strict=True):
-            timestamps: Int[ndarray, "n_frames"] = (
-                rr.AssetVideo(contents=blob).read_frame_timestamps_nanos()
-            )
+            # Build the AssetVideo once and reuse it in setup_scene's log_video
+            # call rather than letting that path re-parse the MP4 header.
+            asset: rr.AssetVideo = rr.AssetVideo(contents=blob, media_type="video/mp4")
+            timestamps: Int[ndarray, "n_frames"] = asset.read_frame_timestamps_nanos()
             stream_ts[stream_name] = timestamps
             if stream_name.startswith("ego/"):
                 self._ego_stream_names.append(stream_name)
                 ego_blob_cache[cam_name] = blob
+                ego_asset_cache[cam_name] = asset
             else:
                 self._exo_stream_names.append(stream_name)
                 exo_blob_cache[cam_name] = blob
+                exo_asset_cache[cam_name] = asset
 
         if self.ego_sequence is not None and ego_blob_cache:
             self.ego_sequence._video_blobs = ego_blob_cache  # picked up by setup_scene
+            self.ego_sequence._video_assets = ego_asset_cache
         if self.exo_sequence is not None and exo_blob_cache:
             self.exo_sequence._video_blobs = exo_blob_cache
+            self.exo_sequence._video_assets = exo_asset_cache
 
         labels: ExoEgoLabels | None = self.exoego_labels
         if labels is not None and labels.timestamps_ns is not None:
