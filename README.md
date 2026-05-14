@@ -79,10 +79,12 @@ pixi run python tools/batch_raw_to_rrd.py \
 the smaller root volume.
 
 **Parallelism.** `--num-workers N` dispatches each sequence to a separate
-process via `ProcessPoolExecutor` (spawn). With 8 workers a 10-sequence
-Assembly101 batch finishes in ~11 s on a 32-core box (down from ~3 min
+process via `ProcessPoolExecutor` (spawn). With 6–8 workers a 10-sequence
+Assembly101 batch finishes in ~9 s on a 32-core box (down from ~3 min
 sequentially before optimization; see
-`docs/optimize_batch_ingest_results.md`).
+`docs/optimize_batch_ingest_results.md`). Past 8 workers per-process
+memory pressure on rerun's encoder erodes the win; 6 was the optimum in
+our scans.
 
 **Skipping keypoint streams.** By default `log_labels=False`, which
 matches the existing read-only GT catalog under `data/exoego-forge-catalog/`
