@@ -217,6 +217,8 @@ def log_pinhole(
 
 VideoLogMethod = Literal["video_stream", "asset_video"]
 
+# Keyed on libavcodec AVCodecID (not name) so decoder aliases like
+# ``libdav1d`` / ``libaom-av1`` resolve transparently — ``codec.id`` is stable.
 _CODEC_ID_MAP: dict[int, rr.VideoCodec] = {
     27: rr.VideoCodec.H264,   # AV_CODEC_ID_H264
     173: rr.VideoCodec.H265,  # AV_CODEC_ID_HEVC
@@ -224,54 +226,31 @@ _CODEC_ID_MAP: dict[int, rr.VideoCodec] = {
     167: rr.VideoCodec.VP9,   # AV_CODEC_ID_VP9
     139: rr.VideoCodec.VP8,   # AV_CODEC_ID_VP8
 }
-"""libavcodec ``AVCodecID`` → rerun ``VideoCodec`` for codecs that ``rr.VideoStream`` ingests.
 
-Keyed on codec ID (not name) so we handle decoder aliases like ``libdav1d`` /
-``libaom-av1`` for AV1 transparently — ``codec_context.name`` returns the
-decoder family, which varies, but ``codec.id`` is stable."""
-
+# H.264/H.265 packets from MP4 (avcC/hvcC) need Annex B framing for ``rr.VideoStream``.
 _BSF_FOR_CODEC_ID: dict[int, str] = {
     27: "h264_mp4toannexb",
     173: "hevc_mp4toannexb",
 }
-"""H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
 
+# Aria Gen2 RGB's AV1 SPS ends after 11 semantic bytes + a trailing-bits byte.
+# Rerun 0.32's GOP detector (scuffle-av1) parses the SPS without seeking to
+# the declared OBU size, so it reads that trailing byte as the next OBU
+# header and never finds the keyframe — keyframes get classified as non-sync
+# and the viewer renders black. Replace only that exact 12-byte SPS with a
+# decoder-equivalent that flips initial_display_delay_present_flag and
+# clears initial_display_delay_present_for_this_op; the extra syntax bit
+# consumes the trailing-bits byte without changing what dav1d decodes.
 _ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex(
     "0a0c00000062ea7ffbf804330080"
 )
-"""Aria Gen2 RGB AV1 sequence-header OBU that trips rerun 0.32's GOP detector.
-
-The semantic sequence-header fields end after 11 bytes, followed by a full
-trailing-bits byte. Rerun parses the sequence header but does not seek to the
-declared OBU size afterwards, so it mistakes that trailing byte for the next
-OBU header and never reaches the keyframe OBU.
-"""
-
 _ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex(
     "0a0c02000061753ffdfc02198040"
 )
-"""Decoder-equivalent sequence header whose parser cursor reaches byte 12.
-
-This preserves profile, level, coded dimensions, bit depth, chroma sampling,
-and frame-tool flags. It only sets ``initial_display_delay_present_flag`` and
-then clears ``initial_display_delay_present_for_this_op``. That inserts one
-syntax bit before the remaining fields, so scuffle's bit reader consumes the
-final byte that contains AV1 trailing bits. Dav1d decodes the stream
-identically, and rerun's scanner reaches the following keyframe OBU.
-"""
 
 
 def _normalize_av1_sample_for_rerun(sample: bytes) -> bytes:
-    """Return AV1 low-overhead OBU bytes that rerun can scan for GOP starts.
-
-    Rerun 0.32 expects raw low-overhead AV1 OBUs and recomputes sync frames
-    from the sample bytes. The aria-gen2 RGB MP4 stores a valid 12-byte
-    sequence-header payload whose final byte is only AV1 trailing bits. Rerun's
-    detector currently leaves that byte unread after parsing the sequence
-    header, so keyframe samples are classified as non-sync before dav1d can
-    decode them. Rewrite only that exact sequence header; all other AV1 streams
-    stay byte-preserving.
-    """
+    """Rewrite the aria-gen2 RGB SPS to one rerun's GOP detector can parse."""
     if sample.startswith(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU):
         return (
             _ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU
@@ -347,23 +326,16 @@ def _log_video_stream(
     *,
     recording: rr.RecordingStream | None,
 ) -> Int[ndarray, "num_frames"]:
-    """Demux MP4 samples into ``rr.VideoStream`` without pixel decode.
+    """Demux MP4 samples into ``rr.VideoStream`` without pixel decode or re-encode.
 
-    No pixel decode, no re-encode. H.264/H.265 MP4 length-prefix framing is
-    rewritten to Annex B start codes. AV1 low-overhead OBUs are logged as-is
-    except for the exact aria-gen2 RGB sequence-header compatibility rewrite in
-    :func:`_normalize_av1_sample_for_rerun`.
-
-    Critical: samples are indexed on the rerun timeline by their **DTS**
-    (decode timestamp), not PTS. Rerun stores time-indexed samples sorted
-    by timeline value, and the H.264 decoder needs them in decode order
-    to reconstruct B/P frames. With PTS-indexed storage on a B-frame
-    stream, reference frames arrive after their dependents and the
-    decoder produces garbage. The mirror direction
-    (:func:`mux_h264_to_mp4`) already works on bytes-by-DTS — the
-    read-back ``times`` column there is decode time, not display time.
-    Returning PTS (display order) preserves AssetVideo-equivalent return
-    contract for callers aligning other timeline data with the video.
+    H.264/H.265 length-prefix framing is converted to Annex B; AV1 OBUs are
+    logged as-is except for the aria-gen2 RGB SPS rewrite in
+    :func:`_normalize_av1_sample_for_rerun`. Samples are indexed on the
+    timeline by DTS (decode order, not PTS) — rerun sorts samples by
+    timeline value, and the decoder needs them in decode order to
+    reconstruct B/P frames; ``mux_h264_to_mp4`` reads them back the same
+    way. Returns PTS (display order) so callers' timeline-aligned data
+    stays consistent with the AssetVideo path.
     """
     source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
     container: av.container.InputContainer = av.open(source_handle, mode="r")
