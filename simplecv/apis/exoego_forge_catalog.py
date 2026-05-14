@@ -137,13 +137,7 @@ def build_exoego_catalog_blueprint(dataset_name: str) -> rrb.Blueprint:
         exo_video_log_paths=exo_video_log_paths,
         skip_camera_names=frozenset(),
     )
-    return rrb.Blueprint(
-        rrb.Horizontal(
-            contents=[container],
-            column_shares=[4, 1],
-        ),
-        collapse_panels=True,
-    )
+    return rrb.Blueprint(container, collapse_panels=True)
 
 
 def _register_default_dataset_blueprint(

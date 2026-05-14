@@ -55,6 +55,22 @@ def test_sequence_identity_paths_and_recording_id() -> None:
 
 
 @pytest.mark.parametrize(
+    ("dataset", "parts"),
+    [
+        ("bad__dataset", ("sequence",)),
+        ("hocap", ("subject__1", "recording")),
+        ("hocap", ("subject_1/bad__recording",)),
+    ],
+)
+def test_sequence_identity_rejects_recording_id_separator(
+    dataset: str,
+    parts: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValueError, match="cannot contain '__'"):
+        SequenceIdentity(dataset=dataset, parts=parts)
+
+
+@pytest.mark.parametrize(
     ("identity", "dataset", "sequence_key", "recording_id"),
     [
         (
@@ -461,4 +477,13 @@ def test_table_card_blueprints_play_uniform_selection_without_3d_range_override(
 def test_catalog_blueprints_exist_for_default_datasets() -> None:
     for dataset_name in DEFAULT_CATALOG_DATASETS:
         blueprint = build_exoego_catalog_blueprint(dataset_name)
+        root_container = blueprint.root_container
+        root_contents: list[Any] = list(root_container.contents)
+        column_shares: list[float] | None = getattr(root_container, "column_shares", None)
+        row_shares: list[float] | None = getattr(root_container, "row_shares", None)
+
         assert blueprint is not None
+        if column_shares is not None:
+            assert len(column_shares) == len(root_contents)
+        if row_shares is not None:
+            assert len(row_shares) == len(root_contents)

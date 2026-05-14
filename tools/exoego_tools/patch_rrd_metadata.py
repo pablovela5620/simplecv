@@ -13,6 +13,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import rerun as rr
 import rerun.experimental as rre
@@ -97,8 +98,12 @@ def patch_rrd_metadata(rrd_path: Path, metadata: RecordingMetadata) -> bool:
     """
     try:
         # Load original recording to get app_id and recording_id
-        reader: rre.RrdReader = rre.RrdReader(rrd_path)
-        store_entry: rre.StoreEntry = reader.recordings()[0]
+        reader: Any = rre.RrdReader(rrd_path)
+        recordings: list[Any] = list(reader.recordings())
+        if not recordings:
+            raise ValueError(f"No recordings found in {rrd_path}")
+
+        store_entry: Any = recordings[0]
         app_id: str = store_entry.application_id
         rec_id: str = store_entry.recording_id
 

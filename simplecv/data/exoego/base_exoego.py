@@ -3,13 +3,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Generic, Self, TypeVar
+from typing import Generic, TypeVar
 
 import cv2
 import numpy as np
 from jaxtyping import Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
+from typing_extensions import Self
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence
@@ -338,7 +339,7 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
         if not end_times:
             raise ValueError("All provided stream timestamp arrays are empty.")
 
-        canonical_stream: str = min(end_times, key=end_times.get)
+        canonical_stream: str = min(end_times, key=lambda stream_name: end_times[stream_name])
         canonical_end_ns: int = end_times[canonical_stream]
         canonical_ts: Int[ndarray, "n_events"] = stream_ts[canonical_stream]
         # clip to its own end in case of trailing padding
