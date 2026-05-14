@@ -81,6 +81,11 @@ class VisualizeConfig:
     skip_camera_names: str = ""
     """Comma-separated camera names to exclude from 2D video panel tabs (e.g. 'quest3_right,rgb')."""
 
+    video_method: Literal["video_stream", "asset_video"] = "video_stream"
+    """Which ``log_video`` method to use. ``video_stream`` (default) is the
+    bit-preserving demux+bsf path; ``asset_video`` embeds the whole MP4
+    blob (kept as a fallback / for visual comparison)."""
+
 
 def set_annotation_context() -> None:
     """Register COCO-133 semantic metadata so subsequent logs show names/edges."""
@@ -766,6 +771,7 @@ def setup_scene(
     timeline: str,
     log_ego: bool,
     log_exo: bool,
+    video_method: Literal["video_stream", "asset_video"] = "video_stream",
     recording: rr.RecordingStream | None = None,
 ) -> SceneSetupResult:
     """Log static assets, videos, and transforms; derive the shared timeline.
@@ -826,7 +832,11 @@ def setup_scene(
                 assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.
             exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
-                video_source, video_log_path, timeline=timeline, recording=recording
+                video_source,
+                video_log_path,
+                timeline=timeline,
+                method=video_method,
+                recording=recording,
             )
             exo_timestamp_list.append(exo_timestamps_ns)
         exo_video_log_paths = exo_video_log_path_list
@@ -857,7 +867,11 @@ def setup_scene(
                 assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.
             ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
-                video_source, ego_video_log_path, timeline=timeline, recording=recording
+                video_source,
+                ego_video_log_path,
+                timeline=timeline,
+                method=video_method,
+                recording=recording,
             )
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
@@ -942,6 +956,7 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
         timeline=timeline,
         log_ego=config.log_ego,
         log_exo=config.log_exo,
+        video_method=config.video_method,
     )
     log_paths: LogPaths = scene_setup_result.log_paths
     shortest_timestamp: Int[ndarray, "n_frames"] = scene_setup_result.shortest_timestamp
