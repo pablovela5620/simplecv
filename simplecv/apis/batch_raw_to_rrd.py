@@ -139,6 +139,14 @@ def _process_one_sequence(
     tidy without pickling any heavy objects back across the pipe.
     """
     t0: float = timer()
+    # If labels won't be emitted, skip ``load_labels`` entirely in the
+    # dataset adapter — for Assembly101 this saves the ~0.3 s/seq spent
+    # parsing the 96 MB landmarks JSON and building the
+    # (n_frames, 133, 4) keypoint stack.
+    if not log_labels and getattr(seq_cfg, "load_labels", False):
+        from dataclasses import replace as dataclass_replace
+
+        seq_cfg = dataclass_replace(seq_cfg, load_labels=False)
     sequence: BaseExoEgoSequence = seq_cfg.setup()
     identity: SequenceIdentity = sequence.sequence_identity
     rrd_save_path.parent.mkdir(parents=True, exist_ok=True)
