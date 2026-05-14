@@ -78,33 +78,63 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
         return Assembly101ExoSequence(cfg=self.config)
 
     def load_stream_timestamps_ns(self) -> dict[str, Int[ndarray, "n_frames"]]:
-        """Return per-stream timestamps for ego/exo videos (and labels if present)."""
+        """Return per-stream timestamps for ego/exo videos (and labels if present).
+
+        Optimization (exp-01): The vanilla loop reads each of the ~12 MP4 files
+        from disk via ``rr.AssetVideo(path=...)`` and then ``log_video`` reads
+        them again to embed the blob. Read each file once in parallel, build
+        ``AssetVideo(contents=...)`` for the timestamp pass, and stash the
+        bytes on each sub-sequence's ``_video_blobs`` dict so the downstream
+        ``setup_scene`` reuses them via ``getattr`` instead of re-decoding.
+        """
+        from concurrent.futures import ThreadPoolExecutor
 
         stream_ts: dict[str, Int[ndarray, "n_frames"]] = {}
         self._ego_stream_names.clear()
         self._exo_stream_names.clear()
 
+        jobs: list[tuple[str, str, Path]] = []
         if self.ego_sequence is not None:
             for name, video_path in zip(
                 self.ego_sequence.ego_video_names,
                 self.ego_sequence.ego_video_paths,
                 strict=True,
             ):
-                stream_name: str = f"ego/{name}"
-                timestamps: Int[ndarray, "n_frames"] = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
-                stream_ts[stream_name] = timestamps
-                self._ego_stream_names.append(stream_name)
-
+                jobs.append((f"ego/{name}", name, video_path))
         if self.exo_sequence is not None:
             for name, video_path in zip(
                 self.exo_sequence.exo_video_names,
                 self.exo_sequence.exo_video_paths,
                 strict=True,
             ):
-                stream_name = f"exo/{name}"
-                timestamps = rr.AssetVideo(path=video_path).read_frame_timestamps_nanos()
-                stream_ts[stream_name] = timestamps
+                jobs.append((f"exo/{name}", name, video_path))
+
+        if jobs:
+            with ThreadPoolExecutor(max_workers=min(len(jobs), 16)) as pool:
+                blob_bytes: list[bytes] = list(
+                    pool.map(lambda p: p.read_bytes(), [p for _, _, p in jobs])
+                )
+        else:
+            blob_bytes = []
+
+        ego_blob_cache: dict[str, bytes] = {}
+        exo_blob_cache: dict[str, bytes] = {}
+        for (stream_name, cam_name, _path), blob in zip(jobs, blob_bytes, strict=True):
+            timestamps: Int[ndarray, "n_frames"] = (
+                rr.AssetVideo(contents=blob).read_frame_timestamps_nanos()
+            )
+            stream_ts[stream_name] = timestamps
+            if stream_name.startswith("ego/"):
+                self._ego_stream_names.append(stream_name)
+                ego_blob_cache[cam_name] = blob
+            else:
                 self._exo_stream_names.append(stream_name)
+                exo_blob_cache[cam_name] = blob
+
+        if self.ego_sequence is not None and ego_blob_cache:
+            self.ego_sequence._video_blobs = ego_blob_cache  # picked up by setup_scene
+        if self.exo_sequence is not None and exo_blob_cache:
+            self.exo_sequence._video_blobs = exo_blob_cache
 
         labels: ExoEgoLabels | None = self.exoego_labels
         if labels is not None and labels.timestamps_ns is not None:

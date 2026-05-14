@@ -233,9 +233,11 @@ def log_video(
     Returns:
         Frame timestamps in nanoseconds.
     """
-    # Create AssetVideo from path or bytes
+    # Create AssetVideo from path or bytes. When the source is bytes we have
+    # no filesystem suffix to infer the MIME type from, so default to
+    # ``video/mp4`` (matches the GT catalog).
     video_asset = (
-        rr.AssetVideo(contents=video_source)
+        rr.AssetVideo(contents=video_source, media_type="video/mp4")
         if isinstance(video_source, bytes)
         else rr.AssetVideo(path=video_source)
     )
