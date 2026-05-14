@@ -4,15 +4,25 @@ Worker entrypoint is module-level so it can be re-imported by
 ``multiprocessing`` spawn workers without pickling closures.
 """
 
+import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import get_context
 from pathlib import Path
 from timeit import default_timer as timer
 
-import numpy as np
-import rerun as rr
-from tqdm import tqdm
+# Before workers import numpy: cap BLAS / OMP thread pools so 8+ processes
+# don't all spin up 32-thread thread pools and thrash the kernel scheduler.
+# Setting these in the parent propagates to ``spawn``-mode workers because
+# environment is inherited at fork()/spawn time.
+_BLAS_THREADS_DEFAULT: str = os.environ.get("SIMPLECV_BLAS_THREADS", "2")
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "RAYON_NUM_THREADS"):
+    os.environ.setdefault(_var, _BLAS_THREADS_DEFAULT)
+
+import numpy as np  # noqa: E402  - must come AFTER the env-var setup above
+import rerun as rr  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
 from simplecv.apis.view_exoego import VisualizeConfig, visualize_exo_ego
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
