@@ -167,6 +167,8 @@ cython_debug/
 data/*
 # allow a bare `data` symlink into the user's main checkout in worktrees
 /data
+# Claude Code harness state (scheduled-task locks, etc.); not source.
+/.claude/
 
 *MANO_*.pkl
 repomix-output.xml
