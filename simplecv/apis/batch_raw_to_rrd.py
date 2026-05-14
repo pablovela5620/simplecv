@@ -53,6 +53,17 @@ class BatchConvertConfig:
     """When >1, dispatch per-sequence ingestion to a process pool of this size.
     Sequences are independent so this scales nearly linearly until the box
     runs out of cores or memory."""
+    log_labels: bool = False
+    """When ``False``, skip ``log_exoego_batch`` — the heavy 3D-keypoint and
+    per-camera 2D projection logging step. The resulting RRDs match the
+    `data/exoego-forge-catalog` GT at the schema-set and per-frame value
+    level (see ``tools/validate_assembly101_rrd_parity.py``) and are within
+    the 15 % filesize tolerance documented in §4 of the goal contract. The
+    GT catalog itself was clearly generated without these columns —
+    `schema.component_columns()` on a GT RRD lists zero
+    ``coco133_xyz/uv`` or ``Pinhole`` entries — so producing them here is
+    pure waste. Re-enable when you specifically need 3D/2D keypoint
+    streams in the produced .rrd."""
 
 
 def _estimate_job_size(seq_cfg: BaseExoEgoDatasetConfig) -> int:
@@ -117,7 +128,11 @@ def _pool_init(worker_count: int) -> None:
     _pin_to_core_subset(index, worker_count)
 
 
-def _process_one_sequence(seq_cfg: BaseExoEgoDatasetConfig, rrd_save_path: Path) -> tuple[str, float]:
+def _process_one_sequence(
+    seq_cfg: BaseExoEgoDatasetConfig,
+    rrd_save_path: Path,
+    log_labels: bool = False,
+) -> tuple[str, float]:
     """Build one ``BaseExoEgoSequence`` and write its RRD. Runs in a worker.
 
     Returning ``(sequence_label, wall_seconds)`` keeps the parent's logging
@@ -134,6 +149,7 @@ def _process_one_sequence(seq_cfg: BaseExoEgoDatasetConfig, rrd_save_path: Path)
             save=rrd_save_path,
         ),
         dataset=seq_cfg,
+        log_labels=log_labels,
     )
     rec: rr.RecordingStream = vc.rr_config.rec_stream
     rr.send_recording_name(identity.sequence_key, recording=rec)
@@ -212,7 +228,7 @@ def main(config: BatchConvertConfig):
             initargs=(worker_count,),
         ) as pool:
             futures = {
-                pool.submit(_process_one_sequence, seq_cfg, rrd_save_path): identity
+                pool.submit(_process_one_sequence, seq_cfg, rrd_save_path, config.log_labels): identity
                 for seq_cfg, rrd_save_path, identity in runnable_sorted
             }
             for fut in tqdm(
@@ -226,7 +242,7 @@ def main(config: BatchConvertConfig):
                 tqdm.write(f"[done] {key} in {secs:.2f}s")
     else:
         for seq_cfg, rrd_save_path, identity in tqdm(runnable, desc="Processing sequences"):
-            key, secs = _process_one_sequence(seq_cfg, rrd_save_path)
+            key, secs = _process_one_sequence(seq_cfg, rrd_save_path, config.log_labels)
             tqdm.write(f"[done] {key} in {secs:.2f}s")
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
