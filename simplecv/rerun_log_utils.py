@@ -236,6 +236,10 @@ _BSF_FOR_CODEC_ID: dict[int, str] = {
 }
 """H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
 
+# AV1 OBU_TEMPORAL_DELIMITER, fixed encoding per AV1 spec §5.3.2:
+# header byte = (type<<3)|has_size = (2<<3)|0x02 = 0x12, then LEB128 size = 0x00.
+_AV1_TEMPORAL_DELIMITER: bytes = b"\x12\x00"
+
 
 def log_video(
     video_source: Path | bytes,
@@ -345,6 +349,11 @@ def _log_video_stream(
             av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
         )
 
+        # AV1 MP4 demux strips the temporal_delimiter OBU that rerun's
+        # GOP detector relies on to find temporal-unit boundaries; without
+        # it the viewer can only seek to t=0. Prepend it back per spec.
+        prepend_td: bool = codec == rr.VideoCodec.AV1
+
         rr.log(
             str(video_log_path),
             rr.VideoStream(codec=codec),
@@ -374,7 +383,10 @@ def _log_video_stream(
                 # plain int() would truncate and drift by 1 ns per frame.
                 pts_ns_list.append(round(packet.pts * time_base * ns_scale))
                 dts_ns_list.append(round((packet.dts - first_dts) * time_base * ns_scale))
-                samples.append(bytes(packet))
+                sample_bytes: bytes = bytes(packet)
+                if prepend_td:
+                    sample_bytes = _AV1_TEMPORAL_DELIMITER + sample_bytes
+                samples.append(sample_bytes)
                 is_keyframes.append(packet.is_keyframe)
     finally:
         container.close()
