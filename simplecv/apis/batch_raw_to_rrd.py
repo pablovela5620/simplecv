@@ -45,6 +45,22 @@ class BatchConvertConfig:
     runs out of cores or memory."""
 
 
+def _estimate_job_size(seq_cfg: BaseExoEgoDatasetConfig) -> int:
+    """Best-effort heuristic for ordering jobs longest-first.
+
+    Falls back to 0 (so order is preserved) when we can't easily estimate
+    the work from disk; for Assembly101 we sum the input MP4 sizes which
+    correlates almost linearly with downstream wall time.
+    """
+    sequence_name: str | None = getattr(seq_cfg, "sequence_name", None)
+    root_directory: Path | None = getattr(seq_cfg, "root_directory", None)
+    if sequence_name and root_directory is not None:
+        candidate: Path = Path(root_directory) / "videos" / "av1-720-new" / sequence_name
+        if candidate.is_dir():
+            return sum(p.stat().st_size for p in candidate.iterdir() if p.is_file())
+    return 0
+
+
 def _process_one_sequence(seq_cfg: BaseExoEgoDatasetConfig, rrd_save_path: Path) -> tuple[str, float]:
     """Build one ``BaseExoEgoSequence`` and write its RRD. Runs in a worker.
 
@@ -126,10 +142,17 @@ def main(config: BatchConvertConfig):
     if config.num_workers > 1 and len(runnable) > 1:
         ctx = get_context("spawn")
         worker_count: int = min(config.num_workers, len(runnable))
+        # Submit longest-running jobs first (estimated by source-data size) so
+        # the heaviest sequence starts at t=0 instead of queueing behind smaller
+        # jobs. ``Longest Processing Time First`` heuristic. Falls back to
+        # natural order when no size estimate is available.
+        runnable_sorted: list[tuple[BaseExoEgoDatasetConfig, Path, SequenceIdentity]] = sorted(
+            runnable, key=lambda item: -_estimate_job_size(item[0])
+        )
         with ProcessPoolExecutor(max_workers=worker_count, mp_context=ctx) as pool:
             futures = {
                 pool.submit(_process_one_sequence, seq_cfg, rrd_save_path): identity
-                for seq_cfg, rrd_save_path, identity in runnable
+                for seq_cfg, rrd_save_path, identity in runnable_sorted
             }
             for fut in tqdm(
                 as_completed(futures),

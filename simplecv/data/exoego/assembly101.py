@@ -21,7 +21,7 @@ from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
-from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133
+from simplecv.data.skeleton.assembly_hands import assembly21_to_coco133, assembly21_to_coco133_batched
 from simplecv.video_utils import Resolution
 
 
@@ -143,49 +143,34 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
         return stream_ts
 
     def load_labels(self) -> ExoEgoLabels:
-        """Load COCO-133 hand keypoints in meters for the current sequence."""
-        ### Load 3D keypoints ###
+        """Load COCO-133 hand keypoints in meters for the current sequence.
+
+        Optimized version that skips pyserde and the per-frame Python loop:
+        parses the keypoint JSON directly into a pre-allocated
+        ``(n_frames, 2, 21, 3)`` numpy array and converts to COCO-133 in
+        one vectorized pass via ``assembly21_to_coco133_batched``.
+        """
         landmarks3d_dir: Path = self.config.root_directory / "assembly101_camera_and_hand_poses" / "landmarks3D"
         assert landmarks3d_dir.exists(), f"Directory {landmarks3d_dir} does not exist"
         xyz_json_path: Path = landmarks3d_dir / f"{self.config.sequence_name}.json"
         assert xyz_json_path.exists(), f"File {xyz_json_path} does not exist"
-        with open(xyz_json_path) as f:
-            all_xyz_dict: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
+        with open(xyz_json_path, "rb") as f:
+            raw: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
 
-        # sort all_3d_landmarks by frame number
-        all_xyz_dict = dict(sorted(all_xyz_dict.items(), key=lambda item: int(item[0])))
-
-        loaded_xyz_dict: dict[int, Hand3DKeypoints] = {
-            int(k): from_dict(Hand3DKeypoints, v) for k, v in all_xyz_dict.items()
-        }
-
-        xyz_stack_list: list[Float32[ndarray, "2 21 3"]] = []
-        for frame_number, _ in enumerate(
-            tqdm(
-                loaded_xyz_dict,
-                desc="Loading 3D labels",
-                disable=not self.config.verbose,
-                leave=False,
-                position=1,
-            )
-        ):
-            keypoints: Hand3DKeypoints = loaded_xyz_dict[frame_number]
-            xyz_stack_list.append(np.stack((keypoints.left, keypoints.right), axis=0, dtype=np.float32))
-
-        # Concatenate keypoints from all frames vertically to get a (num_frames 21, 3) array.
-        xyz_stack_mm: Float32[ndarray, "num_frames 2 21 3"] = np.stack(xyz_stack_list, axis=0)
-        num_frames = xyz_stack_mm.shape[0]
-
-        # Convert millimeter coordinates provided by the dataset to meters.
-        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = xyz_stack_mm * np.float32(1e-3)
-
-        xyzc_stack: Float32[ndarray, "num_frames 133 4"] = np.full((num_frames, 133, 4), np.nan, dtype=np.float32)
-        for f in range(num_frames):
-            xyzc_stack[f] = assembly21_to_coco133(xyz_stack[f])
-
-        return ExoEgoLabels(
-            xyzc_stack=xyzc_stack,
+        keys_sorted: list[str] = sorted(raw.keys(), key=int)
+        num_frames: int = len(keys_sorted)
+        xyz_stack_mm: Float32[ndarray, "num_frames 2 21 3"] = np.empty(
+            (num_frames, 2, 21, 3), dtype=np.float32
         )
+        for i, key in enumerate(keys_sorted):
+            frame_dict: dict[str, list[list[float]]] = raw[key]
+            xyz_stack_mm[i, 0] = frame_dict["0"]
+            xyz_stack_mm[i, 1] = frame_dict["1"]
+
+        # Convert millimetres → metres.
+        xyz_stack: Float32[ndarray, "num_frames 2 21 3"] = xyz_stack_mm * np.float32(1e-3)
+        xyzc_stack: Float32[ndarray, "num_frames 133 4"] = assembly21_to_coco133_batched(xyz_stack)
+        return ExoEgoLabels(xyzc_stack=xyzc_stack)
 
     @classmethod
     def iter_episode_sequences(cls, cfg: Assembly101Config) -> Generator["Assembly101Sequence", None, None]:
