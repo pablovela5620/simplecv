@@ -1,0 +1,253 @@
+"""Parity check candidate Assembly101 RRDs against the read-only GT catalog.
+
+Used by the autonomous batch-ingest optimization loop. See
+``docs/optimize_batch_ingest_goal.md`` §4 for the contract.
+
+This is a deliberately RAM-bounded check. RRDs are ~700 MB–1.3 GB each
+because of MP4 blobs. We must NOT materialize those blobs into Python.
+The strategy:
+
+* Open one ``RRDQuerySession`` at a time and close it before opening the
+  next file. The Rerun server keeps the segment memory-mapped while open,
+  so two open sessions = 2x footprint.
+* Project only small typed columns (``Transform3D:translation``,
+  ``video_time``) via an entity filter; never read the ``/**`` view.
+* Compare a tiny in-memory summary tuple between candidate and GT instead
+  of holding both arrow tables in RAM.
+
+Checks performed:
+
+1. Schema parity (component column set + index column set).
+2. Index length + first/last timestamp on a non-video entity.
+3. Per-frame Transform3D translation parity at five sampled rows.
+4. File size sanity (within 5% of the GT file size).
+
+Usage:
+
+    python tools/validate_assembly101_rrd_parity.py \
+        --candidate-dir /tmp/batch-bench/<exp-id>/assembly101/all
+
+Exit code 0 = all candidates pass; 1 = at least one failed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from simplecv.rrd_query_utils import RRDQuerySession
+
+NUMERIC_ATOL: float = 1e-5
+FILESIZE_TOLERANCE_PCT: float = 5.0
+SAMPLE_INDICES_FRAC: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+@dataclass(slots=True)
+class RRDSummary:
+    """RAM-bounded snapshot of the small fields we care about for parity."""
+
+    component_names: frozenset[str]
+    index_names: frozenset[str]
+    ego_entity: str | None
+    n_rows: int
+    first_ns: int
+    last_ns: int
+    translation_samples: list[np.ndarray]
+    file_bytes: int
+
+    @classmethod
+    def from_rrd(cls, path: Path) -> "RRDSummary":
+        sess = RRDQuerySession(path)
+        try:
+            schema = sess._dataset_entry().schema()
+            comp_names: frozenset[str] = frozenset(cc.name for cc in schema.component_columns())
+            idx_names: frozenset[str] = frozenset(ic.name for ic in schema.index_columns())
+
+            ego_entity: str | None = None
+            for n in sorted(comp_names):
+                if "/world/ego/" in n and n.endswith(":Transform3D:translation"):
+                    ego_entity = n.split(":")[0]
+                    break
+
+            n_rows: int = 0
+            first_ns: int = 0
+            last_ns: int = 0
+            samples: list[np.ndarray] = []
+            if ego_entity is not None:
+                view = sess._dataset_entry().filter_contents(ego_entity)
+                df = (
+                    view.reader(index="video_time")
+                    .select("video_time", f"{ego_entity}:Transform3D:translation")
+                    .to_arrow_table()
+                )
+                n_rows = df.num_rows
+                if n_rows > 0:
+                    idx_col = df.column("video_time").combine_chunks().to_pylist()
+                    first_ns = _to_ns(idx_col[0])
+                    last_ns = _to_ns(idx_col[-1])
+                    sample_rows = [
+                        min(max(int(round(f * (n_rows - 1))), 0), n_rows - 1)
+                        for f in SAMPLE_INDICES_FRAC
+                    ]
+                    trans_col = df.column(
+                        f"{ego_entity}:Transform3D:translation"
+                    ).combine_chunks().to_pylist()
+                    for i in sample_rows:
+                        v = trans_col[i]
+                        while isinstance(v, list) and len(v) == 1 and isinstance(v[0], list):
+                            v = v[0]
+                        samples.append(np.asarray(v, dtype=np.float64))
+                    # Free the big-ish arrow table early.
+                    del df, idx_col, trans_col
+            file_bytes: int = path.stat().st_size
+            return cls(
+                component_names=comp_names,
+                index_names=idx_names,
+                ego_entity=ego_entity,
+                n_rows=n_rows,
+                first_ns=first_ns,
+                last_ns=last_ns,
+                translation_samples=samples,
+                file_bytes=file_bytes,
+            )
+        finally:
+            sess.close()
+
+
+def _to_ns(v) -> int:
+    if hasattr(v, "total_seconds"):
+        return int(round(v.total_seconds() * 1e9))
+    if hasattr(v, "value"):
+        return int(v.value)
+    return int(v)
+
+
+@dataclass(slots=True)
+class ParityResult:
+    candidate: Path
+    gt: Path
+    checks: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return all(v == "PASS" for v in self.checks.values())
+
+
+def diff_summaries(cand: RRDSummary, gt: RRDSummary, candidate_path: Path, gt_path: Path) -> ParityResult:
+    res = ParityResult(candidate=candidate_path, gt=gt_path)
+
+    if cand.component_names != gt.component_names:
+        missing = sorted(gt.component_names - cand.component_names)[:3]
+        extra = sorted(cand.component_names - gt.component_names)[:3]
+        res.checks["component_columns"] = f"FAIL:missing={missing} extra={extra}"
+    else:
+        res.checks["component_columns"] = "PASS"
+
+    if cand.index_names != gt.index_names:
+        res.checks["index_columns"] = "FAIL:set differs"
+    else:
+        res.checks["index_columns"] = "PASS"
+
+    if gt.ego_entity is None:
+        res.checks["index_length"] = "FAIL:no ego transform entity in GT"
+    elif cand.ego_entity != gt.ego_entity:
+        res.checks["index_length"] = f"FAIL:ego entity mismatch {cand.ego_entity} vs {gt.ego_entity}"
+    elif cand.n_rows != gt.n_rows:
+        res.checks["index_length"] = f"FAIL:n_cand={cand.n_rows} n_gt={gt.n_rows}"
+    elif abs(cand.first_ns - gt.first_ns) > 1 or abs(cand.last_ns - gt.last_ns) > 1:
+        res.checks["index_bounds"] = (
+            f"FAIL:Δfirst={cand.first_ns - gt.first_ns} Δlast={cand.last_ns - gt.last_ns}"
+        )
+    else:
+        res.checks["index_length"] = "PASS"
+        res.checks["index_bounds"] = "PASS"
+
+    if not gt.translation_samples or len(cand.translation_samples) != len(gt.translation_samples):
+        res.checks["ego_translation"] = "FAIL:no samples"
+    else:
+        max_diff: float = 0.0
+        shape_ok: bool = True
+        for a, b in zip(cand.translation_samples, gt.translation_samples, strict=True):
+            if a.shape != b.shape:
+                res.checks["ego_translation"] = f"FAIL:shape {a.shape} vs {b.shape}"
+                shape_ok = False
+                break
+            max_diff = max(max_diff, float(np.abs(a - b).max()))
+        if shape_ok:
+            if max_diff > NUMERIC_ATOL:
+                res.checks["ego_translation"] = f"FAIL:max|Δ|={max_diff:.3e}"
+            else:
+                res.checks["ego_translation"] = "PASS"
+
+    pct: float = 100.0 * abs(cand.file_bytes - gt.file_bytes) / max(gt.file_bytes, 1)
+    if pct > FILESIZE_TOLERANCE_PCT:
+        res.checks["filesize"] = (
+            f"FAIL:Δ={pct:.2f}% cand={cand.file_bytes} gt={gt.file_bytes}"
+        )
+    else:
+        res.checks["filesize"] = "PASS"
+    return res
+
+
+def check_pair(candidate_path: Path, gt_path: Path) -> ParityResult:
+    """Read candidate, close it, read GT, close it, then diff summaries."""
+    cand = RRDSummary.from_rrd(candidate_path)
+    gt = RRDSummary.from_rrd(gt_path)
+    return diff_summaries(cand, gt, candidate_path, gt_path)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--candidate-dir",
+        type=Path,
+        required=True,
+        help="Directory containing freshly-ingested *.rrd files.",
+    )
+    parser.add_argument(
+        "--gt-dir",
+        type=Path,
+        default=Path("data/exoego-forge-catalog/assembly101/all"),
+        help="Read-only ground-truth catalog directory.",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        help="Only check the first N candidate files (sorted).",
+    )
+    args = parser.parse_args()
+
+    candidate_dir: Path = args.candidate_dir
+    gt_dir: Path = args.gt_dir
+    candidates: list[Path] = sorted(candidate_dir.glob("*.rrd"))
+    if args.max_files is not None:
+        candidates = candidates[: args.max_files]
+
+    if not candidates:
+        print(f"[parity] no .rrd files in {candidate_dir}", flush=True)
+        return 1
+
+    failed = 0
+    for cand in candidates:
+        gt = gt_dir / cand.name
+        if not gt.exists():
+            print(f"[parity] {cand.name}: SKIP (no GT)", flush=True)
+            continue
+        res = check_pair(cand, gt)
+        if res.ok:
+            print(f"[parity] {cand.name}: PASS", flush=True)
+        else:
+            failed += 1
+            details = ", ".join(f"{k}={v}" for k, v in res.checks.items() if v != "PASS")
+            print(f"[parity] {cand.name}: FAIL ({details})", flush=True)
+    print(f"[parity] summary: {len(candidates) - failed}/{len(candidates)} pass", flush=True)
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
