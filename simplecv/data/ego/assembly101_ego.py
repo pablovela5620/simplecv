@@ -273,28 +273,61 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
                 "ij,fjk->fik", k_matrix, cam_T_world_stack[:, :3, :]
             )
 
-            params_list: list[Fisheye62Parameters] = ego_fisheye_dict[key]
-            for i in range(n_frames):
-                extri: Extrinsics = object.__new__(Extrinsics)
-                extri.world_R_cam = world_R_cam_stack[i]
-                extri.world_t_cam = world_t_cam_stack[i]
-                extri.cam_R_world = cam_R_world_stack[i]
-                extri.cam_t_world = cam_t_world_stack[i]
-                extri.world_T_cam = world_T_cam_stack[i]
-                extri.cam_T_world = cam_T_world_stack[i]
+            # When labels won't be projected (log_labels=False on the batch
+            # config flips ``self.config.load_labels`` off too — see
+            # batch_raw_to_rrd._process_one_sequence), the per-frame
+            # ``Fisheye62Parameters`` list is only consulted for ``len(list)``
+            # and ``list[0]`` (log_pinhole intrinsics). Allocate one
+            # representative reference and replicate it instead of building
+            # 16k unique objects with 6 attribute writes apiece (~0.2 s/seq).
+            #
+            # When labels ARE on, the downstream projection code dereferences
+            # ``pinholes_per_frame[i].extrinsics.cam_T_world`` per frame, so
+            # we must still emit unique objects.
+            rep_extri: Extrinsics = object.__new__(Extrinsics)
+            rep_extri.world_R_cam = world_R_cam_stack[0]
+            rep_extri.world_t_cam = world_t_cam_stack[0]
+            rep_extri.cam_R_world = cam_R_world_stack[0]
+            rep_extri.cam_t_world = cam_t_world_stack[0]
+            rep_extri.world_T_cam = world_T_cam_stack[0]
+            rep_extri.cam_T_world = cam_T_world_stack[0]
 
-                fp: Fisheye62Parameters = object.__new__(Fisheye62Parameters)
-                fp.name = key
-                fp.intrinsics = intrinsics
-                fp.extrinsics = extri
-                fp.distortion = distortion
-                fp.projection_matrix = projection_matrix_stack[i]
-                params_list.append(fp)
+            rep_fp: Fisheye62Parameters = object.__new__(Fisheye62Parameters)
+            rep_fp.name = key
+            rep_fp.intrinsics = intrinsics
+            rep_fp.extrinsics = rep_extri
+            rep_fp.distortion = distortion
+            rep_fp.projection_matrix = projection_matrix_stack[0]
+
+            if self.config.load_labels:
+                params_list: list[Fisheye62Parameters] = [rep_fp]
+                params_list_append = params_list.append
+                for i in range(1, n_frames):
+                    extri_i: Extrinsics = object.__new__(Extrinsics)
+                    extri_i.world_R_cam = world_R_cam_stack[i]
+                    extri_i.world_t_cam = world_t_cam_stack[i]
+                    extri_i.cam_R_world = cam_R_world_stack[i]
+                    extri_i.cam_t_world = cam_t_world_stack[i]
+                    extri_i.world_T_cam = world_T_cam_stack[i]
+                    extri_i.cam_T_world = cam_T_world_stack[i]
+
+                    fp_i: Fisheye62Parameters = object.__new__(Fisheye62Parameters)
+                    fp_i.name = key
+                    fp_i.intrinsics = intrinsics
+                    fp_i.extrinsics = extri_i
+                    fp_i.distortion = distortion
+                    fp_i.projection_matrix = projection_matrix_stack[i]
+                    params_list_append(fp_i)
+                ego_fisheye_dict[key] = params_list
+            else:
+                ego_fisheye_dict[key] = [rep_fp] * n_frames
 
             # Side-channel cache so the downstream ego-pose stream in
             # ``view_exoego.setup_scene`` can grab a contiguous
             # ``(n_frames, 3)`` / ``(n_frames, 3, 3)`` array without
-            # rebuilding it from 16k python attribute lookups.
+            # rebuilding it from 16k python attribute lookups. Also exposes
+            # ``cam_T_world_stack`` so future projection callers can avoid
+            # the per-frame Fisheye62Parameters list entirely.
             self._cam_batched_stacks[key] = (
                 world_t_cam_stack,
                 world_R_cam_stack,
