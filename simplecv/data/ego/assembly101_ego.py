@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+import orjson
 import rerun as rr
 from jaxtyping import Float32
 from numpy import ndarray
@@ -201,7 +202,7 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
         )
         assert extrinsics_ego_path.exists(), f"File {extrinsics_ego_path} does not exist"
         with open(extrinsics_ego_path, "rb") as f:
-            extrinsics_ego_raw: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
+            extrinsics_ego_raw: dict[str, dict[str, list[list[float]]]] = orjson.loads(f.read())
 
         # Resolve the serial→alias map. The dataset ships extrinsics keyed by
         # raw camera serial like ``21176875:mono10bit`` or ``84346135:mono10bit``;

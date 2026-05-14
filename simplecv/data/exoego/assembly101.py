@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import orjson
 import rerun as rr
 from jaxtyping import Float32, Int
 from natsort import natsorted
@@ -162,7 +163,7 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
         xyz_json_path: Path = landmarks3d_dir / f"{self.config.sequence_name}.json"
         assert xyz_json_path.exists(), f"File {xyz_json_path} does not exist"
         with open(xyz_json_path, "rb") as f:
-            raw: dict[str, dict[str, list[list[float]]]] = json.loads(f.read())
+            raw: dict[str, dict[str, list[list[float]]]] = orjson.loads(f.read())
 
         keys_sorted: list[str] = sorted(raw.keys(), key=int)
         num_frames: int = len(keys_sorted)
