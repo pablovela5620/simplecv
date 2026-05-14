@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-from fractions import Fraction
 from pathlib import Path
 
 import av
@@ -176,6 +175,13 @@ def test_log_video_timestamps_match(synthetic_h264_mp4: Path, tmp_path: Path) ->
     assert len(ts_asset) == _FRAME_COUNT
     assert len(ts_stream) == _FRAME_COUNT
     np.testing.assert_array_equal(np.sort(ts_asset), np.sort(ts_stream))
+
+
+def test_log_video_rejects_invalid_method(synthetic_h264_mp4: Path) -> None:
+    """Typos in the method argument should fail loudly."""
+    log_video_unchecked = getattr(log_video, "__wrapped__", log_video)
+    with pytest.raises(ValueError, match="Unsupported video logging method"):
+        log_video_unchecked(synthetic_h264_mp4, Path("/video"), method="video-strem")
 
 
 @pytest.mark.parametrize("video_fixture", ["synthetic", "hocap"])

@@ -217,6 +217,7 @@ def log_pinhole(
 
 VideoLogMethod = Literal["video_stream", "asset_video"]
 
+
 # Keyed on libavcodec AVCodecID (not name) so decoder aliases like
 # ``libdav1d`` / ``libaom-av1`` resolve transparently — ``codec.id`` is stable.
 _CODEC_ID_MAP: dict[int, rr.VideoCodec] = {
@@ -284,11 +285,13 @@ def log_video(
         Frame timestamps in nanoseconds, sorted ascending.
 
     Raises:
-        ValueError: When ``method="video_stream"`` and the source codec is not
-            supported by ``rr.VideoStream``.
+        ValueError: When ``method`` is invalid, or when ``method="video_stream"``
+            and the source codec is not supported by ``rr.VideoStream``.
     """
     if method == "asset_video":
         return _log_asset_video(video_source, video_log_path, timeline, recording=recording)
+    if method != "video_stream":
+        raise ValueError(f"Unsupported video logging method: {method!r}.")
     return _log_video_stream(video_source, video_log_path, timeline, recording=recording)
 
 
@@ -330,12 +333,9 @@ def _log_video_stream(
 
     H.264/H.265 length-prefix framing is converted to Annex B; AV1 OBUs are
     logged as-is except for the aria-gen2 RGB SPS rewrite in
-    :func:`_normalize_av1_sample_for_rerun`. Samples are indexed on the
-    timeline by DTS (decode order, not PTS) — rerun sorts samples by
-    timeline value, and the decoder needs them in decode order to
-    reconstruct B/P frames; ``mux_h264_to_mp4`` reads them back the same
-    way. Returns PTS (display order) so callers' timeline-aligned data
-    stays consistent with the AssetVideo path.
+    :func:`_normalize_av1_sample_for_rerun`. VideoStream currently has no
+    separate DTS field, so B-frame streams use DTS as the rerun sample timeline
+    to preserve decode order. Returns PTS (display order) for caller alignment.
     """
     source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
     container: av.container.InputContainer = av.open(source_handle, mode="r")
