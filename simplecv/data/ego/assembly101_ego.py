@@ -151,6 +151,10 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
         return ego_video_files
 
     def load_ego_cams(self) -> dict[str, list[CameraParam]]:
+        # Per-cam (world_t_cam_stack, world_R_cam_stack) cache populated
+        # below and consumed by ``view_exoego.setup_scene`` to skip
+        # rebuilding these arrays from per-frame attribute lookups.
+        self._cam_batched_stacks: dict[str, tuple[Float32[ndarray, "n_frames 3"], Float32[ndarray, "n_frames 3 3"]]] = {}
         ############################################
         # Get Intrinsic Parameters for Ego Cameras #
         ############################################
@@ -286,6 +290,15 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
                 fp.distortion = distortion
                 fp.projection_matrix = projection_matrix_stack[i]
                 params_list.append(fp)
+
+            # Side-channel cache so the downstream ego-pose stream in
+            # ``view_exoego.setup_scene`` can grab a contiguous
+            # ``(n_frames, 3)`` / ``(n_frames, 3, 3)`` array without
+            # rebuilding it from 16k python attribute lookups.
+            self._cam_batched_stacks[key] = (
+                world_t_cam_stack,
+                world_R_cam_stack,
+            )
 
         return cast(dict[str, list[CameraParam]], ego_fisheye_dict)
 

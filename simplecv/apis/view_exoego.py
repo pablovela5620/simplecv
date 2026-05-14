@@ -898,12 +898,25 @@ def setup_scene(
                 static=True,
                 recording=recording,
             )
-            batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
-                [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
+            # Fast path: when the dataset adapter pre-stacked the per-cam
+            # extrinsics into contiguous arrays (e.g. Assembly101's
+            # ``load_ego_cams`` does this), reuse those instead of running a
+            # ~16k-iteration python comprehension. Falls back to the generic
+            # iteration when no such cache is present.
+            cached_stacks: dict[str, tuple] | None = getattr(
+                ego_sequence, "_cam_batched_stacks", None
             )
-            batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
-                [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
-            )
+            cached: tuple | None = cached_stacks.get(str(cam_name)) if cached_stacks else None
+            if cached is not None:
+                batch_world_t_cam: Float[ndarray, "n_frames 3"] = cached[0][:n_frames_cam]
+                batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = cached[1][:n_frames_cam]
+            else:
+                batch_world_t_cam = np.array(
+                    [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
+                )
+                batch_world_R_cam = np.array(
+                    [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
+                )
             # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
             rr.send_columns(
                 f"{cam_log_path}",
