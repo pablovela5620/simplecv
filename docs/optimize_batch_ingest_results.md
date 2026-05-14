@@ -70,7 +70,7 @@ to `/tmp/batch-bench/<exp_id>/`.
 | ----------- | -------: | ----------------: | ------: |
 | 1-seq wall (`--max-conversions 1 --num-workers 1`)    | 22.14s | 2.61s  | 88.2 % |
 | 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 6.00s* | 89.1 % |
-| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 9.03s  | 95.1 % |
+| 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 8.86–9.03s (3 trials) | 95.1 % |
 | 30-seq wall (`--max-conversions 30 --num-workers 8`)  | ≈548s* | 29.85s | 94.6 % |
 
 \* baseline 10-/30-seq estimated from `18.27 sec/seq × N`.
