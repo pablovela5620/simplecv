@@ -225,6 +225,18 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
     def num_sequences_for_config(cls, cfg: Assembly101Config) -> int:
         return len(cls._iter_sequence_dirs(cfg))
 
+    @classmethod
+    def iter_sequence_configs(cls, cfg: Assembly101Config):
+        """Yield one Assembly101Config per source sequence without constructing.
+
+        Constructing an ``Assembly101Sequence`` loads ego/exo cameras and
+        labels (~4s/seq). When the batch ingestor only needs the per-sequence
+        config to dispatch to a worker, we can skip that work and just walk
+        the sequence directories.
+        """
+        for sequence_dir in cls._iter_sequence_dirs(cfg):
+            yield replace(cfg, sequence_name=sequence_dir.name)
+
     @staticmethod
     def _iter_sequence_dirs(cfg: Assembly101Config) -> list[Path]:
         root: Path = cfg.root_directory

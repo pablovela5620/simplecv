@@ -1,4 +1,12 @@
+"""Batch-convert annotated ExoEgo sequences to RRD files.
+
+Worker entrypoint is module-level so it can be re-imported by
+``multiprocessing`` spawn workers without pickling closures.
+"""
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from multiprocessing import get_context
 from pathlib import Path
 from timeit import default_timer as timer
 
@@ -8,7 +16,7 @@ from tqdm import tqdm
 
 from simplecv.apis.view_exoego import VisualizeConfig, visualize_exo_ego
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
+from simplecv.data.exoego.base_exoego import BaseExoEgoDatasetConfig, BaseExoEgoSequence
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -22,33 +30,84 @@ class BatchConvertConfig:
     dataset: AnnotatedExoEgoDatasetUnion
     """Dataset factory capable of producing the annotated ``BaseExoEgoSequence``."""
     rrd_save_dir: Path = Path("data/exoego-forge-catalog")
-    """Output directory that will receive the generated ``.rrd`` files."""
+    """Output directory that will receive the generated ``.rrd`` files. For
+    long-running ingestion runs, ``/mnt/8tb/data/exoego-forge-catalog`` has
+    more storage and is the preferred location on the workstation."""
     max_conversions: int | None = 5
     """Optional cap on how many sequences to convert; ``None`` processes all available episodes."""
     dry_run: bool = False
     """When ``True``, only report the sequences that would be converted without writing files."""
     force: bool = False
     """When ``True``, overwrite existing ``.rrd`` files instead of skipping them."""
+    num_workers: int = 1
+    """When >1, dispatch per-sequence ingestion to a process pool of this size.
+    Sequences are independent so this scales nearly linearly until the box
+    runs out of cores or memory."""
+
+
+def _process_one_sequence(seq_cfg: BaseExoEgoDatasetConfig, rrd_save_path: Path) -> tuple[str, float]:
+    """Build one ``BaseExoEgoSequence`` and write its RRD. Runs in a worker.
+
+    Returning ``(sequence_label, wall_seconds)`` keeps the parent's logging
+    tidy without pickling any heavy objects back across the pipe.
+    """
+    t0: float = timer()
+    sequence: BaseExoEgoSequence = seq_cfg.setup()
+    identity: SequenceIdentity = sequence.sequence_identity
+    rrd_save_path.parent.mkdir(parents=True, exist_ok=True)
+    vc = VisualizeConfig(
+        rr_config=RerunTyroConfig(
+            application_id="exoego-forge",
+            recording_id=identity.recording_id,
+            save=rrd_save_path,
+        ),
+        dataset=seq_cfg,
+    )
+    rec: rr.RecordingStream = vc.rr_config.rec_stream
+    rr.send_recording_name(identity.sequence_key, recording=rec)
+    rec.send_property(
+        "info",
+        rr.AnyValues(
+            sequence_key=identity.sequence_key,
+            num_frames=len(sequence),
+            has_ego=sequence.ego_sequence is not None,
+            has_exo=sequence.exo_sequence is not None,
+        ),
+    )
+    visualize_exo_ego(sequence, vc)
+    return identity.sequence_key, timer() - t0
+
+
+def _plan_sequences(
+    config: BatchConvertConfig,
+) -> list[tuple[BaseExoEgoDatasetConfig, Path, SequenceIdentity]]:
+    """Walk the dataset and return per-sequence (config, rrd_path, identity).
+
+    Uses the dataset's ``iter_sequence_configs`` classmethod when available
+    so we don't pay the per-sequence construction cost twice (once here,
+    once in the worker).
+    """
+    sequence_cls = config.dataset._target
+    plan: list[tuple[BaseExoEgoDatasetConfig, Path, SequenceIdentity]] = []
+    for idx, seq_cfg in enumerate(sequence_cls.iter_sequence_configs(config.dataset)):
+        identity: SequenceIdentity = sequence_cls.sequence_identity_for_config(seq_cfg)
+        rrd_save_path: Path = identity.rrd_path(config.rrd_save_dir)
+        plan.append((seq_cfg, rrd_save_path, identity))
+        if config.max_conversions is not None and idx + 1 >= config.max_conversions:
+            break
+    return plan
 
 
 def main(config: BatchConvertConfig):
     start_time: float = timer()
-    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
-    num_sequences: int = exoego_sequence.num_sequences()
-    if config.max_conversions is not None:
-        num_sequences = min(num_sequences, config.max_conversions)
+    plan: list[tuple[BaseExoEgoDatasetConfig, Path, SequenceIdentity]] = _plan_sequences(config)
 
+    # Duplicate-id guard works the same in both paths.
     seen_recording_ids: set[str] = set()
     seen_output_paths: set[Path] = set()
-
-    for idx, current_exoego_sequence in enumerate(
-        tqdm(exoego_sequence.iter_dataset(), total=num_sequences, desc="Processing sequences")
-    ):
-        identity: SequenceIdentity = current_exoego_sequence.sequence_identity
-        rrd_save_path: Path = identity.rrd_path(config.rrd_save_dir)
+    runnable: list[tuple[BaseExoEgoDatasetConfig, Path, SequenceIdentity]] = []
+    for seq_cfg, rrd_save_path, identity in plan:
         resolved_rrd_save_path: Path = rrd_save_path.expanduser().resolve()
-        sequence_label: str = identity.sequence_key
-
         if identity.recording_id in seen_recording_ids:
             raise ValueError(f"Duplicate recording_id while converting sequences: {identity.recording_id}")
         if resolved_rrd_save_path in seen_output_paths:
@@ -57,33 +116,33 @@ def main(config: BatchConvertConfig):
         seen_output_paths.add(resolved_rrd_save_path)
 
         if rrd_save_path.exists() and not config.force:
-            tqdm.write(f"[skip-existing] {sequence_label} -> {rrd_save_path}")
-        elif config.dry_run:
-            tqdm.write(f"[dry-run] {sequence_label} -> {rrd_save_path}")
-        else:
-            rrd_save_path.parent.mkdir(parents=True, exist_ok=True)
-            current_cfg = VisualizeConfig(
-                rr_config=RerunTyroConfig(
-                    application_id="exoego-forge",
-                    recording_id=identity.recording_id,
-                    save=rrd_save_path,
-                ),
-                dataset=current_exoego_sequence.config,
-            )
-            rec: rr.RecordingStream = current_cfg.rr_config.rec_stream
-            rr.send_recording_name(identity.sequence_key, recording=rec)
-            rec.send_property(
-                "info",
-                rr.AnyValues(
-                    sequence_key=identity.sequence_key,
-                    num_frames=len(current_exoego_sequence),
-                    has_ego=current_exoego_sequence.ego_sequence is not None,
-                    has_exo=current_exoego_sequence.exo_sequence is not None,
-                ),
-            )
-            visualize_exo_ego(current_exoego_sequence, current_cfg)
+            tqdm.write(f"[skip-existing] {identity.sequence_key} -> {rrd_save_path}")
+            continue
+        if config.dry_run:
+            tqdm.write(f"[dry-run] {identity.sequence_key} -> {rrd_save_path}")
+            continue
+        runnable.append((seq_cfg, rrd_save_path, identity))
 
-        if config.max_conversions is not None and idx + 1 >= config.max_conversions:
-            break
+    if config.num_workers > 1 and len(runnable) > 1:
+        ctx = get_context("spawn")
+        worker_count: int = min(config.num_workers, len(runnable))
+        with ProcessPoolExecutor(max_workers=worker_count, mp_context=ctx) as pool:
+            futures = {
+                pool.submit(_process_one_sequence, seq_cfg, rrd_save_path): identity
+                for seq_cfg, rrd_save_path, identity in runnable
+            }
+            for fut in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"Processing sequences ({worker_count} workers)",
+            ):
+                identity = futures[fut]
+                # Re-raise worker exceptions in the parent.
+                key, secs = fut.result()
+                tqdm.write(f"[done] {key} in {secs:.2f}s")
+    else:
+        for seq_cfg, rrd_save_path, identity in tqdm(runnable, desc="Processing sequences"):
+            key, secs = _process_one_sequence(seq_cfg, rrd_save_path)
+            tqdm.write(f"[done] {key} in {secs:.2f}s")
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
