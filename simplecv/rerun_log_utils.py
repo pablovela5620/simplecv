@@ -236,10 +236,6 @@ _BSF_FOR_CODEC_ID: dict[int, str] = {
 }
 """H.264/H.265 packets demuxed from MP4 (avcC/hvcC) need Annex B for ``rr.VideoStream``."""
 
-# AV1 OBU_TEMPORAL_DELIMITER, fixed encoding per AV1 spec §5.3.2:
-# header byte = (type<<3)|has_size = (2<<3)|0x02 = 0x12, then LEB128 size = 0x00.
-_AV1_TEMPORAL_DELIMITER: bytes = b"\x12\x00"
-
 
 def log_video(
     video_source: Path | bytes,
@@ -271,7 +267,28 @@ def log_video(
     """
     if method == "asset_video":
         return _log_asset_video(video_source, video_log_path, timeline, recording=recording)
+    # AV1 sources are silently routed through the AssetVideo path: rerun's
+    # AV1 GOP detector (scuffle-av1 sequence-header parser) doesn't render
+    # our PyAV-demuxed AV1 samples in the viewer even though the bytes are
+    # valid LOBF (verified via ``av.open(...format='obu')`` decode). The
+    # whole-MP4-blob AssetVideo path uses rerun's own MP4 demuxer + dav1d
+    # and works on every AV1 source we've tested (aria-gen2, assembly101).
+    # The bsf path stays default for H.264/H.265 where it works.
+    if _source_is_av1(video_source):
+        return _log_asset_video(video_source, video_log_path, timeline, recording=recording)
     return _log_video_stream(video_source, video_log_path, timeline, recording=recording)
+
+
+def _source_is_av1(video_source: Path | bytes) -> bool:
+    """Quick codec probe without decoding pixels."""
+    source_handle: io.BytesIO | str = (
+        io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
+    )
+    container = av.open(source_handle, mode="r")
+    try:
+        return int(container.streams.video[0].codec_context.codec.id) == 225  # AV_CODEC_ID_AV1
+    finally:
+        container.close()
 
 
 def _log_asset_video(
@@ -349,11 +366,6 @@ def _log_video_stream(
             av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
         )
 
-        # AV1 MP4 demux strips the temporal_delimiter OBU that rerun's
-        # GOP detector relies on to find temporal-unit boundaries; without
-        # it the viewer can only seek to t=0. Prepend it back per spec.
-        prepend_td: bool = codec == rr.VideoCodec.AV1
-
         rr.log(
             str(video_log_path),
             rr.VideoStream(codec=codec),
@@ -383,10 +395,7 @@ def _log_video_stream(
                 # plain int() would truncate and drift by 1 ns per frame.
                 pts_ns_list.append(round(packet.pts * time_base * ns_scale))
                 dts_ns_list.append(round((packet.dts - first_dts) * time_base * ns_scale))
-                sample_bytes: bytes = bytes(packet)
-                if prepend_td:
-                    sample_bytes = _AV1_TEMPORAL_DELIMITER + sample_bytes
-                samples.append(sample_bytes)
+                samples.append(bytes(packet))
                 is_keyframes.append(packet.is_keyframe)
     finally:
         container.close()
