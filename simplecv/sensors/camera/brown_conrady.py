@@ -26,14 +26,16 @@ def cam_to_image_batched(
 
     Returns:
         Pixel coordinates ``[n_frames, n_views, n_points, 2]``.
-
-    Notes:
-        Uses ``np.einsum("vij,fvpj->fvpi", K, xyz_cam)`` directly so we avoid
-        two ``einops.rearrange`` copies that previously dominated this
-        function (~0.9 s/seq on Assembly101).
     """
-    uv_hom: Float[ndarray, "n_frames n_views n_points 3"] = np.einsum(
-        "vij,fvpj->fvpi", K, xyz_cam
+    xyz_cam: Float[ndarray, "n_frames n_views 3 n_points"] = rearrange(
+        xyz_cam,
+        "n_frames n_views n_points dim -> n_frames n_views dim n_points",
+        dim=3,
+    )
+    # [1, n_views, 3, 3] @ [1, n_views, 3, n_points] -> [n_frames, n_views, 3, n_points]
+    uv_hom: Float[ndarray, "n_frames n_views 3 n_points"] = K @ xyz_cam
+    uv_hom: Float[ndarray, "n_frames n_views n_points 3"] = rearrange(
+        uv_hom, "n_frames n_views dim n_points -> n_frames n_views n_points dim", dim=3
     )
     uv: Float[ndarray, "n_frames n_views n_points 2"] = uv_hom[..., :2] / uv_hom[..., 2:]
     return uv

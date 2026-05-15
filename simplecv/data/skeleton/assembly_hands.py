@@ -89,26 +89,6 @@ _ASM2COCO_R: Final[dict[int, tuple[int, ...]]] = {
 _ASM2COCO_R[5] = (112, 10)  # right wrist duplicates → 10
 
 
-def _flatten_mapping(mapping: dict[int, tuple[int, ...]]) -> tuple[np.ndarray, np.ndarray]:
-    """Flatten an asm_id → (coco_id, ...) dict into parallel source/dest arrays."""
-    src: list[int] = []
-    dst: list[int] = []
-    for asm_id, coco_ids in mapping.items():
-        for coco_id in coco_ids:
-            src.append(asm_id)
-            dst.append(coco_id)
-    return (
-        np.asarray(src, dtype=np.intp),
-        np.asarray(dst, dtype=np.intp),
-    )
-
-
-# Precomputed once at import. Index gather/scatter arrays for the batched
-# Assembly-Hands → COCO-133 conversion in ``assembly21_to_coco133_batched``.
-_LEFT_SRC_IDX, _LEFT_DST_IDX = _flatten_mapping(_ASM2COCO)
-_RIGHT_SRC_IDX, _RIGHT_DST_IDX = _flatten_mapping(_ASM2COCO_R)
-
-
 # ------------------------------------------------------------------
 # main helper
 # ------------------------------------------------------------------
@@ -159,55 +139,3 @@ def assembly21_to_coco133(
         coco_133[113, 3] = np.float32(1.0)
 
     return coco_133
-
-
-def assembly21_to_coco133_batched(
-    kpts_lr_batch: Float32[ndarray, "n_frames 2 21 3"],
-) -> Float32[ndarray, "n_frames 133 4"]:
-    """Vectorized version of ``assembly21_to_coco133`` over many frames.
-
-    Replaces the per-frame Python loop + per-mapping inner loops with two
-    fancy-indexed gather/scatter operations and a single elementwise
-    midpoint computation for the synthesized thumb-base joints. Equivalent
-    output to repeatedly calling ``assembly21_to_coco133`` per frame.
-    """
-    n_frames: int = int(kpts_lr_batch.shape[0])
-    out: Float32[ndarray, "n_frames 133 4"] = np.full(
-        (n_frames, 133, 4), np.nan, dtype=np.float32
-    )
-    # Confidence defaults to 0 at NaN slots; the assigned-from-source joints
-    # below overwrite with 1.0.
-    out[:, :, 3] = 0.0
-
-    # Left hand.
-    left_src: Float32[ndarray, "n_frames k_left 3"] = kpts_lr_batch[:, 0, _LEFT_SRC_IDX, :]
-    out[:, _LEFT_DST_IDX, :3] = left_src
-    out[:, _LEFT_DST_IDX, 3] = 1.0
-
-    # Right hand.
-    right_src: Float32[ndarray, "n_frames k_right 3"] = kpts_lr_batch[:, 1, _RIGHT_SRC_IDX, :]
-    out[:, _RIGHT_DST_IDX, :3] = right_src
-    out[:, _RIGHT_DST_IDX, 3] = 1.0
-
-    # Synthetic thumb-base joints: midpoint(wrist, thumb_cmc) per hand.
-    left_wrist: Float32[ndarray, "n_frames 3"] = kpts_lr_batch[:, 0, 5, :]
-    left_thumb_cmc: Float32[ndarray, "n_frames 3"] = kpts_lr_batch[:, 0, 6, :]
-    left_valid: ndarray = ~(
-        np.isnan(left_wrist).any(axis=-1) | np.isnan(left_thumb_cmc).any(axis=-1)
-    )
-    left_thumb_base: Float32[ndarray, "n_frames 3"] = (left_wrist + left_thumb_cmc) * np.float32(0.5)
-    out[left_valid, 92, :3] = left_thumb_base[left_valid]
-    out[left_valid, 92, 3] = 1.0
-
-    right_wrist: Float32[ndarray, "n_frames 3"] = kpts_lr_batch[:, 1, 5, :]
-    right_thumb_cmc: Float32[ndarray, "n_frames 3"] = kpts_lr_batch[:, 1, 6, :]
-    right_valid: ndarray = ~(
-        np.isnan(right_wrist).any(axis=-1) | np.isnan(right_thumb_cmc).any(axis=-1)
-    )
-    right_thumb_base: Float32[ndarray, "n_frames 3"] = (
-        right_wrist + right_thumb_cmc
-    ) * np.float32(0.5)
-    out[right_valid, 113, :3] = right_thumb_base[right_valid]
-    out[right_valid, 113, 3] = 1.0
-
-    return out

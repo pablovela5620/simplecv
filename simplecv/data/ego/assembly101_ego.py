@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
-import orjson
 import rerun as rr
 from jaxtyping import Float32
 from numpy import ndarray
@@ -151,10 +150,6 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
         return ego_video_files
 
     def load_ego_cams(self) -> dict[str, list[CameraParam]]:
-        # Per-cam (world_t_cam_stack, world_R_cam_stack) cache populated
-        # below and consumed by ``view_exoego.setup_scene`` to skip
-        # rebuilding these arrays from per-frame attribute lookups.
-        self._cam_batched_stacks: dict[str, tuple[Float32[ndarray, "n_frames 3"], Float32[ndarray, "n_frames 3 3"]]] = {}
         ############################################
         # Get Intrinsic Parameters for Ego Cameras #
         ############################################
@@ -205,150 +200,49 @@ class Assembly101EgoSequence(BaseEgoSequence[Assembly101Config]):
             / f"{self.config.sequence_name}.json"
         )
         assert extrinsics_ego_path.exists(), f"File {extrinsics_ego_path} does not exist"
-        with open(extrinsics_ego_path, "rb") as f:
-            extrinsics_ego_raw: dict[str, dict[str, list[list[float]]]] = orjson.loads(f.read())
+        with open(extrinsics_ego_path) as f:
+            extrinsics_ego: dict[str, Any] = json.load(f)
 
-        # Resolve the serial→alias map. The dataset ships extrinsics keyed by
-        # raw camera serial like ``21176875:mono10bit`` or ``84346135:mono10bit``;
-        # we group everything onto the four canonical aliases e1..e4 below.
-        first_frame_dict: dict[str, list[list[float]]] = next(iter(extrinsics_ego_raw.values()))
-        first_serial_key: str = next(iter(first_frame_dict.keys()))
-        if first_serial_key.startswith("8"):
-            serial_to_alias: dict[str, str] = {
-                "84346135:mono10bit": "e1",
-                "84347414:mono10bit": "e2",
-                "84355350:mono10bit": "e3",
-                "84358933:mono10bit": "e4",
+        schema: type[EgoExtri843] | type[EgoExtri211] = pick_schema(extrinsics_ego)
+        extrinsics_text: str = extrinsics_ego_path.read_text()
+        if schema is EgoExtri843:
+            raw_ego_cameras: dict[str, EgoExtri843] = from_json(dict[str, EgoExtri843], extrinsics_text)
+            ego_extri_cameras: dict[str, EgoExtri843 | EgoExtri211] = {
+                key: raw_ego_cameras[key] for key in sorted(raw_ego_cameras, key=int)
             }
         else:
-            serial_to_alias = {
-                "21176875:mono10bit": "e1",
-                "21176623:mono10bit": "e2",
-                "21110305:mono10bit": "e3",
-                "21179183:mono10bit": "e4",
-            }
+            raw_ego_cameras_211: dict[str, EgoExtri211] = from_json(dict[str, EgoExtri211], extrinsics_text)
+            ego_extri_cameras = {key: raw_ego_cameras_211[key] for key in sorted(raw_ego_cameras_211, key=int)}
 
-        # Sort frame keys by integer value once, then bulk-fill numpy arrays
-        # directly from the parsed JSON. Skipping pyserde here saves ~0.4 s
-        # of beartype + dict-walk per sequence; on a 16k-frame sequence this
-        # is the largest remaining chunk after exp-12.
-        frame_keys_sorted: list[str] = sorted(extrinsics_ego_raw.keys(), key=int)
-        n_frames_total: int = len(frame_keys_sorted)
-        # Pre-allocate one (n_frames, 4, 4) stack per cam alias.
-        per_alias_stack: dict[str, Float32[ndarray, "n_frames 4 4"]] = {
-            alias: np.empty((n_frames_total, 4, 4), dtype=np.float32)
-            for alias in ("e1", "e2", "e3", "e4")
+        # create list of Fisheye62Parameters for ego cameras
+        ego_fisheye_dict: dict[str, list[Fisheye62Parameters]] = {
+            "e1": [],
+            "e2": [],
+            "e3": [],
+            "e4": [],
         }
-        for i, frame_key in enumerate(frame_keys_sorted):
-            frame_dict: dict[str, list[list[float]]] = extrinsics_ego_raw[frame_key]
-            for serial, alias in serial_to_alias.items():
-                per_alias_stack[alias][i] = frame_dict[serial]
-
-        cam_keys: tuple[str, str, str, str] = ("e1", "e2", "e3", "e4")
-        n_frames: int = n_frames_total
-        ego_fisheye_dict: dict[str, list[Fisheye62Parameters]] = {k: [] for k in cam_keys}
-
-        # Only the full per-frame `Fisheye62Parameters` list is used when
-        # `self.config.load_labels` is True (the fisheye projection
-        # dereferences each frame's `extrinsics.cam_T_world`). When False,
-        # the cam list only needs `[0]` + `len`, so we can skip the
-        # ~n_frames inv and projection-matrix einsum below for frames 1..N.
-        compute_per_frame_inv: bool = self.config.load_labels
-        for key in cam_keys:
-            world_xform: Float32[ndarray, "n_frames 4 4"] = per_alias_stack[key]
-            world_R_cam_stack: Float32[ndarray, "n_frames 3 3"] = world_xform[:, :3, :3]
-            world_t_cam_stack: Float32[ndarray, "n_frames 3"] = (
-                world_xform[:, :3, 3] * np.float32(1e-3)
-            )
-
-            world_T_cam_stack: Float32[ndarray, "n_frames 4 4"] = np.zeros(
-                (n_frames, 4, 4), dtype=np.float64
-            )
-            world_T_cam_stack[:, :3, :3] = world_R_cam_stack
-            world_T_cam_stack[:, :3, 3] = world_t_cam_stack
-            world_T_cam_stack[:, 3, 3] = 1.0
-
-            if compute_per_frame_inv:
-                cam_T_world_stack: Float32[ndarray, "n_frames 4 4"] = np.linalg.inv(
-                    world_T_cam_stack
+        ego_cam: EgoExtri211 | EgoExtri843
+        for _, ego_cam in tqdm(
+            ego_extri_cameras.items(),
+            desc="Processing ego cameras",
+            disable=not self.config.verbose,
+            leave=False,
+            position=1,
+        ):
+            for key in ego_fisheye_dict:
+                cam_T_world = getattr(ego_cam, key)
+                extri: Extrinsics = Extrinsics(
+                    world_R_cam=cam_T_world[:3, :3],
+                    world_t_cam=cam_T_world[:3, 3] * np.float32(1e-3),
                 )
-                cam_R_world_stack: Float32[ndarray, "n_frames 3 3"] = cam_T_world_stack[:, :3, :3]
-                cam_t_world_stack: Float32[ndarray, "n_frames 3"] = cam_T_world_stack[:, :3, 3]
-                k_matrix: Float32[ndarray, "3 3"] = intrinsics.k_matrix
-                projection_matrix_stack: Float32[ndarray, "n_frames 3 4"] = np.einsum(
-                    "ij,fjk->fik", k_matrix, cam_T_world_stack[:, :3, :]
+                ego_fisheye_dict[key].append(
+                    Fisheye62Parameters(
+                        name=f"{key}",
+                        intrinsics=intrinsics,
+                        extrinsics=extri,
+                        distortion=distortion,
+                    )
                 )
-            else:
-                # Only need the frame-0 inverse for the representative
-                # Fisheye62Parameters built below.
-                cam_T_world_0: Float32[ndarray, "4 4"] = np.linalg.inv(world_T_cam_stack[0])
-                cam_T_world_stack = np.broadcast_to(cam_T_world_0, world_T_cam_stack.shape)
-                cam_R_world_stack = cam_T_world_stack[:, :3, :3]
-                cam_t_world_stack = cam_T_world_stack[:, :3, 3]
-                projection_matrix_stack = np.broadcast_to(
-                    intrinsics.k_matrix @ cam_T_world_0[:3, :],
-                    (n_frames, 3, 4),
-                )
-
-            # When labels won't be projected (log_labels=False on the batch
-            # config flips ``self.config.load_labels`` off too — see
-            # batch_raw_to_rrd._process_one_sequence), the per-frame
-            # ``Fisheye62Parameters`` list is only consulted for ``len(list)``
-            # and ``list[0]`` (log_pinhole intrinsics). Allocate one
-            # representative reference and replicate it instead of building
-            # 16k unique objects with 6 attribute writes apiece (~0.2 s/seq).
-            #
-            # When labels ARE on, the downstream projection code dereferences
-            # ``pinholes_per_frame[i].extrinsics.cam_T_world`` per frame, so
-            # we must still emit unique objects.
-            rep_extri: Extrinsics = object.__new__(Extrinsics)
-            rep_extri.world_R_cam = world_R_cam_stack[0]
-            rep_extri.world_t_cam = world_t_cam_stack[0]
-            rep_extri.cam_R_world = cam_R_world_stack[0]
-            rep_extri.cam_t_world = cam_t_world_stack[0]
-            rep_extri.world_T_cam = world_T_cam_stack[0]
-            rep_extri.cam_T_world = cam_T_world_stack[0]
-
-            rep_fp: Fisheye62Parameters = object.__new__(Fisheye62Parameters)
-            rep_fp.name = key
-            rep_fp.intrinsics = intrinsics
-            rep_fp.extrinsics = rep_extri
-            rep_fp.distortion = distortion
-            rep_fp.projection_matrix = projection_matrix_stack[0]
-
-            if self.config.load_labels:
-                params_list: list[Fisheye62Parameters] = [rep_fp]
-                params_list_append = params_list.append
-                for i in range(1, n_frames):
-                    extri_i: Extrinsics = object.__new__(Extrinsics)
-                    extri_i.world_R_cam = world_R_cam_stack[i]
-                    extri_i.world_t_cam = world_t_cam_stack[i]
-                    extri_i.cam_R_world = cam_R_world_stack[i]
-                    extri_i.cam_t_world = cam_t_world_stack[i]
-                    extri_i.world_T_cam = world_T_cam_stack[i]
-                    extri_i.cam_T_world = cam_T_world_stack[i]
-
-                    fp_i: Fisheye62Parameters = object.__new__(Fisheye62Parameters)
-                    fp_i.name = key
-                    fp_i.intrinsics = intrinsics
-                    fp_i.extrinsics = extri_i
-                    fp_i.distortion = distortion
-                    fp_i.projection_matrix = projection_matrix_stack[i]
-                    params_list_append(fp_i)
-                ego_fisheye_dict[key] = params_list
-            else:
-                ego_fisheye_dict[key] = [rep_fp] * n_frames
-
-            # Side-channel cache so the downstream ego-pose stream in
-            # ``view_exoego.setup_scene`` can grab a contiguous
-            # ``(n_frames, 3)`` / ``(n_frames, 3, 3)`` array without
-            # rebuilding it from 16k python attribute lookups. Also exposes
-            # ``cam_T_world_stack`` so future projection callers can avoid
-            # the per-frame Fisheye62Parameters list entirely.
-            self._cam_batched_stacks[key] = (
-                world_t_cam_stack,
-                world_R_cam_stack,
-            )
 
         return cast(dict[str, list[CameraParam]], ego_fisheye_dict)
 

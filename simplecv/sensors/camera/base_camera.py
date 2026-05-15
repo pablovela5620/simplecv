@@ -18,24 +18,25 @@ def world_to_cam_batched(
 
     Returns:
         Camera-frame coordinates ``[n_frames, n_views, n_points, 3]`` with per-view poses applied.
-
-    Notes:
-        ``cam_T_world`` is treated as an affine transform; we slice out the
-        ``[:3, :3]`` rotation and ``[:3, 3]`` translation and compute
-        ``R @ xyz + t`` directly. That avoids materializing the homogeneous
-        (n_frames, n_views, n_points, 4) tensor and the trailing divide by
-        the homogeneous coordinate, which on Assembly101 (n_views=8,
-        n_points=133, n_frames~16k) was ~1.3 s/sequence.
     """
 
-    R: Float[ndarray, "n_views 3 3"] = cam_T_world[:, :3, :3]
-    t: Float[ndarray, "n_views 3"] = cam_T_world[:, :3, 3]
-    # Einsum semantics:
-    #   v=n_views, i=cam axis (output 3), j=world axis (input 3),
-    #   f=n_frames, p=n_points.
-    xyz_cam: Float[ndarray, "n_frames n_views n_points 3"] = np.einsum(
-        "vij,fpj->fvpi", R, xyz_world
-    ) + t[None, :, None, :]
+    xyz_world_hom: Float[ndarray, "n_frames n_points 4"] = np.concatenate(
+        [xyz_world, np.ones((xyz_world.shape[0], xyz_world.shape[1], 1), dtype=xyz_world.dtype)],
+        axis=-1,
+    )
+
+    # Expose n_views dimension for batched matmul and transpose n_points and homogeneous axis.
+    xyz_world_hom: Float[ndarray, "n_frames 1 4 n_points"] = rearrange(
+        xyz_world_hom, "n_frames n_points xyz_hom -> n_frames 1 xyz_hom n_points"
+    )
+    cam_T_world_batched: Float[ndarray, "1 n_views 4 4"] = rearrange(cam_T_world, "n_views m n -> 1 n_views m n")
+    # [n_frames, 1, 4, 4] @ [1, n_views, 4, n_points] -> [n_frames, n_views, 4, n_points]
+    xyz_cam_hom_unrearranged: Float[ndarray, "n_frames n_views 4 n_points"] = cam_T_world_batched @ xyz_world_hom
+    xyz_cam_hom: Float[ndarray, "n_frames n_views n_points 4"] = rearrange(
+        xyz_cam_hom_unrearranged,
+        "n_frames n_views xyz_hom n_points -> n_frames n_views n_points xyz_hom",
+    )
+    xyz_cam: Float[ndarray, "n_frames n_views n_points 3"] = xyz_cam_hom[..., :3] / xyz_cam_hom[..., 3:]
     return xyz_cam
 
 

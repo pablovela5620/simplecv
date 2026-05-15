@@ -302,19 +302,6 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
     def iter_episode_sequences(cls: type[Self], cfg: ConfigT) -> Generator[Self, None, None]: ...
 
     @classmethod
-    def iter_sequence_configs(cls: type[Self], cfg: ConfigT) -> Generator[ConfigT, None, None]:
-        """Yield one cheap ``ConfigT`` per sequence WITHOUT constructing.
-
-        Default implementation falls back to ``iter_episode_sequences`` and
-        drops the materialized sequence. Datasets where construction is
-        expensive (Assembly101, etc.) should override this with a cheaper
-        directory walk so the batch ingestor can dispatch work to a
-        process pool without paying the construction cost twice.
-        """
-        for sequence in cls.iter_episode_sequences(cfg):
-            yield sequence.config
-
-    @classmethod
     @abstractmethod
     def num_sequences_for_config(cls: type[Self], cfg: ConfigT) -> int: ...
 

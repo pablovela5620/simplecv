@@ -166,18 +166,6 @@ class _ConfidenceAwareColumnList(rr.ComponentColumnList):
             if self._provided_average.shape[0] != lengths_arr.shape[0]:
                 raise ValueError("Provided average confidences must match number of partitions.")
             averages = self._provided_average.astype(np.float32, copy=False)
-        elif lengths_arr.size > 0 and bool(np.all(lengths_arr == lengths_arr[0])):
-            # Fast path: when every partition has the same length (the common
-            # case for COCO-keypoint streams where each frame is exactly
-            # n_kpts entries), reshape and nanmean along axis=1 instead of
-            # a Python for-loop with one nanmean call per frame. Saves
-            # ~7s/3-seq on Assembly101 ingestion.
-            n_per: int = int(lengths_arr[0])
-            conf_2d: Float[ndarray, "m n_per"] = np.ascontiguousarray(
-                self._raw_confidences, dtype=np.float32
-            ).reshape(lengths_arr.shape[0], n_per)
-            with np.errstate(invalid="ignore"):
-                averages = np.nanmean(conf_2d, axis=1).astype(np.float32, copy=False)
         else:
             offsets: Int[ndarray, "m_plus_one"] = np.concatenate(
                 (np.array([0], dtype=np.int64), np.cumsum(lengths_arr, dtype=np.int64))
