@@ -41,6 +41,8 @@ class Assembly101Config(BaseExoEgoDatasetConfig):
     split: Literal["train", "val", "test"] | None = None
     sequence_name: str = "nusar-2021_action_both_9011-a01_9011_user_id_2021-02-01_153724"  # "nusar-2021_action_both_9012-c07c_9012_user_id_2021-02-01_164345"
     resize: Resolution | None = None  # Resize the video to this resolution, if None, no resizing is done.
+    cache_video_blobs: bool = True
+    """Whether timestamp extraction should cache MP4 bytes for later RRD logging."""
 
 
 class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
@@ -81,12 +83,14 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
     def load_stream_timestamps_ns(self) -> dict[str, Int[ndarray, "n_frames"]]:
         """Return per-stream timestamps for ego/exo videos (and labels if present).
 
-        Optimization (exp-01): The vanilla loop reads each of the ~12 MP4 files
-        from disk via ``rr.AssetVideo(path=...)`` and then ``log_video`` reads
-        them again to embed the blob. Read each file once in parallel, build
-        ``AssetVideo(contents=...)`` for the timestamp pass, and stash the
-        bytes on each sub-sequence's ``_video_blobs`` dict so the downstream
-        ``setup_scene`` reuses them via ``getattr`` instead of re-decoding.
+        Optimization (exp-01): The default path reads each of the ~12 MP4
+        files once in parallel, builds ``AssetVideo(contents=...)`` for the
+        timestamp pass, and stashes the bytes so downstream logging reuses
+        them instead of reading from disk again.
+
+        For full-corpus runs staged on NVMe, ``cache_video_blobs=False``
+        avoids holding all MP4 bytes in each worker. This trades extra NVMe
+        reads for much lower peak RSS, which keeps high worker counts usable.
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -117,37 +121,58 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
             ts = asset.read_frame_timestamps_nanos()
             return blob, asset, ts
 
-        if jobs:
+        def _read_path_timestamps(p: Path) -> Int[ndarray, "n_frames"]:
+            """Extract timestamps without retaining the encoded MP4 bytes."""
+            asset: rr.AssetVideo = rr.AssetVideo(path=p)
+            timestamps: Int[ndarray, "n_frames"] = asset.read_frame_timestamps_nanos()
+            return timestamps
+
+        cache_video_blobs: bool = self.config.cache_video_blobs
+        if jobs and not cache_video_blobs:
             with ThreadPoolExecutor(max_workers=min(len(jobs), 16)) as pool:
-                results: list[tuple[bytes, rr.AssetVideo, Int[ndarray, "n_frames"]]] = list(
-                    pool.map(_read_and_decode, [p for _, _, p in jobs])
+                timestamps_list: list[Int[ndarray, "n_frames"]] = list(
+                    pool.map(_read_path_timestamps, [p for _, _, p in jobs])
                 )
+            for (stream_name, _cam_name, _path), timestamps in zip(
+                jobs, timestamps_list, strict=True
+            ):
+                stream_ts[stream_name] = timestamps
+                if stream_name.startswith("ego/"):
+                    self._ego_stream_names.append(stream_name)
+                else:
+                    self._exo_stream_names.append(stream_name)
         else:
-            results = []
-
-        ego_blob_cache: dict[str, bytes] = {}
-        exo_blob_cache: dict[str, bytes] = {}
-        ego_asset_cache: dict[str, rr.AssetVideo] = {}
-        exo_asset_cache: dict[str, rr.AssetVideo] = {}
-        for (stream_name, cam_name, _path), (blob, asset, timestamps) in zip(
-            jobs, results, strict=True
-        ):
-            stream_ts[stream_name] = timestamps
-            if stream_name.startswith("ego/"):
-                self._ego_stream_names.append(stream_name)
-                ego_blob_cache[cam_name] = blob
-                ego_asset_cache[cam_name] = asset
+            if jobs:
+                with ThreadPoolExecutor(max_workers=min(len(jobs), 16)) as pool:
+                    results: list[tuple[bytes, rr.AssetVideo, Int[ndarray, "n_frames"]]] = list(
+                        pool.map(_read_and_decode, [p for _, _, p in jobs])
+                    )
             else:
-                self._exo_stream_names.append(stream_name)
-                exo_blob_cache[cam_name] = blob
-                exo_asset_cache[cam_name] = asset
+                results = []
 
-        if self.ego_sequence is not None and ego_blob_cache:
-            self.ego_sequence._video_blobs = ego_blob_cache  # picked up by setup_scene
-            self.ego_sequence._video_assets = ego_asset_cache
-        if self.exo_sequence is not None and exo_blob_cache:
-            self.exo_sequence._video_blobs = exo_blob_cache
-            self.exo_sequence._video_assets = exo_asset_cache
+            ego_blob_cache: dict[str, bytes] = {}
+            exo_blob_cache: dict[str, bytes] = {}
+            ego_asset_cache: dict[str, rr.AssetVideo] = {}
+            exo_asset_cache: dict[str, rr.AssetVideo] = {}
+            for (stream_name, cam_name, _path), (blob, asset, timestamps) in zip(
+                jobs, results, strict=True
+            ):
+                stream_ts[stream_name] = timestamps
+                if stream_name.startswith("ego/"):
+                    self._ego_stream_names.append(stream_name)
+                    ego_blob_cache[cam_name] = blob
+                    ego_asset_cache[cam_name] = asset
+                else:
+                    self._exo_stream_names.append(stream_name)
+                    exo_blob_cache[cam_name] = blob
+                    exo_asset_cache[cam_name] = asset
+
+            if self.ego_sequence is not None and ego_blob_cache:
+                self.ego_sequence._video_blobs = ego_blob_cache  # picked up by setup_scene
+                self.ego_sequence._video_assets = ego_asset_cache
+            if self.exo_sequence is not None and exo_blob_cache:
+                self.exo_sequence._video_blobs = exo_blob_cache
+                self.exo_sequence._video_assets = exo_asset_cache
 
         labels: ExoEgoLabels | None = self.exoego_labels
         if labels is not None and labels.timestamps_ns is not None:
@@ -237,10 +262,36 @@ class Assembly101Sequence(BaseExoEgoSequence[Assembly101Config]):
 
     @staticmethod
     def _iter_sequence_dirs(cfg: Assembly101Config) -> list[Path]:
-        root: Path = cfg.root_directory
+        root: Path = Path(cfg.root_directory)
         videos_dir: Path = root / "videos" / "av1-720-new"
         assert videos_dir.exists(), f"Directory {videos_dir} does not exist"
-        return natsorted([d for d in videos_dir.iterdir() if d.is_dir()])
+        sequence_dirs: list[Path] = natsorted([d for d in videos_dir.iterdir() if d.is_dir()])
+        valid_sequence_dirs: list[Path] = []
+        skipped_sequence_names: list[str] = []
+        for sequence_dir in sequence_dirs:
+            sequence_name: str = sequence_dir.name
+            required_paths: list[Path] = [
+                root / "assembly101_camera_and_hand_poses" / "camera_extrinsics_fixed" / f"{sequence_name}.json",
+                root / "assembly101_camera_and_hand_poses" / "camera_extrinsics_ego" / f"{sequence_name}.json",
+            ]
+            if cfg.load_labels:
+                required_paths.append(
+                    root / "assembly101_camera_and_hand_poses" / "landmarks3D" / f"{sequence_name}.json"
+                )
+            if all(path.exists() for path in required_paths):
+                valid_sequence_dirs.append(sequence_dir)
+            else:
+                skipped_sequence_names.append(sequence_name)
+
+        if cfg.verbose and skipped_sequence_names:
+            preview: str = ", ".join(skipped_sequence_names[:5])
+            if len(skipped_sequence_names) > 5:
+                preview = f"{preview}, ..."
+            tqdm.write(
+                f"[skip-missing-metadata] {len(skipped_sequence_names)} Assembly101 "
+                f"video dirs have incomplete required metadata: {preview}"
+            )
+        return valid_sequence_dirs
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:

@@ -20,6 +20,12 @@
 > * 10-seq 8-worker: 31.12 s  (vs ≈ 182 s baseline → ≈ 83 %)
 > * 30-seq 8-worker: not re-measured yet
 >
+> **Full-corpus NVMe validation (2026-05-14 ~17:27 PT):** 337 valid
+> Assembly101 sequences completed in 20:38.46 with 8 workers and
+> ``--no-cache-video-blobs``. Output was 377 GiB, strict parity passed
+> 10/10 against the existing catalog, and observed system RAM stayed at
+> or below 82 GiB used during the run.
+>
 > The retracted "95.1 %" headline was a measurement artifact; the real
 > headline is roughly the exp-11 number (~84 %). Individual
 > optimizations exp-01..exp-11 + exp-13/14/15/18/21 remain valid; only
@@ -56,6 +62,7 @@ to `/tmp/batch-bench/<exp_id>/`.
 | exp-20 | 2026-05-14 04:08 | skip the per-frame `np.linalg.inv` and projection-matrix einsum in `load_ego_cams` when `load_labels=False` — only frame 0's inverse is needed, broadcast the rest | `simplecv/data/ego/assembly101_ego.py` | — | 8.88 (8w) | — / 0.89 | — / 95.2 | PASS |   | 1-seq wall 2.61 → 2.53 |
 | exp-21 | 2026-05-14 04:10 | move `rr.AssetVideo(contents=)` construction and `read_frame_timestamps_nanos()` into the same per-MP4 ThreadPoolExecutor so the 12 inits run concurrently instead of sequentially | `simplecv/data/exoego/assembly101.py` | — | 8.94 (8w, mean of 3 trials) | — / 0.89 | — / 95.1 | PASS (broken validator) |   | the cited 8.94 s and 95.1 % were measured with the bogus parity validator + ``log_labels=False`` default; see retraction note at top of this file |
 | retraction-fix | 2026-05-14 04:35 | flip ``log_labels`` default back to ``True``; strengthen parity to walk both recording + blueprint stores and require matching keypoint-row totals | `simplecv/apis/batch_raw_to_rrd.py`, `tools/validate_assembly101_rrd_parity.py` | 18.91 | 31.12 (8w) | 6.30 / 3.11 | 65.5 / ≈83 | PASS (strict) | Y | 1-seq wall 6.87s; 30-seq scaling not re-measured. Parity now counts 217 204 keypoint rows in both GT and candidate blueprint stores |
+| full-nvme-nocache | 2026-05-14 17:27 | stage the required Assembly101 source tree on NVMe; run the full valid corpus with 8 workers and disable per-worker MP4 blob caching to keep memory under the 50% RAM cap | `simplecv/data/exoego/assembly101.py` | — | 1237.37 (337 seq, 8w) | 3.67 (337 seq) | 79.9 | PASS (strict 10/10) |   | wall 20:38.46; output 337 RRDs / 377 GiB in `data/exoego-forge-catalog-nvme-full`; 17 source video dirs skipped because required metadata is absent; observed system RAM stayed ≤82 GiB used |
 
 ## Leaderboard (top 5 valid by sec_per_seq, smallest = fastest)
 
@@ -102,5 +109,6 @@ to `/tmp/batch-bench/<exp_id>/`.
 | 3-seq wall (`--max-conversions 3 --num-workers 1`)    | 54.80s | 18.91s | 65.5 % |
 | 10-seq wall (`--max-conversions 10 --num-workers 8`)  | ≈182s* | 31.12s | ≈83 % |
 | 30-seq wall (`--max-conversions 30 --num-workers 8`)  | ≈548s* | not re-measured | — |
+| 337-seq full valid corpus (`--num-workers 8`, NVMe, `--no-cache-video-blobs`) | ≈6157s* | 1237.37s | 79.9 % |
 
-\* baseline 10-/30-seq estimated from `18.27 sec/seq × N`.
+\* baseline 10-/30-/337-seq estimated from `18.27 sec/seq × N`.
