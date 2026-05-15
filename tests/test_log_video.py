@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import cast
 
 import av
 import numpy as np
@@ -43,14 +42,13 @@ def synthetic_h264_mp4(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Deterministic H.264 MP4, no B-frames, lossless (CRF=0)."""
     out_path: Path = tmp_path_factory.mktemp("log_video") / "synthetic.mp4"
     container: av.container.OutputContainer = av.open(str(out_path), mode="w")
-    # PyAV's add_stream() returns a union; cast since we pass a video codec.
-    # ``stream.options`` is a runtime attribute missing from PyAV's type stubs.
-    stream: av.video.stream.VideoStream = cast(av.video.stream.VideoStream, container.add_stream("libx264", rate=_FPS))
+    stream: av.video.stream.VideoStream = container.add_stream(
+        "h264", rate=_FPS, options={"preset": "ultrafast", "crf": "0"}
+    )
     stream.width = _WIDTH
     stream.height = _HEIGHT
     stream.pix_fmt = "yuv420p"
     stream.max_b_frames = 0
-    stream.options = {"preset": "ultrafast", "crf": "0"}  # pyrefly: ignore[missing-attribute]
 
     for i in range(_FRAME_COUNT):
         frame: av.VideoFrame = av.VideoFrame.from_ndarray(_frame_pixels(i), format="rgb24")
