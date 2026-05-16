@@ -136,7 +136,7 @@ PyTurboJPEG = ">=1.7.0"       # Fast parallel JPEG decoding (HOT3D VRS preproces
 [tool.pixi.dependencies]
 python = ">=3.10,<3.13"
 # pyserde + jaxtyping compatibility is tracked in yukinarit/pyserde#643 and #644.
-jaxtyping = ">=0.2.36,<0.3.0"
+jaxtyping = ">=0.2.36"
 numpy = ">=2.0"
 einops = ">=0.8.0,<0.9"
 icecream = ">=2.1.3,<3"
