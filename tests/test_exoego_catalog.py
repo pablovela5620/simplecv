@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -202,6 +203,35 @@ def test_catalog_config_defaults_to_general_catalog_index() -> None:
 )
 def test_table_name_for_dataset(dataset_name: str, table_name: str) -> None:
     assert table_name_for_dataset(dataset_name) == table_name
+
+
+def test_hot3d_has_hand_labels_respects_no_gt_metadata(tmp_path: Path) -> None:
+    seq_dir: Path = tmp_path / "P0016_0ca96b7b"
+    seq_dir.mkdir()
+    (seq_dir / "metadata.json").write_text(json.dumps({"have_hand_object_pose_gt": False}))
+
+    assert Hot3dSequence._has_hand_labels(seq_dir) is False
+
+
+def test_hot3d_has_hand_labels_rejects_empty_files_when_gt_available(tmp_path: Path) -> None:
+    seq_dir: Path = tmp_path / "P0015_e7458eb3"
+    seq_dir.mkdir()
+    (seq_dir / "metadata.json").write_text(json.dumps({"have_hand_object_pose_gt": True}))
+    (seq_dir / "umetrack_hand_user_profile.json").touch()
+    (seq_dir / "umetrack_hand_pose_trajectory.jsonl").touch()
+
+    with pytest.raises(AssertionError, match="Hand GT is marked available"):
+        Hot3dSequence._has_hand_labels(seq_dir)
+
+
+def test_hot3d_has_hand_labels_accepts_nonempty_gt_files(tmp_path: Path) -> None:
+    seq_dir: Path = tmp_path / "P0015_e7458eb3"
+    seq_dir.mkdir()
+    (seq_dir / "metadata.json").write_text(json.dumps({"have_hand_object_pose_gt": True}))
+    (seq_dir / "umetrack_hand_user_profile.json").write_text("{}")
+    (seq_dir / "umetrack_hand_pose_trajectory.jsonl").write_text("{}\n")
+
+    assert Hot3dSequence._has_hand_labels(seq_dir) is True
 
 
 class _FakeSegmentTable:
