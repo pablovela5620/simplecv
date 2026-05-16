@@ -8,7 +8,7 @@ dependencies = [
     # pyserde + jaxtyping breaks on jaxtyping>=0.3.0; upstream tracked this in
     # https://github.com/yukinarit/pyserde/issues/643 and fixed their own pins in
     # https://github.com/yukinarit/pyserde/pull/644.
-    "jaxtyping>=0.2.36,<0.3.0",
+    "jaxtyping>=0.2.36",
     "numpy>=2.0",
     "einops>=0.8.0",
     "icecream>=2.1.3",
