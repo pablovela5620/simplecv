@@ -27,6 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cpu = ["onnxruntime>=1.22.0,<2"]
+# Provides the GPU build of onnxruntime for the CUDA feature.
 cuda = ["onnxruntime-gpu>=1.22.0,<2"]
 
 [project.scripts]
