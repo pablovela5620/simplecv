@@ -20,7 +20,6 @@ import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 from rerun import bindings
-from rerun.catalog import OnDuplicateSegmentLayer
 from rerun.recording_stream import RecordingStream
 from tqdm import tqdm
 
@@ -343,10 +342,8 @@ def mount_catalog(
         flush=True,
     )
 
-    server: rr.server.Server = rr.server.Server(datasets={name: [] for name in dataset_names}, port=port)
-    client = server.client()
-
-    iterator = tqdm(dataset_names, desc="register", unit="dataset", disable=not show_progress)
+    registration_paths_by_dataset: dict[str, list[Path]] = {}
+    iterator = tqdm(dataset_names, desc="prepare", unit="dataset", disable=not show_progress)
     for dataset_name in iterator:
         source_paths: list[Path] = paths_by_dataset[dataset_name]
         if optimize_for_catalog and dataset_name in optimize_datasets:
@@ -357,14 +354,15 @@ def mount_catalog(
             ]
         else:
             registration_paths = source_paths
+        registration_paths_by_dataset[dataset_name] = registration_paths
 
-        uris: list[str] = [path.as_uri() for path in registration_paths]
-        iterator.set_postfix_str(f"{dataset_name} register ({len(uris)} files)")
+    # Loading datasets at server startup avoids cumulative catalog RPC pressure
+    # for large datasets such as Assembly101 while preserving segment URLs.
+    server: rr.server.Server = rr.server.Server(datasets=registration_paths_by_dataset, port=port)
+    client = server.client()
+
+    for dataset_name in tqdm(dataset_names, desc="blueprint", unit="dataset", disable=not show_progress):
         dataset = client.get_dataset(dataset_name)
-        # Keep registration batched for importer throughput. REPLACE is intentional:
-        # it makes reruns idempotent when the same segment ids already have a "base"
-        # layer instead of failing halfway through catalog startup.
-        dataset.register(uris, layer_name="base", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
         _register_default_dataset_blueprint(
             server,
             dataset,

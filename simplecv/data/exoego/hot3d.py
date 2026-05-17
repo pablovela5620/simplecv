@@ -115,7 +115,35 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
 
         return stream_ts
 
-    def load_labels(self) -> ExoEgoLabels:
+    @staticmethod
+    def _has_hand_labels(seq_dir: Path) -> bool:
+        """Return whether this sequence has usable hand pose labels."""
+        metadata_path: Path = seq_dir / "metadata.json"
+        has_hand_gt: bool | None = None
+        if metadata_path.exists():
+            metadata: dict = json.loads(metadata_path.read_text())
+            if "have_hand_object_pose_gt" in metadata:
+                has_hand_gt = bool(metadata["have_hand_object_pose_gt"])
+
+        if has_hand_gt is False:
+            return False
+
+        required_paths: tuple[Path, ...] = (
+            seq_dir / "umetrack_hand_user_profile.json",
+            seq_dir / "umetrack_hand_pose_trajectory.jsonl",
+        )
+        missing_or_empty: list[Path] = [
+            path for path in required_paths if not path.exists() or path.stat().st_size == 0
+        ]
+        if not missing_or_empty:
+            return True
+
+        if has_hand_gt is True:
+            missing_text: str = ", ".join(str(path) for path in missing_or_empty)
+            raise AssertionError(f"Hand GT is marked available but required label files are missing or empty: {missing_text}")
+        return False
+
+    def load_labels(self) -> ExoEgoLabels | None:
         """Load COCO-133 hand keypoints in meters from HOT3D UmeTrack annotations.
 
         HOT3D stores hand annotations in UmeTrack JSONL format:
@@ -127,6 +155,8 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         mm before FK, then scale the output back to meters.
         """
         seq_dir: Path = self._sequence_dir()
+        if not self._has_hand_labels(seq_dir):
+            return None
 
         # ── Load hand model ──────────────────────────────────────────────
         profile_path: Path = seq_dir / "umetrack_hand_user_profile.json"
@@ -302,7 +332,7 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
         from scipy.spatial.transform import Rotation
 
         mano_path: Path = seq_dir / "mano_hand_pose_trajectory.jsonl"
-        if not mano_path.exists():
+        if not mano_path.exists() or mano_path.stat().st_size == 0:
             return None
 
         # JSONL: one JSON object per line. pyserde doesn't support JSONL natively,
@@ -314,6 +344,8 @@ class Hot3dSequence(BaseExoEgoSequence[Hot3dConfig]):
                 line = line.strip()
                 if line:
                     mano_frames.append(json.loads(line))
+        if not mano_frames:
+            return None
 
         # Filter to same RGB-aligned indices as UmeTrack
         mano_filtered: list[dict] = [mano_frames[int(i)] for i in rgb_label_indices]
