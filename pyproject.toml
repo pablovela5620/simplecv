@@ -70,7 +70,7 @@ cmd = "python tools/preprocess_aria_gen2_pilot.py"
 description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for simplecv"
 
 [tool.pixi.tasks.catalog]
-cmd = "python tools/catalog.py"
+cmd = "python tools/catalog.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --no-optimize-for-catalog"
 description = "Host the ExoEgo Forge RRD catalog index"
 
 [tool.pixi.tasks._download-example-polycam-data]
