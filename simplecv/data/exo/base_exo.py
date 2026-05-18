@@ -20,7 +20,9 @@ ConfigT = TypeVar("ConfigT", bound=BaseExoEgoDatasetConfig)
 class ManoStack:
     """Per-sequence MANO parameters grouped for both hands.
 
-    - betas: One shape vector shared across frames and hands.
+    - betas: Shape vector. (10,) means the same shape is shared across hands;
+      (2, 10) means per-hand shape (index 0 = right, 1 = left), as used by
+      datasets that fit left/right independently (e.g. EPFL Smart Kitchen).
     - so3: Axis-angle pose coefficients (48 = 16 joints x 3) per frame/hand.
     - trans: Global translation per frame/hand.
     - use_pca: Whether the final 45 pose coefficients are MANO PCA coefficients.
@@ -30,10 +32,17 @@ class ManoStack:
     - This splits the previous 51-vector (0:48 so3, 48:51 trans) into explicit fields.
     """
 
-    betas: Float32[ndarray, "10"]
+    betas: Float32[ndarray, "10"] | Float32[ndarray, "n_hands=2 10"]
     so3: Float32[ndarray, "n_frames n_hands=2 48"]
     trans: Float32[ndarray, "n_frames n_hands=2 3"]
     use_pca: bool = True
+
+    def betas_for(self, hand_idx: int) -> Float32[ndarray, "10"]:
+        """Return the 10-D shape vector for hand_idx (0=right, 1=left)."""
+        b: Float32[ndarray, "..."] = self.betas
+        if b.ndim == 1:
+            return b
+        return b[hand_idx]
 
 
 @dataclass
@@ -64,9 +73,7 @@ class BaseExoSequence(ABC, Generic[ConfigT]):
         self._exo_cam_list: list[PinholeParameters | None] = self.load_exo_cams()
         # Only create MultiVideoReader if not already set by subclass (e.g., RRD sequences)
         if not hasattr(self, "exo_video_readers") or self.exo_video_readers is None:
-            self.exo_video_readers: MultiVideoReader = MultiVideoReader(
-                video_paths=[video_path for video_path in self._video_path_list]
-            )
+            self.exo_video_readers: MultiVideoReader = MultiVideoReader(video_paths=[video_path for video_path in self._video_path_list])
 
     def __len__(self) -> int:
         return len(self.exo_video_readers)

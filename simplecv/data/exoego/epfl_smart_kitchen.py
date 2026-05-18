@@ -332,10 +332,7 @@ def _parse_keypoints(rows: list[dict[str, str]], *, num_keypoints: int, path: Pa
             frame_keypoints = frame_keypoints[0]
         elif frame_keypoints.shape != (num_keypoints, 3):
             if frame_keypoints.size != num_keypoints * 3:
-                raise ValueError(
-                    f"EPFL kp3ds row {row_idx} in {path} cannot reshape to ({num_keypoints}, 3); "
-                    f"got {frame_keypoints.shape}"
-                )
+                raise ValueError(f"EPFL kp3ds row {row_idx} in {path} cannot reshape to ({num_keypoints}, 3); got {frame_keypoints.shape}")
             frame_keypoints = frame_keypoints.reshape(num_keypoints, 3)
         keypoints.append(frame_keypoints)
     return np.stack(keypoints).astype(np.float32, copy=False)
@@ -360,10 +357,7 @@ def _parse_confidences(
     if "kp3ds_conf" not in rows[0]:
         return finite_mask.astype(np.float32)
 
-    conf_list: list[ndarray] = [
-        _parse_vector_cell(row["kp3ds_conf"], expected_len=num_keypoints, field_name="kp3ds_conf")
-        for row in rows
-    ]
+    conf_list: list[ndarray] = [_parse_vector_cell(row["kp3ds_conf"], expected_len=num_keypoints, field_name="kp3ds_conf") for row in rows]
     conf: ndarray = np.stack(conf_list).astype(np.float32, copy=False)
     if mode == "body" and "l2_dist" in rows[0]:
         empty_body_count: int = sum(1 for row in rows if row.get("l2_dist") in {None, ""})
@@ -436,11 +430,20 @@ def _root_axis_angle(row: dict[str, str], keys: tuple[str, ...], *, field_name: 
 
 
 def _mano_pose_from_row(row: dict[str, str], *, side: Literal["left", "right"]) -> ndarray:
+    """Build the MANO 48-vector for one hand from a CSV row.
+
+    EPFL packs ``{side}_poses`` as a 48-vector whose first three entries are zero
+    (placeholder root) and stores the true root axis-angle separately in
+    ``{side}_Rh``. The 45-vector path supports older slices that drop the
+    placeholder. In both cases we always overlay ``Rh`` onto the root.
+    """
     pose_key: str = f"{side}_poses"
     pose: ndarray = _parse_vector_cell(row[pose_key], field_name=pose_key)
-    if pose.shape[0] == 48:
-        return pose.astype(np.float32, copy=False)
     root: ndarray = _root_axis_angle(row, (f"{side}_Rh", f"{side}_RH"), field_name=f"{side}_Rh")
+    if pose.shape[0] == 48:
+        full: ndarray = pose.astype(np.float32, copy=True)
+        full[:3] = root.astype(np.float32, copy=False)
+        return full
     if pose.shape[0] == 45:
         return np.concatenate([root, pose]).astype(np.float32, copy=False)
     if pose.shape[0] < 45:
@@ -452,6 +455,21 @@ def _mano_pose_from_row(row: dict[str, str], *, side: Literal["left", "right"]) 
 
 
 def _load_mano_stack(hand_rows: list[dict[str, str]]) -> ManoStack:
+    """Build the per-sequence ``ManoStack`` from EPFL ``pose3d_mano.csv`` rows.
+
+    Note: EPFL packs translations in the standard SMPL/MANO convention where the
+    root rotation also rotates the template wrist
+    (``wrist_world = R_root @ root_j_template + Th``). SimpleCV's
+    ``MANOLayerNP`` keeps the root joint at the template position, so to make
+    the layer reproduce the released keypoints we must store
+    ``trans = Th + (R_root - I) @ root_j_template`` per hand and frame. The
+    template wrist depends on per-hand betas, so this loader constructs a
+    short-lived ``MANOLayerNP`` for each hand to read ``root_trans``. As a
+    consequence, loading EPFL labels currently requires the MANO model assets
+    (``MANO_LEFT.pkl`` / ``MANO_RIGHT.pkl``); they are auto-downloaded on first
+    use and cached under ``simplecv/data/``. Other ExoEgo loaders (HoCap,
+    Hot3D) still load labels asset-free.
+    """
     required_column_aliases: dict[str, tuple[str, ...]] = {
         "left_poses": ("left_poses",),
         "right_poses": ("right_poses",),
@@ -463,29 +481,22 @@ def _load_mano_stack(hand_rows: list[dict[str, str]]) -> ManoStack:
         "right_shapes": ("right_shapes",),
     }
     missing_columns: list[str] = [
-        field_name
-        for field_name, aliases in required_column_aliases.items()
-        if not any(alias in hand_rows[0] for alias in aliases)
+        field_name for field_name, aliases in required_column_aliases.items() if not any(alias in hand_rows[0] for alias in aliases)
     ]
     if missing_columns:
         raise KeyError(f"EPFL MANO parameter columns missing from pose3d_mano.csv: {missing_columns}")
 
-    left_shapes: ndarray = np.stack(
-        [
-            _parse_vector_cell(row["left_shapes"], expected_len=10, field_name="left_shapes")
-            for row in hand_rows
-        ]
-    ).astype(np.float32, copy=False)
+    left_shapes: ndarray = np.stack([_parse_vector_cell(row["left_shapes"], expected_len=10, field_name="left_shapes") for row in hand_rows]).astype(
+        np.float32, copy=False
+    )
     right_shapes: ndarray = np.stack(
-        [
-            _parse_vector_cell(row["right_shapes"], expected_len=10, field_name="right_shapes")
-            for row in hand_rows
-        ]
+        [_parse_vector_cell(row["right_shapes"], expected_len=10, field_name="right_shapes") for row in hand_rows]
     ).astype(np.float32, copy=False)
-    shape_delta: float = float(np.nanmax(np.abs(left_shapes - right_shapes)))
-    if shape_delta > 1e-3:
+    left_delta: float = float(np.nanmax(np.abs(left_shapes - left_shapes[0])))
+    right_delta: float = float(np.nanmax(np.abs(right_shapes - right_shapes[0])))
+    if left_delta > 1e-3 or right_delta > 1e-3:
         warnings.warn(
-            f"EPFL left/right MANO shape parameters differ by {shape_delta:.6f}; using left shape.",
+            f"EPFL MANO shape parameters drift over time (left max={left_delta:.6f} right max={right_delta:.6f}); using first-frame values.",
             stacklevel=2,
         )
 
@@ -506,7 +517,34 @@ def _load_mano_stack(hand_rows: list[dict[str, str]]) -> ManoStack:
             field_name="left_Th",
         )
 
-    betas: ndarray = left_shapes[0].astype(np.float32, copy=False)
+    # ManoStack convention: index 0 = right, index 1 = left.
+    betas: ndarray = np.stack(
+        [right_shapes[0], left_shapes[0]],
+        axis=0,
+    ).astype(np.float32, copy=False)
+
+    # EPFL packs translations using the standard MANO convention where the root
+    # rotation also rotates the template wrist (wrist_world = R_root @ root_j + Th).
+    # SimpleCV's MANOLayerNP adds `trans` after FK without rotating root_j, so we
+    # must convert: store `Th + (R_root - I) @ root_j_template` per frame/hand. The
+    # template wrist `root_j` depends on the per-hand betas, hence the per-hand
+    # MANOLayerNP construction below.
+    from scipy.spatial.transform import Rotation
+
+    from simplecv.ops.mano.mano_np import MANOLayerNP
+
+    root_template_per_hand: list[Float32[ndarray, "3"]] = [
+        MANOLayerNP(side="right", betas=betas[0], use_pca=False).root_trans.reshape(3).astype(np.float32),
+        MANOLayerNP(side="left", betas=betas[1], use_pca=False).root_trans.reshape(3).astype(np.float32),
+    ]
+    eye3: Float32[ndarray, "3 3"] = np.eye(3, dtype=np.float32)
+    for hand_idx in range(2):
+        rotvec_seq: Float32[ndarray, "n_frames 3"] = so3[:, hand_idx, :3]
+        R_seq: Float32[ndarray, "n_frames 3 3"] = Rotation.from_rotvec(rotvec_seq).as_matrix().astype(np.float32)
+        root_j: Float32[ndarray, "3"] = root_template_per_hand[hand_idx]
+        delta: Float32[ndarray, "n_frames 3"] = np.einsum("bij,j->bi", R_seq - eye3[None], root_j).astype(np.float32)
+        trans[:, hand_idx] = trans[:, hand_idx] + delta
+
     return ManoStack(betas=betas, so3=so3, trans=trans, use_pca=False)
 
 
@@ -573,10 +611,7 @@ class EpflSmartKitchenSequence(BaseExoEgoSequence[EpflSmartKitchenConfig]):
         body_rows: list[dict[str, str]] = _read_csv_rows(body_path)
         hand_rows: list[dict[str, str]] = _read_csv_rows(hand_path)
         if len(body_rows) != len(hand_rows):
-            raise ValueError(
-                "EPFL body and hand label frame counts must match: "
-                f"{body_path} has {len(body_rows)}, {hand_path} has {len(hand_rows)}"
-            )
+            raise ValueError(f"EPFL body and hand label frame counts must match: {body_path} has {len(body_rows)}, {hand_path} has {len(hand_rows)}")
 
         body_xyz_raw: Float32[ndarray, "num_frames body_kpts=17 3"] = _parse_keypoints(
             body_rows,
@@ -643,9 +678,7 @@ class EpflSmartKitchenSequence(BaseExoEgoSequence[EpflSmartKitchenConfig]):
         return ExoEgoLabels(xyzc_stack=xyzc_stack, timestamps_ns=label_timestamps_ns, mano_stack=mano_stack)
 
     @classmethod
-    def iter_episode_sequences(
-        cls, cfg: EpflSmartKitchenConfig
-    ) -> Generator["EpflSmartKitchenSequence", None, None]:
+    def iter_episode_sequences(cls, cfg: EpflSmartKitchenConfig) -> Generator["EpflSmartKitchenSequence", None, None]:
         for split, participant_id, session_name in cls._episode_specs(cfg):
             episode_cfg: EpflSmartKitchenConfig = replace(
                 cfg,
