@@ -14,6 +14,8 @@ import tempfile
 import threading
 import time
 import weakref
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -41,6 +43,68 @@ CATALOG_SHUTDOWN_TIMEOUT_SECONDS: float = 5.0
 """Maximum graceful shutdown wait after Ctrl-C before forcing process exit."""
 DEFAULT_CATALOG_RRD_CACHE_DIR: Path = Path("~/.cache/simplecv/exoego-forge-catalog-optimized")
 """Default persistent cache root for catalog-compatible optimized RRD copies."""
+
+
+def _wait_for_segment_registration(
+    client: Any,
+    expected_counts: dict[str, int],
+    *,
+    timeout_s: float = 1800.0,
+    poll_interval_s: float = 0.25,
+) -> None:
+    """Block until each dataset has registered at least the expected number of segments.
+
+    Server(datasets={name: <prefix_str>}) kicks the recording-ingest work off
+    asynchronously: the constructor returns once the gRPC server is up, but
+    each dataset's ``segment_table()`` only fills as Rerun walks the prefix
+    and indexes recordings. Downstream consumers (table builders, blueprint
+    registration) need a fully-registered dataset, so callers spin here.
+
+    Args:
+        client: Catalog client returned by ``server.client()``.
+        expected_counts: Expected segment count per dataset name.
+        timeout_s: Maximum total wait. Raises if exceeded.
+        poll_interval_s: Sleep between poll rounds.
+
+    Raises:
+        TimeoutError: If any dataset is still under its expected count after
+            ``timeout_s``.
+    """
+    deadline: float = time.monotonic() + timeout_s
+    pending: dict[str, int] = dict(expected_counts)
+    while pending:
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Datasets did not finish registering within {timeout_s}s: "
+                f"{sorted(pending)}"
+            )
+        for dataset_name in list(pending):
+            try:
+                dataset_entry = client.get_dataset(dataset_name)
+                batches: list[pa.RecordBatch] = dataset_entry.segment_table().collect()
+            except Exception:
+                continue
+            registered: int = sum(b.num_rows for b in batches)
+            if registered >= pending[dataset_name]:
+                pending.pop(dataset_name)
+        if pending:
+            time.sleep(poll_interval_s)
+
+
+@contextmanager
+def _timed_phase(name: str) -> Iterator[None]:
+    """Print a ``[catalog-phase] <name> <seconds>`` line on exit.
+
+    Used by the bench harness to attribute time to specific catalog
+    startup phases (discovery, server bring-up, blueprint registration,
+    per-dataset table creation). The cost is one `time.monotonic()`
+    pair per phase — negligible compared to multi-second phases.
+    """
+    t0: float = time.monotonic()
+    try:
+        yield
+    finally:
+        print(f"[catalog-phase] {name} {time.monotonic() - t0:.3f}s", flush=True)
 
 DEFAULT_CATALOG_DATASETS: tuple[str, ...] = (
     "aria-gen2",
@@ -380,7 +444,8 @@ def mount_catalog(
     Raises:
         FileNotFoundError: If no matching RRD files are found.
     """
-    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=datasets)
+    with _timed_phase("mount.discover"):
+        paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=datasets)
     dataset_names: list[str] = sorted(paths_by_dataset)
     total_files: int = sum(len(paths_by_dataset[name]) for name in dataset_names)
 
@@ -390,33 +455,49 @@ def mount_catalog(
         flush=True,
     )
 
-    registration_paths_by_dataset: dict[str, list[Path]] = {}
-    iterator = tqdm(dataset_names, desc="prepare", unit="dataset", disable=not show_progress)
-    for dataset_name in iterator:
-        source_paths: list[Path] = paths_by_dataset[dataset_name]
+    with _timed_phase("mount.prepare"):
+        registration_paths_by_dataset: dict[str, list[Path]] = {}
+        iterator = tqdm(dataset_names, desc="prepare", unit="dataset", disable=not show_progress)
+        for dataset_name in iterator:
+            source_paths: list[Path] = paths_by_dataset[dataset_name]
+            if optimize_for_catalog and dataset_name in optimize_datasets:
+                iterator.set_postfix_str(f"{dataset_name} optimize ({len(source_paths)} files)")
+                registration_paths: list[Path] = [
+                    _optimize_rrd_for_catalog(path, rrd_root=rrd_root, cache_root=catalog_rrd_cache_dir)
+                    for path in source_paths
+                ]
+            else:
+                registration_paths = source_paths
+            registration_paths_by_dataset[dataset_name] = registration_paths
+
+    # Pass dataset prefix directories when we can register source RRDs
+    # verbatim. Rerun walks each prefix recursively in Rust, which avoids
+    # FFI-marshalling thousands of file paths per dataset and (critically)
+    # returns from the Server constructor as soon as the gRPC listener is
+    # up — recording-ingest continues in the background. Optimized
+    # datasets still get an explicit cache file list so mtime-driven cache
+    # reuse from `_optimize_rrd_for_catalog` stays intact.
+    rrd_root_resolved: Path = rrd_root.expanduser().resolve()
+    registration_for_server: dict[str, str | list[Path]] = {}
+    for dataset_name in dataset_names:
         if optimize_for_catalog and dataset_name in optimize_datasets:
-            iterator.set_postfix_str(f"{dataset_name} optimize ({len(source_paths)} files)")
-            registration_paths: list[Path] = [
-                _optimize_rrd_for_catalog(path, rrd_root=rrd_root, cache_root=catalog_rrd_cache_dir)
-                for path in source_paths
-            ]
+            registration_for_server[dataset_name] = registration_paths_by_dataset[dataset_name]
         else:
-            registration_paths = source_paths
-        registration_paths_by_dataset[dataset_name] = registration_paths
+            registration_for_server[dataset_name] = str((rrd_root_resolved / dataset_name).resolve())
 
-    # Loading datasets at server startup avoids cumulative catalog RPC pressure
-    # for large datasets such as Assembly101 while preserving segment URLs.
-    server: rr.server.Server = rr.server.Server(datasets=registration_paths_by_dataset, port=port)
-    client = server.client()
+    with _timed_phase("mount.server_init"):
+        server: rr.server.Server = rr.server.Server(datasets=registration_for_server, port=port)
+        client = server.client()
 
-    for dataset_name in tqdm(dataset_names, desc="blueprint", unit="dataset", disable=not show_progress):
-        dataset = client.get_dataset(dataset_name)
-        _register_default_dataset_blueprint(
-            server,
-            dataset,
-            dataset_name=dataset_name,
-            application_id=application_id,
-        )
+    with _timed_phase("mount.blueprints"):
+        for dataset_name in tqdm(dataset_names, desc="blueprint", unit="dataset", disable=not show_progress):
+            dataset = client.get_dataset(dataset_name)
+            _register_default_dataset_blueprint(
+                server,
+                dataset,
+                dataset_name=dataset_name,
+                application_id=application_id,
+            )
 
     return server
 
@@ -880,70 +961,130 @@ def _shutdown_catalog_server(server: CatalogServer, *, timeout_seconds: float = 
     return True
 
 
+def _build_dataset_tables(
+    client: Any,
+    *,
+    rrd_root: Path,
+    dataset_names: list[str],
+    paths_by_dataset: dict[str, list[Path]],
+    catalog_url: str,
+) -> dict[str, str]:
+    """Wait for async segment registration, then build per-dataset tables.
+
+    Runs after ``main`` has already returned the "ready" marker so the
+    bench/UX timer doesn't include this phase. Returns the table URLs by
+    table name for downstream printing.
+    """
+    expected_counts: dict[str, int] = {
+        name: len(paths_by_dataset[name]) for name in dataset_names
+    }
+    with _timed_phase("background.wait_registration"):
+        _wait_for_segment_registration(client, expected_counts)
+
+    table_urls_by_name: dict[str, str] = {}
+    with _timed_phase("background.tables_total"):
+        for dataset_name in dataset_names:
+            dataset_dir: Path = rrd_root / dataset_name
+            dataset_entry = client.get_dataset(dataset_name)
+            with _timed_phase(f"background.tables.{dataset_name}.segment_table"):
+                rows: list[RRDIndexRow] = build_rrd_index_rows_from_dataset(
+                    dataset_entry,
+                    dataset_dir=dataset_dir,
+                    dataset_name=dataset_name,
+                )
+            table_name: str = table_name_for_dataset(dataset_name)
+            total_size_bytes: int = sum(row.size_bytes for row in rows)
+            print(
+                f"[catalog-background] {table_name} ({len(rows)} RRDs, {total_size_bytes:,} bytes).",
+                flush=True,
+            )
+            with _timed_phase(f"background.tables.{dataset_name}.create_table"):
+                table = create_rrd_index_table(
+                    client,
+                    dataset_name=dataset_name,
+                    table_name=table_name,
+                    rows=rows,
+                )
+            table_urls_by_name[table_name] = f"{catalog_url}/entry/{table.id}"
+    return table_urls_by_name
+
+
 def main(config: CatalogConfig) -> None:
     """Host a Rerun catalog for converted ExoEgo Forge RRD files.
 
     Args:
         config: Runtime configuration for the catalog server.
     """
+    print(f"[catalog-phase] main_entered_at_epoch {time.time():.6f}", flush=True)
     rrd_root: Path = config.rrd_root.expanduser().resolve()
-    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=config.datasets)
+    with _timed_phase("main.discover"):
+        paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=config.datasets)
     dataset_names: list[str] = sorted(paths_by_dataset)
 
     server: CatalogServer | None = None
     client: Any | None = None
+    background_thread: threading.Thread | None = None
     try:
-        server = mount_catalog(
-            rrd_root,
-            datasets=config.datasets,
-            port=config.port,
-            application_id=config.application_id,
-            optimize_for_catalog=config.optimize_for_catalog,
-            catalog_rrd_cache_dir=config.catalog_rrd_cache_dir,
-            optimize_datasets=config.optimize_datasets,
-        )
+        with _timed_phase("main.mount_catalog"):
+            server = mount_catalog(
+                rrd_root,
+                datasets=config.datasets,
+                port=config.port,
+                application_id=config.application_id,
+                optimize_for_catalog=config.optimize_for_catalog,
+                catalog_rrd_cache_dir=config.catalog_rrd_cache_dir,
+                optimize_datasets=config.optimize_datasets,
+            )
         client = server.client()
-        table_urls_by_name: dict[str, str] = {}
         catalog_url: str = server.url()
-        for dataset_name in dataset_names:
-            dataset_dir: Path = rrd_root / dataset_name
-            dataset_entry = client.get_dataset(dataset_name)
-            rows: list[RRDIndexRow] = build_rrd_index_rows_from_dataset(
-                dataset_entry,
-                dataset_dir=dataset_dir,
-                dataset_name=dataset_name,
-            )
-            table_name: str = table_name_for_dataset(dataset_name)
-            total_size_bytes: int = sum(row.size_bytes for row in rows)
-            print(f"Creating {table_name} ({len(rows)} RRDs, {total_size_bytes:,} bytes).", flush=True)
-            table = create_rrd_index_table(
-                client,
-                dataset_name=dataset_name,
-                table_name=table_name,
-                rows=rows,
-            )
-            table_urls_by_name[table_name] = f"{catalog_url}/entry/{table.id}"
 
-        print()
-        print("-" * 72)
-        print(f"  Catalog URL:  {catalog_url}")
-        print()
-        print("  Tables:")
-        for table_name, table_url in table_urls_by_name.items():
-            print(f"    {table_name}: {table_url}")
-        print()
-        print("  In the Rerun viewer: + -> Open Data Source -> paste the URL")
-        print("  Open a table with:")
-        print("    pixi run rerun <table-url>")
-        print()
-        print("  Enable: Settings > Experimental > Table cards and blueprints")
-        print("-" * 72, flush=True)
+        # Defer the heavy "wait for async segment registration + build per-
+        # dataset Lance tables" work to a daemon thread. The server is
+        # already up and the catalog page lists every dataset; segments
+        # populate as Rerun's prefix walker finishes. Users get a snappy
+        # ready signal; full table availability arrives later.
+        bg_client: Any = client
+
+        def _background_build() -> None:
+            try:
+                table_urls_by_name: dict[str, str] = _build_dataset_tables(
+                    bg_client,
+                    rrd_root=rrd_root,
+                    dataset_names=dataset_names,
+                    paths_by_dataset=paths_by_dataset,
+                    catalog_url=catalog_url,
+                )
+            except Exception as exc:  # noqa: BLE001 - background must not crash main thread.
+                print(f"[catalog-background] table build failed: {exc!r}", flush=True)
+                return
+            print(flush=True)
+            print("-" * 72, flush=True)
+            print(f"  Catalog URL:  {catalog_url}", flush=True)
+            print(flush=True)
+            print("  Tables:", flush=True)
+            for table_name, table_url in table_urls_by_name.items():
+                print(f"    {table_name}: {table_url}", flush=True)
+            print(flush=True)
+            print("  In the Rerun viewer: + -> Open Data Source -> paste the URL", flush=True)
+            print("  Open a table with:", flush=True)
+            print("    pixi run rerun <table-url>", flush=True)
+            print(flush=True)
+            print("  Enable: Settings > Experimental > Table cards and blueprints", flush=True)
+            print("-" * 72, flush=True)
+            print("[catalog-background] tables ready", flush=True)
+
+        background_thread = threading.Thread(
+            target=_background_build, name="simplecv-catalog-tables", daemon=True
+        )
+        background_thread.start()
 
         if config.open_browser:
             rr.serve_web_viewer(web_port=config.web_port, open_browser=True, connect_to=catalog_url)
-            print(f"\nWeb viewer hosted at http://127.0.0.1:{config.web_port}")
+            print(f"\nWeb viewer hosted at http://127.0.0.1:{config.web_port}", flush=True)
 
-        print("\nServer is up. Ctrl-C to stop.", flush=True)
+        print(f"Catalog server up at {catalog_url}; tables building in background.", flush=True)
+        print(f"SIMPLECV_CATALOG_READY ts={time.time():.6f}", flush=True)
+        print("Server is up. Ctrl-C to stop.", flush=True)
         try:
             while True:
                 time.sleep(3600)

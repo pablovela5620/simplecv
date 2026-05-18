@@ -1,0 +1,30 @@
+{
+  "n": 1,
+  "min_s": 2.840336410095915,
+  "median_s": 2.840336410095915,
+  "max_s": 2.840336410095915,
+  "runs_s": [
+    2.840336410095915
+  ],
+  "warmup": false,
+  "phase_medians_s": {
+    "cli_and_imports": 0.89943528175354,
+    "main.discover": 0.105,
+    "main.mount_catalog": 1.833,
+    "mount.blueprints": 0.038,
+    "mount.discover": 0.106,
+    "mount.prepare": 0.001,
+    "mount.server_init": 1.684
+  },
+  "runs_phases_s": [
+    {
+      "main.discover": 0.105,
+      "mount.discover": 0.106,
+      "mount.prepare": 0.001,
+      "mount.server_init": 1.684,
+      "mount.blueprints": 0.038,
+      "main.mount_catalog": 1.833,
+      "cli_and_imports": 0.89943528175354
+    }
+  ]
+}

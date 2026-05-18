@@ -25,6 +25,7 @@ from simplecv.apis.exoego_forge_catalog import (
     RRDIndexRow,
     _optimize_rrd_for_catalog,
     _register_default_dataset_blueprint,
+    _wait_for_segment_registration,
     _table_preview_camera,
     build_exoego_catalog_blueprint,
     build_rrd_index_rows_from_dataset,
@@ -335,7 +336,7 @@ def test_mount_catalog_python_server_preserves_recursive_file_list(
     for path in (first_rrd, second_rrd):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"not a real rrd")
-    captured_datasets: dict[str, list[Path]] = {}
+    captured_datasets: dict[str, Any] = {}
 
     class _FakeClient:
         def get_dataset(self, dataset_name: str) -> _FakeBlueprintDatasetEntry:
@@ -343,7 +344,7 @@ def test_mount_catalog_python_server_preserves_recursive_file_list(
             return _FakeBlueprintDatasetEntry()
 
     class _FakeRerunServer:
-        def __init__(self, *, datasets: dict[str, list[Path]], port: int | None) -> None:
+        def __init__(self, *, datasets: dict[str, Any], port: int | None) -> None:
             assert port is None
             captured_datasets.update(datasets)
 
@@ -380,12 +381,12 @@ def test_mount_catalog_python_server_preserves_recursive_file_list(
         show_progress=False,
     )
 
-    assert captured_datasets == {
-        "assembly101": [
-            second_rrd.resolve(),
-            first_rrd.resolve(),
-        ]
-    }
+    # E002: passing the dataset directory as a prefix string lets Rerun
+    # walk it natively (Server.dataset_prefixes path), much faster than
+    # marshalling thousands of file paths over FFI. Recursive discovery
+    # is preserved by Rerun's prefix walker.
+    assembly_dir: Path = (rrd_root / "assembly101").resolve()
+    assert captured_datasets == {"assembly101": str(assembly_dir)}
 
 
 def test_catalog_main_shutdowns_server_directly_on_keyboard_interrupt(
@@ -456,6 +457,81 @@ def test_catalog_main_shutdowns_server_directly_on_keyboard_interrupt(
     )
 
     assert shutdown_calls == ["shutdown"]
+
+
+def test_wait_for_segment_registration_polls_until_each_dataset_meets_expected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E003: registration is async under prefix-mode; the wait helper must
+    block until every dataset's ``segment_table()`` reports at least the
+    expected segment count, polling on a small interval."""
+    rows_by_dataset: dict[str, int] = {"aria-gen2": 0, "assembly101": 0}
+    advance_log: list[str] = []
+
+    class _GrowingDatasetEntry:
+        def __init__(self, name: str) -> None:
+            self.name: str = name
+
+        def segment_table(self) -> _FakeSegmentTable:
+            n: int = rows_by_dataset[self.name]
+            advance_log.append(f"{self.name}={n}")
+            schema: pa.Schema = pa.schema([("rerun_segment_id", pa.string())])
+            arr: pa.Array = pa.array([f"seg_{i}" for i in range(n)], type=pa.string())
+            table: pa.Table = pa.table({"rerun_segment_id": arr}, schema=schema)
+            return _FakeSegmentTable(table)
+
+    class _GrowingClient:
+        def get_dataset(self, name: str) -> _GrowingDatasetEntry:
+            return _GrowingDatasetEntry(name)
+
+    poll_count: list[int] = [0]
+
+    def _fake_sleep(_seconds: float) -> None:
+        poll_count[0] += 1
+        # Each round, advance both datasets by one segment until they fill up.
+        if rows_by_dataset["aria-gen2"] < 3:
+            rows_by_dataset["aria-gen2"] += 1
+        if rows_by_dataset["assembly101"] < 5:
+            rows_by_dataset["assembly101"] += 1
+
+    monkeypatch.setattr(catalog_module.time, "sleep", _fake_sleep)
+
+    _wait_for_segment_registration(
+        _GrowingClient(),
+        expected_counts={"aria-gen2": 3, "assembly101": 5},
+        timeout_s=60.0,
+        poll_interval_s=0.0,
+    )
+
+    assert rows_by_dataset == {"aria-gen2": 3, "assembly101": 5}
+    assert poll_count[0] >= 4  # 5 segments needed, advancing 1 per round
+
+
+def test_wait_for_segment_registration_raises_timeout_on_stalled_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StuckClient:
+        def get_dataset(self, name: str) -> _FakeDatasetEntry:
+            empty: pa.Table = pa.table({"rerun_segment_id": pa.array([], type=pa.string())})
+            return _FakeDatasetEntry(empty)
+
+    elapsed: list[float] = [0.0]
+
+    def _fake_monotonic() -> float:
+        elapsed[0] += 0.5
+        return elapsed[0]
+
+    monkeypatch.setattr(catalog_module.time, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(catalog_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(TimeoutError) as exc:
+        _wait_for_segment_registration(
+            _StuckClient(),
+            expected_counts={"never": 10},
+            timeout_s=1.0,
+            poll_interval_s=0.0,
+        )
+    assert "never" in str(exc.value)
 
 
 def test_register_default_dataset_blueprint_registers_full_segment_blueprint() -> None:
