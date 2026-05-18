@@ -69,6 +69,7 @@ class HocapSequence(BaseExoEgoSequence[HocapConfig]):
                     betas=labels.mano_stack.betas,
                     so3=labels.mano_stack.so3[label_idx : label_idx + 1],
                     trans=labels.mano_stack.trans[label_idx : label_idx + 1],
+                    use_pca=labels.mano_stack.use_pca,
                 )
             timestamps_ns = labels.timestamps_ns
             labels = ExoEgoLabels(

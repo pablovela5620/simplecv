@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+import warnings
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -270,8 +271,8 @@ def log_video(
         timeline: Timeline name for frame timestamps.
         method: ``"video_stream"`` (default) demuxes encoded codec samples into
             ``rr.VideoStream``. ``"asset_video"`` embeds the whole MP4 blob via
-            ``rr.AssetVideo`` + ``rr.VideoFrameReference``; kept for validation
-            and as a fallback for codecs unsupported by ``rr.VideoStream``.
+            ``rr.AssetVideo`` + ``rr.VideoFrameReference``; callers must request
+            it explicitly.
         recording: Optional specific recording stream to log to.
 
     Returns:
@@ -300,7 +301,14 @@ def _log_asset_video(
 
     rr.log(str(video_log_path), video_asset, static=True, recording=recording)
 
-    frame_timestamps_ns: Int[ndarray, "num_frames"] = video_asset.read_frame_timestamps_nanos()
+    try:
+        frame_timestamps_ns: Int[ndarray, "num_frames"] = video_asset.read_frame_timestamps_nanos()
+    except RuntimeError as exc:
+        warnings.warn(
+            f"Rerun could not read AssetVideo frame timestamps ({exc}); falling back to PyAV demux timestamps.",
+            stacklevel=2,
+        )
+        frame_timestamps_ns = _read_frame_timestamps_nanos_pyav(video_source)
 
     rr.send_columns(
         f"{video_log_path}",
@@ -309,6 +317,28 @@ def _log_asset_video(
         recording=recording,
     )
     return frame_timestamps_ns
+
+
+def _read_frame_timestamps_nanos_pyav(video_source: Path | bytes) -> Int[ndarray, "num_frames"]:
+    """Read display timestamps by demuxing with PyAV when Rerun cannot inspect a codec."""
+    source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
+    container: av.container.InputContainer = av.open(source_handle, mode="r")
+    timestamps_ns: list[int] = []
+    try:
+        in_stream: av.video.stream.VideoStream = container.streams.video[0]
+        time_base: Fraction | None = in_stream.time_base
+        if time_base is None:
+            raise ValueError("Input video stream has no time_base; cannot derive frame timestamps.")
+        ns_scale: Fraction = Fraction(1_000_000_000, 1)
+        for packet in container.demux(in_stream):
+            if packet.pts is None:
+                continue
+            timestamps_ns.append(round(packet.pts * time_base * ns_scale))
+    finally:
+        container.close()
+    if not timestamps_ns:
+        raise RuntimeError("PyAV could not derive any frame timestamps from the video stream.")
+    return np.sort(np.asarray(timestamps_ns, dtype=np.int64))
 
 
 def _log_video_stream(

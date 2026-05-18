@@ -69,7 +69,14 @@ description = "Download Aria Gen2 Pilot sequences from CDN URLs"
 cmd = "python tools/preprocess_aria_gen2_pilot.py"
 description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for simplecv"
 
+[tool.pixi.tasks.preprocess-epfl-smart-kitchen]
+cmd = "python tools/preprocess_epfl_smart_kitchen.py"
+description = "Build an AV1-transcoded EPFL-Smart-Kitchen mirror for simplecv"
+
 [tool.pixi.tasks.catalog]
+# Keep the default task fast for interactive browsing. Without
+# --no-optimize-for-catalog, SimpleCV pre-optimizes missing RRD cache copies before Rerun registration/ingestion;
+# on a cold full catalog this can be hundreds of GB of serial startup work.
 cmd = "python tools/catalog.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --no-optimize-for-catalog"
 description = "Host the ExoEgo Forge RRD catalog index"
 
@@ -101,6 +108,11 @@ description = "Downloads an example easymocap dataset from huggingface, this may
 cmd = "test -e data/hocap/sample.zip && test -e data/hocap/sample || (mkdir -p data/hocap/ && huggingface-cli download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && unzip -o data/hocap/sample.zip -d data/hocap/)"
 outputs = ["data/hocap/sample.zip", "data/hocap/sample"]
 description = "Downloads and extracts an example HOCap dataset from huggingface, this may take a while"
+
+[tool.pixi.tasks._download-epfl-smart-kitchen-sample]
+cmd = "test -e data/epfl-smart-kitchen/sample.zip && test -e data/epfl-smart-kitchen/sample || (mkdir -p data/epfl-smart-kitchen/ && huggingface-cli download pablovela5620/epfl-smart-kitchen-sample sample.zip --repo-type dataset --local-dir data/epfl-smart-kitchen/ && unzip -o data/epfl-smart-kitchen/sample.zip -d data/epfl-smart-kitchen/)"
+outputs = ["data/epfl-smart-kitchen/sample.zip", "data/epfl-smart-kitchen/sample"]
+description = "Downloads and extracts an example EPFL-Smart-Kitchen dataset from huggingface"
 
 [tool.pixi.tasks._download-assembly101-sample]
 cmd = """

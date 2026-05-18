@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add ExoEgo Dataset"
+  short_description: "Implement a SimpleCV ExoEgo dataset adapter end to end."
+  default_prompt: "Add a new SimpleCV ExoEgo dataset using TDD, COCO-133 labels, viewer validation, RRD conversion, and catalog registration."

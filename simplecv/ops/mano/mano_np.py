@@ -257,7 +257,11 @@ class MANOLayerNP:
     """NumPy implementation mirroring MANOLayerTorch's interface (meters output)."""
 
     def __init__(
-        self, side: Literal["left", "right"], betas: Float32[np.ndarray, "10"], mano_root_dir: Path | None = None
+        self,
+        side: Literal["left", "right"],
+        betas: Float32[np.ndarray, "10"],
+        mano_root_dir: Path | None = None,
+        use_pca: bool = True,
     ) -> None:
         if mano_root_dir is None:
             repo_root: Path = Path(__file__).resolve().parents[2]
@@ -291,12 +295,13 @@ class MANOLayerNP:
 
         self._side: Literal["left", "right"] = side
         self._betas: Float32[np.ndarray, "10"] = betas
+        self._use_pca: bool = use_pca
 
         self._mano_layer = ManoSimpleLayerNP(
             side=side,
             mano_root=mano_root_dir,
             ncomps=45,
-            use_pca=True,
+            use_pca=use_pca,
         )
 
         # Store faces

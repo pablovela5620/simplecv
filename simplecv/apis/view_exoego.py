@@ -337,8 +337,8 @@ def log_mano_batch(
 
         mano_root_path: Path = mano_parent_log_path / "mano"
         mano_layers = [
-            MANOLayerNP(side="right", betas=mano_stack.betas),
-            MANOLayerNP(side="left", betas=mano_stack.betas),
+            MANOLayerNP(side="right", betas=mano_stack.betas, use_pca=mano_stack.use_pca),
+            MANOLayerNP(side="left", betas=mano_stack.betas, use_pca=mano_stack.use_pca),
         ]
         mano_so3: Float32[ndarray, "n_frames n_hands=2 48"] = mano_stack.so3
         mano_trans: Float32[ndarray, "n_frames n_hands=2 3"] = mano_stack.trans
@@ -759,6 +759,33 @@ def _choose_shortest_timeline_by_duration(
     return timelines[min_idx]
 
 
+def _video_stream_timestamps_for_logging(
+    exoego_sequence: BaseExoEgoSequence,
+    *,
+    log_ego: bool,
+    log_exo: bool,
+) -> list[Int[ndarray, "n_frames"]]:
+    """Return only ego/exo video stream timestamps, excluding label-only streams."""
+    timestamp_list: list[Int[ndarray, "n_frames"]] = []
+    ego_sequence: BaseEgoSequence | None = exoego_sequence.ego_sequence
+    if log_ego and ego_sequence is not None:
+        for stream_name in ego_sequence.ego_video_names:
+            stream_timestamps: Int[ndarray, "n_frames"] | None = exoego_sequence.stream_timestamps_ns.get(
+                f"ego/{stream_name}"
+            )
+            if stream_timestamps is not None:
+                timestamp_list.append(stream_timestamps)
+
+    exo_sequence: BaseExoSequence | None = exoego_sequence.exo_sequence
+    if log_exo and exo_sequence is not None:
+        for stream_name in exo_sequence.exo_video_names:
+            stream_timestamps = exoego_sequence.stream_timestamps_ns.get(f"exo/{stream_name}")
+            if stream_timestamps is not None:
+                timestamp_list.append(stream_timestamps)
+
+    return timestamp_list
+
+
 def setup_scene(
     exoego_sequence: BaseExoEgoSequence,
     *,
@@ -843,6 +870,52 @@ def setup_scene(
         )
         ego_video_log_path_list: list[Path] = []
 
+        def _log_ego_cameras(shortest_ego_timestamp: Int[ndarray, "n_frames"]) -> None:
+            ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
+                dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
+            )
+            for cam_name, ego_cam_param_list in ego_cam_dict.items():
+                if not ego_cam_param_list:
+                    continue
+                n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
+                if n_frames_cam <= 0:
+                    continue
+                trimmed_cam_params: list[PinholeParameters | Fisheye62Parameters] = ego_cam_param_list[:n_frames_cam]
+                # We assume that all cameras share intrinsics across frames
+                first_cam: PinholeParameters | Fisheye62Parameters = trimmed_cam_params[0]
+                cam_log_path: Path = parent_log_path / "ego" / str(cam_name)
+                pinhole_log_path: Path = cam_log_path / "pinhole"
+                rr.log(
+                    f"{pinhole_log_path}",
+                    PinholeWithDistortion.from_camera(
+                        first_cam,
+                        image_plane_distance=ego_sequence.image_plane_distance,
+                        include_distortion=True,
+                    ),
+                    static=True,
+                    recording=recording,
+                )
+                batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
+                    [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
+                )
+                batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
+                    [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
+                )
+                # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
+                rr.send_columns(
+                    f"{cam_log_path}",
+                    indexes=[
+                        rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])
+                    ],
+                    columns=[
+                        *rr.Transform3D.columns(
+                            translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
+                            mat3x3=rearrange(batch_world_R_cam, "f r c -> (f) r c"),
+                        ),
+                    ],
+                    recording=recording,
+                )
+
         for stream_name, video_file in zip(ego_video_names, ego_video_files, strict=True):
             cam_log_path: Path = parent_log_path / "ego" / stream_name
             ego_video_log_path: Path = cam_log_path / "pinhole" / "video"
@@ -862,50 +935,10 @@ def setup_scene(
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
 
-        # log the ego cameras and their trajectories
-        shortest_ego_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(ego_timestamp_list)
-        ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
-            dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
-        )
-        for cam_name, ego_cam_param_list in ego_cam_dict.items():
-            if not ego_cam_param_list:
-                continue
-            n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
-            if n_frames_cam <= 0:
-                continue
-            trimmed_cam_params: list[PinholeParameters | Fisheye62Parameters] = ego_cam_param_list[:n_frames_cam]
-            # We assume that all cameras share intrinsics across frames
-            first_cam: PinholeParameters | Fisheye62Parameters = trimmed_cam_params[0]
-            cam_log_path: Path = parent_log_path / "ego" / str(cam_name)
-            pinhole_log_path: Path = cam_log_path / "pinhole"
-            rr.log(
-                f"{pinhole_log_path}",
-                PinholeWithDistortion.from_camera(
-                    first_cam,
-                    image_plane_distance=ego_sequence.image_plane_distance,
-                    include_distortion=True,
-                ),
-                static=True,
-                recording=recording,
-            )
-            batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
-                [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
-            )
-            batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
-                [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
-            )
-            # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
-            rr.send_columns(
-                f"{cam_log_path}",
-                indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])],
-                columns=[
-                    *rr.Transform3D.columns(
-                        translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
-                        mat3x3=rearrange(batch_world_R_cam, "f r c -> (f) r c"),
-                    ),
-                ],
-                recording=recording,
-            )
+        # Camera trajectories are logged after video ingestion so their time
+        # range is clipped to the frames the demuxer actually accepted.
+        if ego_timestamp_list:
+            _log_ego_cameras(_choose_shortest_timeline_by_duration(ego_timestamp_list))
 
     shortest_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(
         exo_timestamp_list + ego_timestamp_list
@@ -936,6 +969,23 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
+    if config.log_labels:
+        video_timestamp_list: list[Int[ndarray, "n_frames"]] = _video_stream_timestamps_for_logging(
+            exoego_sequence,
+            log_ego=config.log_ego,
+            log_exo=config.log_exo,
+        )
+        label_fallback_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(video_timestamp_list)
+        log_exoego_batch(
+            exoego_sequence,
+            parent_log_path=parent_log_path,
+            timeline=timeline,
+            shortest_timestamp=label_fallback_timestamp,
+            log_ego=config.log_ego,
+            log_exo=config.log_exo,
+            log_mano=config.log_mano,
+        )
+
     scene_setup_result: SceneSetupResult = setup_scene(
         exoego_sequence,
         parent_log_path=parent_log_path,
@@ -944,7 +994,6 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
         log_exo=config.log_exo,
     )
     log_paths: LogPaths = scene_setup_result.log_paths
-    shortest_timestamp: Int[ndarray, "n_frames"] = scene_setup_result.shortest_timestamp
 
     if config.log_env_mesh:
         log_environment_mesh(exoego_sequence, parent_log_path)
@@ -974,17 +1023,6 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
         collapse_panels=True,
     )
     rr.send_blueprint(blueprint)
-
-    if config.log_labels:
-        log_exoego_batch(
-            exoego_sequence,
-            parent_log_path=parent_log_path,
-            timeline=timeline,
-            shortest_timestamp=shortest_timestamp,
-            log_ego=config.log_ego,
-            log_exo=config.log_exo,
-            log_mano=config.log_mano,
-        )
 
     print(f"Total time taken: {timer() - start_time:.2f} seconds")
 
