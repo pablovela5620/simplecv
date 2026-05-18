@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import atexit
 import base64
+import os
 import subprocess
 import tempfile
+import threading
 import time
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import pyarrow as pa
 import rerun as rr
@@ -35,12 +37,15 @@ TABLE_CARD_PREVIEW_START_SECONDS: float = 0.0
 """Start of the absolute ``video_time`` loop used by table-card previews."""
 TABLE_CARD_PREVIEW_END_SECONDS: float = 10.0
 """End of the absolute ``video_time`` loop used by table-card previews."""
+CATALOG_SHUTDOWN_TIMEOUT_SECONDS: float = 5.0
+"""Maximum graceful shutdown wait after Ctrl-C before forcing process exit."""
 DEFAULT_CATALOG_RRD_CACHE_DIR: Path = Path("~/.cache/simplecv/exoego-forge-catalog-optimized")
 """Default persistent cache root for catalog-compatible optimized RRD copies."""
 
 DEFAULT_CATALOG_DATASETS: tuple[str, ...] = (
     "aria-gen2",
     "assembly101",
+    "epfl-smart-kitchen",
     "hocap",
     "hot3d-aria",
     "hot3d-quest3",
@@ -51,6 +56,7 @@ DEFAULT_CATALOG_DATASETS: tuple[str, ...] = (
 DEFAULT_CATALOG_OPTIMIZE_DATASETS: tuple[str, ...] = (
     "aria-gen2",
     "assembly101",
+    "epfl-smart-kitchen",
     "hocap",
     "hot3d-aria",
     "hot3d-quest3",
@@ -75,6 +81,20 @@ CATALOG_CAMERA_NAMES: dict[str, dict[str, tuple[str, ...]]] = {
     "assembly101": {
         "ego": ("e1", "e2", "e3", "e4"),
         "exo": ("C10095", "C10115", "C10118", "C10119", "C10379", "C10390", "C10395", "C10404"),
+    },
+    "epfl-smart-kitchen": {
+        "ego": ("hololens",),
+        "exo": (
+            "output0",
+            "Aoutput0",
+            "Aoutput1",
+            "Aoutput2",
+            "Aoutput3",
+            "Boutput0",
+            "Boutput1",
+            "Boutput2",
+            "Boutput3",
+        ),
     },
     "hocap": {
         "ego": ("hololens_kv5h72",),
@@ -111,6 +131,36 @@ CATALOG_TABLE_PREVIEW_CAMERAS: dict[str, tuple[str, str]] = {
     "assembly101": ("ego", "e3"),
 }
 """Dataset-specific table-card video preview overrides."""
+
+
+@runtime_checkable
+class CatalogServer(Protocol):
+    """Minimal server interface used by catalog registration."""
+
+    def url(self) -> str:
+        """Return the catalog URL."""
+        ...
+
+    def client(self) -> Any:
+        """Return a Rerun catalog client."""
+        ...
+
+    def shutdown(self) -> None:
+        """Stop the catalog server."""
+        ...
+
+    def __enter__(self) -> CatalogServer:
+        """Enter the server context manager."""
+        ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: Any | None,
+    ) -> None:
+        """Exit the server context manager."""
+        ...
 
 
 def build_exoego_catalog_blueprint(dataset_name: str) -> rrb.Blueprint:
@@ -233,8 +283,7 @@ def discover_rrd_uris(
     """
     paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=datasets)
     uris_by_dataset: dict[str, list[str]] = {
-        dataset_name: [path.as_uri() for path in rrd_paths]
-        for dataset_name, rrd_paths in paths_by_dataset.items()
+        dataset_name: [path.as_uri() for path in rrd_paths] for dataset_name, rrd_paths in paths_by_dataset.items()
     }
     return uris_by_dataset
 
@@ -287,8 +336,7 @@ def _optimize_rrd_for_catalog(source_path: Path, *, rrd_root: Path, cache_root: 
     )
     if completed_process.returncode != 0:
         raise RuntimeError(
-            f"Failed to optimize {source_resolved} for Rerun catalog registration.\n"
-            f"{completed_process.stderr.strip()}"
+            f"Failed to optimize {source_resolved} for Rerun catalog registration.\n{completed_process.stderr.strip()}"
         )
 
     tmp_path.replace(optimized_path)
@@ -305,7 +353,7 @@ def mount_catalog(
     optimize_for_catalog: bool = True,
     catalog_rrd_cache_dir: Path = DEFAULT_CATALOG_RRD_CACHE_DIR,
     optimize_datasets: tuple[str, ...] = DEFAULT_CATALOG_OPTIMIZE_DATASETS,
-) -> rr.server.Server:
+) -> CatalogServer:
     """Mount local ExoEgo Forge RRDs as one Rerun catalog dataset per source.
 
     The default path registers optimized cache copies rather than raw source
@@ -539,7 +587,9 @@ def build_rrd_index_rows_from_dataset(
     segment_table: pa.Table = pa.Table.from_batches(segment_batches)
     if segment_table.num_rows == 0:
         raise FileNotFoundError(f"Registered {dataset_name} dataset has no segments.")
-    recording_ids: list[str] = [str(recording_id) for recording_id in segment_table.column("rerun_segment_id").to_pylist()]
+    recording_ids: list[str] = [
+        str(recording_id) for recording_id in segment_table.column("rerun_segment_id").to_pylist()
+    ]
     sequence_key_values: list[Any | None] = _optional_segment_column_values(segment_table, "property:info:sequence_key")
 
     rows: list[RRDIndexRow] = []
@@ -693,8 +743,7 @@ def build_rrd_index_table_blueprint(dataset_name: str, *, timeline: str = "video
     table_blueprint_archetype: Any | None = getattr(experimental_api, "TableBlueprint", None)
     if table_blueprint_archetype is None:
         raise RuntimeError(
-            "Experimental table blueprints require Rerun SDK 0.32 or newer. "
-            "Run from the default Pixi environment."
+            "Experimental table blueprints require Rerun SDK 0.32 or newer. Run from the default Pixi environment."
         )
 
     blueprint: rrb.Blueprint = build_table_card_blueprint(dataset_name, timeline=timeline)
@@ -774,6 +823,10 @@ def create_rrd_index_table(
     if table_name in existing_table_names:
         client.get_table(table_name).delete()
 
+    # The embedded TableBlueprint enables preview cards for each catalog row.
+    # Creating these previews can dominate startup for large datasets, but they
+    # are intentionally kept because the catalog is much less useful without
+    # visual row previews.
     encoded_blueprint: str = build_rrd_index_table_blueprint(dataset_name)
     schema: pa.Schema = build_rrd_index_table_schema(encoded_blueprint)
     table = client.create_table(table_name, schema)
@@ -789,6 +842,44 @@ def create_rrd_index_table(
     return table
 
 
+def _shutdown_catalog_server(server: CatalogServer, *, timeout_seconds: float = CATALOG_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
+    """Shutdown a Rerun server without letting native teardown block forever.
+
+    Args:
+        server: Running Rerun catalog server.
+        timeout_seconds: Maximum time to wait for graceful shutdown.
+
+    Returns:
+        True when shutdown completed before the timeout, false otherwise.
+
+    Raises:
+        RuntimeError: If the shutdown thread returns an exception.
+    """
+    shutdown_errors: list[BaseException] = []
+
+    def shutdown() -> None:
+        try:
+            server.shutdown()
+        except BaseException as exc:  # noqa: BLE001 - relay shutdown failures from the worker thread.
+            shutdown_errors.append(exc)
+
+    shutdown_thread: threading.Thread = threading.Thread(
+        target=shutdown,
+        name="rerun-catalog-shutdown",
+        daemon=True,
+    )
+    shutdown_thread.start()
+    try:
+        shutdown_thread.join(timeout=timeout_seconds)
+    except KeyboardInterrupt:
+        return False
+    if shutdown_thread.is_alive():
+        return False
+    if shutdown_errors:
+        raise RuntimeError("Rerun catalog server shutdown failed.") from shutdown_errors[0]
+    return True
+
+
 def main(config: CatalogConfig) -> None:
     """Host a Rerun catalog for converted ExoEgo Forge RRD files.
 
@@ -799,17 +890,21 @@ def main(config: CatalogConfig) -> None:
     paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=config.datasets)
     dataset_names: list[str] = sorted(paths_by_dataset)
 
-    with mount_catalog(
-        rrd_root,
-        datasets=config.datasets,
-        port=config.port,
-        application_id=config.application_id,
-        optimize_for_catalog=config.optimize_for_catalog,
-        catalog_rrd_cache_dir=config.catalog_rrd_cache_dir,
-        optimize_datasets=config.optimize_datasets,
-    ) as server:
+    server: CatalogServer | None = None
+    client: Any | None = None
+    try:
+        server = mount_catalog(
+            rrd_root,
+            datasets=config.datasets,
+            port=config.port,
+            application_id=config.application_id,
+            optimize_for_catalog=config.optimize_for_catalog,
+            catalog_rrd_cache_dir=config.catalog_rrd_cache_dir,
+            optimize_datasets=config.optimize_datasets,
+        )
         client = server.client()
         table_urls_by_name: dict[str, str] = {}
+        catalog_url: str = server.url()
         for dataset_name in dataset_names:
             dataset_dir: Path = rrd_root / dataset_name
             dataset_entry = client.get_dataset(dataset_name)
@@ -827,12 +922,11 @@ def main(config: CatalogConfig) -> None:
                 table_name=table_name,
                 rows=rows,
             )
-            table_urls_by_name[table_name] = f"{server.url()}/entry/{table.id}"
+            table_urls_by_name[table_name] = f"{catalog_url}/entry/{table.id}"
 
-        url: str = server.url()
         print()
         print("-" * 72)
-        print(f"  Catalog URL:  {url}")
+        print(f"  Catalog URL:  {catalog_url}")
         print()
         print("  Tables:")
         for table_name, table_url in table_urls_by_name.items():
@@ -846,12 +940,23 @@ def main(config: CatalogConfig) -> None:
         print("-" * 72, flush=True)
 
         if config.open_browser:
-            rr.serve_web_viewer(web_port=config.web_port, open_browser=True, connect_to=url)
-            print(f"\nWeb viewer hosted at http://127.0.0.1:{config.web_port} with the catalog loaded.")
+            rr.serve_web_viewer(web_port=config.web_port, open_browser=True, connect_to=catalog_url)
+            print(f"\nWeb viewer hosted at http://127.0.0.1:{config.web_port}")
 
         print("\nServer is up. Ctrl-C to stop.", flush=True)
         try:
             while True:
                 time.sleep(3600)
         except KeyboardInterrupt:
-            print("shutting down")
+            print("shutting down", flush=True)
+    finally:
+        client = None
+        if server is not None:
+            shutdown_completed: bool = _shutdown_catalog_server(server)
+            if not shutdown_completed:
+                print(
+                    f"Rerun catalog server did not shut down within {CATALOG_SHUTDOWN_TIMEOUT_SECONDS:.1f}s; "
+                    "forcing process exit.",
+                    flush=True,
+                )
+                os._exit(130)

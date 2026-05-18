@@ -9,6 +9,7 @@ from simplecv.data.exoego.assembly101 import Assembly101Config
 from simplecv.data.exoego.base_exoego import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.ego100k import Egocentric100KConfig
 from simplecv.data.exoego.ego_dex import EgoDexConfig
+from simplecv.data.exoego.epfl_smart_kitchen import EpflSmartKitchenConfig
 from simplecv.data.exoego.hocap import HocapConfig
 from simplecv.data.exoego.hot3d import Hot3dConfig
 from simplecv.data.exoego.robocap import RobocapConfig
@@ -20,6 +21,7 @@ dataset_defaults = {
     "aria-gen2": AriaGen2PilotConfig(),
     "assembly101": Assembly101Config(),
     "ego100k": Egocentric100KConfig(),
+    "epfl-smart-kitchen": EpflSmartKitchenConfig(),
     "hocap": HocapConfig(),
     "ego-dex": EgoDexConfig(),
     "hot3d": Hot3dConfig(),

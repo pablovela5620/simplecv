@@ -29,6 +29,14 @@ class BatchConvertConfig:
     """When ``True``, only report the sequences that would be converted without writing files."""
     force: bool = False
     """When ``True``, overwrite existing ``.rrd`` files instead of skipping them."""
+    log_exo: bool = True
+    """Enable exo-camera imagery, intrinsics, and projections during conversion."""
+    log_ego: bool = True
+    """Enable ego-camera imagery, intrinsics, and projections during conversion."""
+    log_labels: bool = True
+    """Enable COCO-133 label logging during conversion."""
+    log_mano: bool = True
+    """Enable derived MANO mesh/keypoint logging during conversion."""
 
 
 def main(config: BatchConvertConfig):
@@ -69,6 +77,10 @@ def main(config: BatchConvertConfig):
                     save=rrd_save_path,
                 ),
                 dataset=current_exoego_sequence.config,
+                log_exo=config.log_exo,
+                log_ego=config.log_ego,
+                log_labels=config.log_labels,
+                log_mano=config.log_mano,
             )
             rec: rr.RecordingStream = current_cfg.rr_config.rec_stream
             rr.send_recording_name(identity.sequence_key, recording=rec)
@@ -82,6 +94,7 @@ def main(config: BatchConvertConfig):
                 ),
             )
             visualize_exo_ego(current_exoego_sequence, current_cfg)
+            rec.flush(timeout_sec=600.0)
 
         if config.max_conversions is not None and idx + 1 >= config.max_conversions:
             break

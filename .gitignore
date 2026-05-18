@@ -177,7 +177,6 @@ pretrained_models/*
 /.codex/config.toml.bak
 /.vscode/mcp.json
 /.vscode/mcp.json.bak
-/AGENTS.md
 /AGENTS.md.bak
 # END Ruler Generated Files
 artifacts/

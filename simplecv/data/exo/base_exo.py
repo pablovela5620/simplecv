@@ -23,6 +23,7 @@ class ManoStack:
     - betas: One shape vector shared across frames and hands.
     - so3: Axis-angle pose coefficients (48 = 16 joints x 3) per frame/hand.
     - trans: Global translation per frame/hand.
+    - use_pca: Whether the final 45 pose coefficients are MANO PCA coefficients.
 
     Notes
     - Hand index convention: 0 = right, 1 = left.
@@ -32,6 +33,7 @@ class ManoStack:
     betas: Float32[ndarray, "10"]
     so3: Float32[ndarray, "n_frames n_hands=2 48"]
     trans: Float32[ndarray, "n_frames n_hands=2 3"]
+    use_pca: bool = True
 
 
 @dataclass

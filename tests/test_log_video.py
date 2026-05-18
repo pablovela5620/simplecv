@@ -60,6 +60,27 @@ def synthetic_h264_mp4(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return out_path
 
 
+@pytest.fixture(scope="session")
+def synthetic_mpeg4_mp4(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Deterministic MPEG-4 Part 2 MP4, matching EPFL HoloLens codec behavior."""
+    out_path: Path = tmp_path_factory.mktemp("log_video") / "synthetic-mpeg4.mp4"
+    container: av.container.OutputContainer = av.open(str(out_path), mode="w")
+    stream: av.video.stream.VideoStream = container.add_stream("mpeg4", rate=_FPS)
+    stream.width = _WIDTH
+    stream.height = _HEIGHT
+    stream.pix_fmt = "yuv420p"
+    stream.max_b_frames = 0
+
+    for i in range(_FRAME_COUNT):
+        frame: av.VideoFrame = av.VideoFrame.from_ndarray(_frame_pixels(i), format="rgb24")
+        for packet in stream.encode(frame):
+            container.mux(packet)
+    for packet in stream.encode():
+        container.mux(packet)
+    container.close()
+    return out_path
+
+
 def _decode_mp4(source: Path | bytes) -> list[UInt8[ndarray, "h w 3"]]:
     handle: io.BytesIO | str = io.BytesIO(source) if isinstance(source, bytes) else str(source)
     container: av.container.InputContainer = av.open(handle, mode="r")
@@ -168,6 +189,27 @@ def test_log_video_timestamps_match(synthetic_h264_mp4: Path, tmp_path: Path) ->
     assert len(ts_asset) == _FRAME_COUNT
     assert len(ts_stream) == _FRAME_COUNT
     np.testing.assert_array_equal(np.sort(ts_asset), np.sort(ts_stream))
+
+
+def test_log_video_stream_requires_supported_codec(
+    synthetic_mpeg4_mp4: Path,
+    tmp_path: Path,
+) -> None:
+    rec: rr.RecordingStream = rr.RecordingStream(
+        application_id="test-log-video-unsupported-codec",
+        recording_id="unsupported-codec",
+    )
+    rec.save(str(tmp_path / "unsupported.rrd"))
+    entity: str = "/video"
+
+    with pytest.raises(ValueError, match="not supported by rr.VideoStream"):
+        log_video(
+            synthetic_mpeg4_mp4,
+            Path(entity),
+            timeline="video_time",
+            method="video_stream",
+            recording=rec,
+        )
 
 
 @pytest.mark.parametrize("video_fixture", ["synthetic", "hocap"])

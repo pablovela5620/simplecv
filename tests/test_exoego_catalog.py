@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pytest
+import tomllib
 
+import simplecv.apis.exoego_forge_catalog as catalog_module
 from simplecv.apis.exoego_forge_catalog import (
     CATALOG_CAMERA_NAMES,
     DEFAULT_CATALOG_DATASETS,
@@ -31,15 +34,19 @@ from simplecv.apis.exoego_forge_catalog import (
     build_table_card_blueprint,
     discover_rrd_paths,
     discover_rrd_uris,
+    mount_catalog,
     table_name_for_dataset,
 )
 from simplecv.data.exoego.aria_gen2_pilot import AriaGen2PilotConfig, AriaGen2PilotSequence
 from simplecv.data.exoego.assembly101 import Assembly101Config, Assembly101Sequence
 from simplecv.data.exoego.ego_dex import EgoDexConfig, EgoDexSequence
+from simplecv.data.exoego.epfl_smart_kitchen import EpflSmartKitchenConfig, EpflSmartKitchenSequence
 from simplecv.data.exoego.hocap import HocapConfig, HocapSequence
 from simplecv.data.exoego.hot3d import Hot3dConfig, Hot3dSequence
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.exoego.umetrack import UmeTrackConfig, UmeTrackSequence
+
+PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 
 
 def test_sequence_identity_paths_and_recording_id() -> None:
@@ -118,6 +125,18 @@ def test_sequence_identity_rejects_recording_id_separator(
             "test/add_remove_lid/episode_0003",
             "ego-dex__test__add_remove_lid__episode_0003",
         ),
+        (
+            EpflSmartKitchenSequence.sequence_identity_for_config(
+                EpflSmartKitchenConfig(
+                    split="train",
+                    participant_id="YH2002",
+                    session_name="2023_12_04_10_15_23",
+                )
+            ),
+            "epfl-smart-kitchen",
+            "train/YH2002/2023_12_04_10_15_23",
+            "epfl-smart-kitchen__train__YH2002__2023_12_04_10_15_23",
+        ),
     ],
 )
 def test_dataset_sequence_identity_for_config(
@@ -172,11 +191,23 @@ def test_discover_rrd_paths_raises_when_no_requested_dataset_has_rrds(tmp_path: 
 def test_catalog_config_defaults_to_general_catalog_index() -> None:
     config: CatalogConfig = CatalogConfig()
 
+    assert [field.name for field in fields(CatalogConfig)] == [
+        "rrd_root",
+        "datasets",
+        "port",
+        "application_id",
+        "optimize_for_catalog",
+        "catalog_rrd_cache_dir",
+        "optimize_datasets",
+        "open_browser",
+        "web_port",
+    ]
     assert config.rrd_root == Path("data/exoego-forge-catalog")
     assert config.datasets == DEFAULT_CATALOG_DATASETS
     assert config.datasets == (
         "aria-gen2",
         "assembly101",
+        "epfl-smart-kitchen",
         "hocap",
         "hot3d-aria",
         "hot3d-quest3",
@@ -189,11 +220,23 @@ def test_catalog_config_defaults_to_general_catalog_index() -> None:
     assert config.catalog_rrd_cache_dir == DEFAULT_CATALOG_RRD_CACHE_DIR
 
 
+def test_pixi_catalog_task_skips_preoptimization_for_interactive_startup() -> None:
+    pyproject_text: str = (PROJECT_ROOT / "pyproject.toml").read_text()
+    pyproject_data: dict[str, Any] = tomllib.loads(pyproject_text)
+    catalog_task: dict[str, Any] = pyproject_data["tool"]["pixi"]["tasks"]["catalog"]
+    catalog_cmd: str = catalog_task["cmd"]
+
+    assert "[tool.pixi.tasks.catalog]" in pyproject_text
+    assert catalog_cmd == "python tools/catalog.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --no-optimize-for-catalog"
+    assert "pre-optimizes missing RRD cache copies before Rerun registration" in pyproject_text
+
+
 @pytest.mark.parametrize(
     ("dataset_name", "table_name"),
     [
         ("aria-gen2", "aria_gen2_table"),
         ("assembly101", "assembly101_table"),
+        ("epfl-smart-kitchen", "epfl_smart_kitchen_table"),
         ("hocap", "hocap_table"),
         ("hot3d-aria", "hot3d_aria_table"),
         ("hot3d-quest3", "hot3d_quest3_table"),
@@ -280,6 +323,139 @@ def test_build_rrd_index_rows_from_paths(tmp_path: Path) -> None:
     assert rows[0].recording_uri == str(second_rrd.resolve())
     assert rows[1].path == str(first_rrd.resolve())
     assert [row.size_bytes for row in rows] == [len(b"not a real rrd"), len(b"not a real rrd")]
+
+
+def test_mount_catalog_python_server_preserves_recursive_file_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rrd_root: Path = tmp_path / "rrds"
+    first_rrd: Path = rrd_root / "assembly101" / "all" / "seq_01.rrd"
+    second_rrd: Path = rrd_root / "assembly101" / "all" / "nested" / "seq_02.rrd"
+    for path in (first_rrd, second_rrd):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a real rrd")
+    captured_datasets: dict[str, list[Path]] = {}
+
+    class _FakeClient:
+        def get_dataset(self, dataset_name: str) -> _FakeBlueprintDatasetEntry:
+            assert dataset_name == "assembly101"
+            return _FakeBlueprintDatasetEntry()
+
+    class _FakeRerunServer:
+        def __init__(self, *, datasets: dict[str, list[Path]], port: int | None) -> None:
+            assert port is None
+            captured_datasets.update(datasets)
+
+        def url(self) -> str:
+            return "rerun+http://127.0.0.1:9999"
+
+        def client(self) -> _FakeClient:
+            return _FakeClient()
+
+        def is_running(self) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            pass
+
+        def __enter__(self) -> _FakeRerunServer:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: Any | None,
+        ) -> None:
+            pass
+
+    monkeypatch.setattr(catalog_module.rr.server, "Server", _FakeRerunServer)
+    monkeypatch.setattr(catalog_module, "_register_default_dataset_blueprint", lambda *_args, **_kwargs: Path("noop.rbl"))
+
+    mount_catalog(
+        rrd_root,
+        datasets=("assembly101",),
+        optimize_for_catalog=False,
+        show_progress=False,
+    )
+
+    assert captured_datasets == {
+        "assembly101": [
+            second_rrd.resolve(),
+            first_rrd.resolve(),
+        ]
+    }
+
+
+def test_catalog_main_shutdowns_server_directly_on_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rrd_root: Path = tmp_path / "rrds"
+    source_rrd: Path = rrd_root / "assembly101" / "all" / "seq_01.rrd"
+    source_rrd.parent.mkdir(parents=True, exist_ok=True)
+    source_rrd.write_bytes(b"not a real rrd")
+    shutdown_calls: list[str] = []
+
+    class _FakeTable:
+        id: str = "table_id"
+
+    class _FakeClient:
+        def get_dataset(self, dataset_name: str) -> _FakeBlueprintDatasetEntry:
+            assert dataset_name == "assembly101"
+            return _FakeBlueprintDatasetEntry()
+
+    class _FakeServer:
+        def url(self) -> str:
+            return "rerun+http://127.0.0.1:9988"
+
+        def client(self) -> _FakeClient:
+            return _FakeClient()
+
+        def shutdown(self) -> None:
+            shutdown_calls.append("shutdown")
+
+        def __enter__(self) -> _FakeServer:
+            raise AssertionError("catalog main should not rely on Rerun Server.__enter__")
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: Any | None,
+        ) -> None:
+            raise AssertionError("catalog main should not rely on Rerun Server.__exit__")
+
+    fake_server = _FakeServer()
+
+    monkeypatch.setattr(catalog_module, "mount_catalog", lambda *_args, **_kwargs: fake_server)
+    monkeypatch.setattr(
+        catalog_module,
+        "build_rrd_index_rows_from_dataset",
+        lambda *_args, **_kwargs: [
+            RRDIndexRow(
+                id=0,
+                dataset="assembly101",
+                sequence_key="all/seq_01",
+                recording_uri="rerun+http://127.0.0.1:9988/dataset/assembly101?segment_id=assembly101__all__seq_01",
+                path=str(source_rrd),
+                size_bytes=source_rrd.stat().st_size,
+            )
+        ],
+    )
+    monkeypatch.setattr(catalog_module, "create_rrd_index_table", lambda *_args, **_kwargs: _FakeTable())
+    monkeypatch.setattr(catalog_module.time, "sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    catalog_module.main(
+        CatalogConfig(
+            rrd_root=rrd_root,
+            datasets=("assembly101",),
+            optimize_for_catalog=False,
+        )
+    )
+
+    assert shutdown_calls == ["shutdown"]
 
 
 def test_register_default_dataset_blueprint_registers_full_segment_blueprint() -> None:
@@ -464,6 +640,23 @@ def test_table_preview_camera_falls_back_when_override_camera_is_missing() -> No
 def test_table_preview_window_constants_cover_first_ten_seconds() -> None:
     assert TABLE_CARD_PREVIEW_START_SECONDS == 0.0
     assert TABLE_CARD_PREVIEW_END_SECONDS == 10.0
+
+
+def test_epfl_smart_kitchen_catalog_uses_hololens_and_all_nine_exo_cameras() -> None:
+    camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES["epfl-smart-kitchen"]
+
+    assert camera_names["ego"] == ("hololens",)
+    assert camera_names["exo"] == (
+        "output0",
+        "Aoutput0",
+        "Aoutput1",
+        "Aoutput2",
+        "Aoutput3",
+        "Boutput0",
+        "Boutput1",
+        "Boutput2",
+        "Boutput3",
+    )
 
 
 def test_video_exclusion_queries_remove_hocap_videos_from_3d_view() -> None:
