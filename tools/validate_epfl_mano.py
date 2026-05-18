@@ -7,9 +7,8 @@ For each selected (participant, session) pair:
    ManoStack the visualizer would feed to it.
 3. Compare per-frame against ``xyzc_stack[:, 91:133, :3]`` (the dataset's own
    COCO-133 hand keypoints) over a deterministic subsample of confident frames.
-4. Save an RRD via the standard ``visualize_exo_ego`` flow (one exo camera,
-   ego off, env mesh off to keep generation fast).
-5. Invoke ``tools/screenshot_rrd.py`` to dump per-view and full-viewer PNGs.
+4. Optionally save an RRD via the standard ``visualize_exo_ego`` flow (one exo
+   camera, ego off, env mesh off) so the result is browsable in the viewer.
 
 Pass criterion: per-session mean L2 < ``--tol-mean-mm`` and max L2 <
 ``--tol-max-mm``. Prints one ``[epfl-mano] session=...`` line per session and
@@ -21,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import warnings
 from dataclasses import dataclass
@@ -81,8 +79,7 @@ def compute_endpoint_error(
     """Per-frame (mean_mm, max_mm) over a subsample of confident frames.
 
     Returns mean per joint and max per joint across the sampled frames as well
-    as the frame indices used, so callers can drive screenshot capture at the
-    same frames.
+    as the frame indices used, so callers can report which frames were checked.
     """
     hand_conf: Float32[ndarray, "n_frames 42"] = xyzc_stack[:, 91:133, 3]
     confident_mask: ndarray = np.asarray((hand_conf > 0).all(axis=1))
@@ -121,16 +118,15 @@ def build_rrd(
     *,
     cfg: EpflSmartKitchenConfig,
     rrd_path: Path,
-    exo_camera: str,
 ) -> None:
-    """Generate a slim RRD (one exo camera, ego/env off) for screenshot capture."""
+    """Generate a slim RRD (one exo camera, ego/env off) for browsing."""
     rrd_path.parent.mkdir(parents=True, exist_ok=True)
     if rrd_path.exists():
         rrd_path.unlink()
 
     rr_cfg = RerunTyroConfig(
         application_id="exoego-forge",
-        recording_id=(f"epfl-smart-kitchen__{cfg.split}__{cfg.participant_id}__{cfg.session_name}__validate"),
+        recording_id=f"epfl-smart-kitchen__{cfg.split}__{cfg.participant_id}__{cfg.session_name}__validate",
         save=rrd_path,
         headless=True,
     )
@@ -152,58 +148,6 @@ def build_rrd(
     rec.disconnect()
 
 
-def maybe_take_screenshots(
-    *,
-    rrd_path: Path,
-    out_dir: Path,
-    frames: list[int],
-    exo_camera: str,
-) -> None:
-    """Best-effort screenshot capture; failures are logged but non-fatal.
-
-    When no display is available, the entire helper invocation is wrapped with
-    ``xvfb-run`` so both the ``rerun --screenshot-to`` subprocess inside the
-    helper and the ``rr.init(spawn=True)`` ViewerClient path share the same
-    virtual framebuffer.
-    """
-    import os
-    import shutil as _shutil
-
-    helper: Path = Path(__file__).with_name("screenshot_rrd.py")
-    if not helper.exists():
-        print(f"[epfl-mano] screenshot helper missing at {helper}; skipping screenshots", flush=True)
-        return
-    base: list[str] = [
-        sys.executable,
-        str(helper),
-        "--rrd",
-        str(rrd_path),
-        "--out-dir",
-        str(out_dir),
-        "--exo-camera",
-        exo_camera,
-        "--frames",
-        *[str(f) for f in frames],
-    ]
-    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
-        cmd: list[str] = base
-    else:
-        xvfb: str | None = _shutil.which("xvfb-run")
-        cmd = [xvfb, "-a", "--server-args", "-screen 0 1920x1080x24", *base] if xvfb is not None else base
-    try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=900)
-    except subprocess.TimeoutExpired:
-        print(f"[epfl-mano] screenshot helper timed out for {rrd_path.name}", flush=True)
-        return
-    if result.returncode != 0:
-        print(
-            f"[epfl-mano] screenshot helper failed (rc={result.returncode}) for {rrd_path.name}:\n"
-            f"  stdout: {result.stdout.strip()[-400:]}\n"
-            f"  stderr: {result.stderr.strip()[-400:]}",
-            flush=True,
-        )
-
-
 def process_session(
     *,
     participant: str,
@@ -212,9 +156,7 @@ def process_session(
     tol_mean_mm: float,
     tol_max_mm: float,
     n_frames: int,
-    screenshot_frames: int,
     out_dir: Path,
-    skip_screenshots: bool,
     skip_rrd: bool,
     exo_camera: str,
 ) -> SessionResult:
@@ -240,19 +182,7 @@ def process_session(
     session_dir.mkdir(parents=True, exist_ok=True)
     rrd_path: Path = session_dir / f"{session}.rrd"
     if not skip_rrd:
-        build_rrd(cfg=cfg, rrd_path=rrd_path, exo_camera=exo_camera)
-    elif not rrd_path.exists():
-        rrd_path = session_dir / f"{session}.rrd"  # path even when skipped
-
-    if not skip_screenshots and rrd_path.exists():
-        screenshot_frame_positions: list[int] = np.linspace(0, len(sampled) - 1, num=screenshot_frames, dtype=np.int64).tolist()
-        target_frames: list[int] = [int(sampled[i]) for i in screenshot_frame_positions]
-        maybe_take_screenshots(
-            rrd_path=rrd_path,
-            out_dir=session_dir,
-            frames=target_frames,
-            exo_camera=exo_camera,
-        )
+        build_rrd(cfg=cfg, rrd_path=rrd_path)
 
     summary: dict[str, object] = {
         "participant": participant,
@@ -299,9 +229,7 @@ def main() -> int:
     parser.add_argument("--tol-mean-mm", type=float, default=20.0)
     parser.add_argument("--tol-max-mm", type=float, default=50.0)
     parser.add_argument("--n-frames", type=int, default=50)
-    parser.add_argument("--screenshot-frames", type=int, default=3)
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/epfl-mano-debug"))
-    parser.add_argument("--skip-screenshots", action="store_true")
     parser.add_argument("--skip-rrd", action="store_true")
     parser.add_argument("--exo-camera", default="output0")
     args = parser.parse_args()
@@ -329,9 +257,7 @@ def main() -> int:
                     tol_mean_mm=args.tol_mean_mm,
                     tol_max_mm=args.tol_max_mm,
                     n_frames=args.n_frames,
-                    screenshot_frames=args.screenshot_frames,
                     out_dir=args.out_dir,
-                    skip_screenshots=args.skip_screenshots,
                     skip_rrd=args.skip_rrd,
                     exo_camera=args.exo_camera,
                 )

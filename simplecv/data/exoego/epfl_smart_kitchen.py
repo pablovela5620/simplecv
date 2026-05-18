@@ -455,6 +455,21 @@ def _mano_pose_from_row(row: dict[str, str], *, side: Literal["left", "right"]) 
 
 
 def _load_mano_stack(hand_rows: list[dict[str, str]]) -> ManoStack:
+    """Build the per-sequence ``ManoStack`` from EPFL ``pose3d_mano.csv`` rows.
+
+    Note: EPFL packs translations in the standard SMPL/MANO convention where the
+    root rotation also rotates the template wrist
+    (``wrist_world = R_root @ root_j_template + Th``). SimpleCV's
+    ``MANOLayerNP`` keeps the root joint at the template position, so to make
+    the layer reproduce the released keypoints we must store
+    ``trans = Th + (R_root - I) @ root_j_template`` per hand and frame. The
+    template wrist depends on per-hand betas, so this loader constructs a
+    short-lived ``MANOLayerNP`` for each hand to read ``root_trans``. As a
+    consequence, loading EPFL labels currently requires the MANO model assets
+    (``MANO_LEFT.pkl`` / ``MANO_RIGHT.pkl``); they are auto-downloaded on first
+    use and cached under ``simplecv/data/``. Other ExoEgo loaders (HoCap,
+    Hot3D) still load labels asset-free.
+    """
     required_column_aliases: dict[str, tuple[str, ...]] = {
         "left_poses": ("left_poses",),
         "right_poses": ("right_poses",),

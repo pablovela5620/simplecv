@@ -328,7 +328,7 @@ def log_mano_batch(
 
         mano_root_path: Path = mano_parent_log_path / "mano"
         mano_layers = [
-            # previous version only returned on shape for both hands. This is backwards compatibale and works for 2 hands
+            # previous version only returned one shape for both hands. This is backwards compatible and works for 2 hands
             MANOLayerNP(side="right", betas=mano_stack.betas_for(0), use_pca=mano_stack.use_pca),
             MANOLayerNP(side="left", betas=mano_stack.betas_for(1), use_pca=mano_stack.use_pca),
         ]
