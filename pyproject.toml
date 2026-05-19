@@ -21,10 +21,14 @@ dependencies = [
     "hf-transfer>=0.1.9",
     "lovely-numpy>=0.2.13,<0.3",
     "pandas>=2.3.3",
-    "onnxruntime>=1.22.0,<2",
     "universal_pathlib>=0.3.7",
     "s3fs>=2025.3.0",
 ]
+
+[project.optional-dependencies]
+cpu = ["onnxruntime>=1.22.0,<2"]
+# Provides the GPU build of onnxruntime for the CUDA feature.
+cuda = ["onnxruntime-gpu>=1.22.0,<2"]
 
 [project.scripts]
 simplecv-ingest-exoego = "simplecv.apis.ingest_exoego_recording:entrypoint"
