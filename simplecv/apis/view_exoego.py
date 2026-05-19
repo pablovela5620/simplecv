@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
-from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
+from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample
 from simplecv.data.skeleton.coco_133 import (
@@ -68,6 +68,9 @@ class VisualizeConfig:
 
     log_mano: bool = True
     """Enable streaming of MANO meshes and keypoints derived from the dataset."""
+
+    log_mano_vertex_normals: bool = False
+    """Compute and log dynamic MANO mesh vertex normals. Disabled by default for faster RRD ingest."""
 
     log_labels: bool = True
     """Control whether 2D/3D keypoint annotations are logged alongside videos."""
@@ -295,6 +298,7 @@ def log_mano_batch(
     timeline: str,
     timestamps_ns: Int[ndarray, "n_frames"],
     log_mano: bool,
+    log_mano_vertex_normals: bool = False,
 ) -> None:
     """Stream MANO meshes and derived COCO joints to Rerun for both hands.
 
@@ -308,6 +312,9 @@ def log_mano_batch(
             aligned with the MANO parameter stream; typically the label
             timeline from the recording.
         log_mano (bool): Gate controlling whether any MANO data is emitted.
+        log_mano_vertex_normals (bool): Compute and emit per-frame MANO mesh
+            vertex normals. This is disabled by default because it substantially
+            increases EPFL Smart Kitchen RRD ingest time and output size.
 
     Returns:
         None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
@@ -365,26 +372,34 @@ def log_mano_batch(
                 static=True,
             )
 
-            # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
-            faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
+            # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices.
             verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
             n_frames_mesh: int = min(len(verts_np), len(timestamps_ns))
-            vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(verts_np[0:n_frames_mesh], faces_np)
+            vertex_positions_flat: Float32[ndarray, "n_total 3"] = rearrange(
+                verts_np[0:n_frames_mesh],
+                "n v d -> (n v) d",
+            )
+            mesh_columns: rr.ComponentColumnList
+            if log_mano_vertex_normals:
+                faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
+                vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+                    verts_np[0:n_frames_mesh],
+                    faces_np,
+                )
+                vertex_normals_flat: Float32[ndarray, "n_total 3"] = rearrange(
+                    vertex_normals,
+                    "n v d -> (n v) d",
+                )
+                mesh_columns = rr.Mesh3D.columns(
+                    vertex_positions=vertex_positions_flat,
+                    vertex_normals=vertex_normals_flat,
+                )
+            else:
+                mesh_columns = rr.Mesh3D.columns(vertex_positions=vertex_positions_flat)
             rr.send_columns(
                 f"{mesh_entity_path}",
                 indexes=[rr.TimeColumn(timeline, duration=1e-9 * timestamps_ns[0:n_frames_mesh])],
-                columns=[
-                    *rr.Mesh3D.columns(
-                        vertex_positions=rearrange(
-                            verts_np[0:n_frames_mesh],
-                            "n v d -> (n v) d",
-                        ),
-                        vertex_normals=rearrange(
-                            vertex_normals[0:n_frames_mesh],
-                            "n v d -> (n v) d",
-                        ),
-                    ).partition(lengths=[verts_np.shape[1]] * n_frames_mesh),
-                ],
+                columns=[*mesh_columns.partition(lengths=[verts_np.shape[1]] * n_frames_mesh)],
             )
 
         if n_frames_mano_total > 0:
@@ -439,6 +454,7 @@ def log_exoego_batch(
     log_ego: bool = True,
     log_exo: bool = True,
     log_mano: bool = False,
+    log_mano_vertex_normals: bool = False,
 ) -> None:
     """Bulk-log 3D labels plus their ego/exo projections using columnar APIs.
 
@@ -454,6 +470,8 @@ def log_exoego_batch(
         log_ego (bool): Enable logging of ego camera projections.
         log_exo (bool): Enable logging of exo camera projections.
         log_mano (bool): Enable logging of MANO-derived meshes and keypoints.
+        log_mano_vertex_normals (bool): Compute and log dynamic MANO mesh
+            vertex normals when MANO mesh logging is enabled.
 
     Returns:
         None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
@@ -529,6 +547,7 @@ def log_exoego_batch(
             timeline=timeline,
             timestamps_ns=label_timestamps_trim,
             log_mano=log_mano,
+            log_mano_vertex_normals=log_mano_vertex_normals,
         )
 
     ###########################
@@ -829,8 +848,8 @@ def setup_scene(
         ego_video_log_path_list: list[Path] = []
 
         def _log_ego_cameras(shortest_ego_timestamp: Int[ndarray, "n_frames"]) -> None:
-            ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
-                dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
+            ego_cam_dict: dict[str, list[PinholeParameters | Fisheye62Parameters]] = cast(
+                dict[str, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
             )
             for cam_name, ego_cam_param_list in ego_cam_dict.items():
                 if not ego_cam_param_list:
@@ -932,6 +951,7 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
             log_ego=config.log_ego,
             log_exo=config.log_exo,
             log_mano=config.log_mano,
+            log_mano_vertex_normals=config.log_mano_vertex_normals,
         )
 
     scene_setup_result: SceneSetupResult = setup_scene(

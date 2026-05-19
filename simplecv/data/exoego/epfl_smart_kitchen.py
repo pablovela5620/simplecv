@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import ast
 import csv
 import json
+import re
 import warnings
 from collections.abc import Generator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import cv2
 import numpy as np
@@ -15,6 +15,8 @@ from jaxtyping import Float32, Int
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
+from serde import coerce, from_dict, serde
+from serde import field as serde_field
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence
@@ -152,7 +154,9 @@ def _camera_size(entry: dict, video_path: Path) -> tuple[int, int]:
     width_raw: object | None = entry.get("width")
     height_raw: object | None = entry.get("height")
     if width_raw is not None and height_raw is not None:
-        return int(width_raw), int(height_raw)
+        width: int = int(cast(int | float | str, width_raw))
+        height: int = int(cast(int | float | str, height_raw))
+        return width, height
     return _video_size(video_path)
 
 
@@ -289,45 +293,179 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-class _NonFiniteLiteralTransformer(ast.NodeTransformer):
-    """Allow EPFL CSV cells to contain bare NaN/Infinity tokens."""
-
-    _CONSTANTS: dict[str, float] = {
-        "NaN": float("nan"),
-        "nan": float("nan"),
-        "Infinity": float("inf"),
-        "inf": float("inf"),
-    }
-
-    def visit_Name(self, node: ast.Name) -> ast.AST:
-        if node.id not in self._CONSTANTS:
-            raise ValueError(f"Unsupported numeric token in EPFL CSV cell: {node.id}")
-        return ast.copy_location(ast.Constant(value=self._CONSTANTS[node.id]), node)
+_NONFINITE_TOKEN_RE: re.Pattern[str] = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<sign>[+-]?)(?P<token>nan|inf)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 
 
-def _parse_numeric_cell(value: str) -> ndarray:
+def _normalize_json_nonfinite_tokens(text: str) -> str:
+    """Normalize Python-style EPFL non-finite tokens to stdlib JSON spellings."""
+
+    def replace_token(match: re.Match[str]) -> str:
+        token: str = match.group("token").lower()
+        sign: str = match.group("sign")
+        if token == "nan":
+            return "NaN"
+        infinity_sign: str = "-" if sign == "-" else ""
+        return f"{infinity_sign}Infinity"
+
+    normalized: str = _NONFINITE_TOKEN_RE.sub(replace_token, text)
+    return normalized
+
+
+def _decode_numeric_cell(value: object) -> object:
+    """Parse a nested JSON numeric cell for PySerde field deserializers.
+
+    PySerde owns row/schema deserialization, but EPFL stores arrays as JSON
+    strings inside CSV cells. Use stdlib ``json`` here intentionally: it accepts
+    canonical ``NaN``/``Infinity`` values, while PySerde's optional ``orjson``
+    backend rejects non-finite floats if it is installed.
+    """
+    if not isinstance(value, str):
+        return value
     text: str = value.strip()
-    expression: ast.Expression = ast.parse(text, mode="eval")
-    transformed_expression: ast.Expression = _NonFiniteLiteralTransformer().visit(expression)
-    ast.fix_missing_locations(transformed_expression)
-    parsed: object = ast.literal_eval(transformed_expression)
+    if text == "":
+        raise ValueError("Empty EPFL numeric CSV cell")
+    try:
+        parsed: object = json.loads(text)
+    except json.JSONDecodeError:
+        normalized: str = _normalize_json_nonfinite_tokens(text)
+        parsed = json.loads(normalized)
+    return parsed
+
+
+def _deserialize_float32_array(value: object) -> ndarray:
+    parsed: object = _decode_numeric_cell(value)
     array: ndarray = np.asarray(parsed, dtype=np.float32)
     return array
 
 
-def _parse_vector_cell(value: str, *, expected_len: int | None = None, field_name: str) -> ndarray:
-    vector: ndarray = _parse_numeric_cell(value).reshape(-1).astype(np.float32, copy=False)
+def _deserialize_optional_float32_array(value: object) -> ndarray | None:
+    if value is None or value == "":
+        return None
+    array: ndarray = _deserialize_float32_array(value)
+    return array
+
+
+def _deserialize_optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    scalar: float = float(cast(int | float | str, value))
+    return scalar
+
+
+@serde(type_check=coerce)
+class EpflBodyPoseRow:
+    """Raw EPFL ``pose3d_smpl.csv`` row decoded from CSV strings."""
+
+    kp3ds: Float32[ndarray, "body_kpts=17 3"] | Float32[ndarray, "batch=1 body_kpts=17 3"] = serde_field(
+        deserializer=_deserialize_float32_array,
+    )
+    """Body keypoints in world coordinates, expressed in meters."""
+    kp3ds_conf: Float32[ndarray, "body_kpts=17"] | None = serde_field(
+        default=None,
+        deserializer=_deserialize_optional_float32_array,
+    )
+    """Optional per-body-keypoint confidence values."""
+    l2_dist: float | None = serde_field(default=None, deserializer=_deserialize_optional_float)
+    """Optional EPFL body reprojection/error filter value."""
+
+
+@serde(type_check=coerce)
+class EpflHandPoseRow:
+    """Raw EPFL ``pose3d_mano.csv`` row decoded from CSV strings."""
+
+    kp3ds: Float32[ndarray, "hand_kpts=42 3"] | Float32[ndarray, "batch=1 hand_kpts=42 3"] = serde_field(
+        deserializer=_deserialize_float32_array,
+    )
+    """Left and right hand keypoints in world coordinates, expressed in meters."""
+    left_poses: Float32[ndarray, "pose_coeffs"] = serde_field(deserializer=_deserialize_float32_array)
+    """Left MANO pose coefficients; EPFL stores either 45 finger values or a 48-vector with root placeholder."""
+    right_poses: Float32[ndarray, "pose_coeffs"] = serde_field(deserializer=_deserialize_float32_array)
+    """Right MANO pose coefficients; EPFL stores either 45 finger values or a 48-vector with root placeholder."""
+    left_Rh: Float32[ndarray, "3"] | Float32[ndarray, "3 3"] = serde_field(deserializer=_deserialize_float32_array)
+    """Left MANO root orientation as axis-angle or a rotation matrix."""
+    right_Rh: Float32[ndarray, "3"] | Float32[ndarray, "3 3"] = serde_field(deserializer=_deserialize_float32_array)
+    """Right MANO root orientation as axis-angle or a rotation matrix."""
+    left_Th: Float32[ndarray, "3"] = serde_field(deserializer=_deserialize_float32_array)
+    """Left MANO translation in world coordinates, expressed in meters."""
+    right_Th: Float32[ndarray, "3"] = serde_field(deserializer=_deserialize_float32_array)
+    """Right MANO translation in world coordinates, expressed in meters."""
+    left_shapes: Float32[ndarray, "betas=10"] = serde_field(deserializer=_deserialize_float32_array)
+    """Left MANO shape coefficients."""
+    right_shapes: Float32[ndarray, "betas=10"] = serde_field(deserializer=_deserialize_float32_array)
+    """Right MANO shape coefficients."""
+    kp3ds_conf: Float32[ndarray, "hand_kpts=42"] | None = serde_field(
+        default=None,
+        deserializer=_deserialize_optional_float32_array,
+    )
+    """Optional per-hand-keypoint confidence values."""
+    l2_dist_left: float | None = serde_field(default=None, deserializer=_deserialize_optional_float)
+    """Optional EPFL left-hand reprojection/error filter value."""
+    l2_dist_right: float | None = serde_field(default=None, deserializer=_deserialize_optional_float)
+    """Optional EPFL right-hand reprojection/error filter value."""
+
+
+def _parse_numeric_cell(value: str) -> ndarray:
+    array: ndarray = _deserialize_float32_array(value)
+    return array
+
+
+def _vector_from_array(value: ndarray, *, expected_len: int | None = None, field_name: str) -> ndarray:
+    vector: ndarray = value.reshape(-1).astype(np.float32, copy=False)
     if expected_len is not None and vector.shape[0] != expected_len:
         raise ValueError(f"{field_name} must contain {expected_len} values, got {vector.shape[0]}")
     return vector
 
 
-def _parse_keypoints(rows: list[dict[str, str]], *, num_keypoints: int, path: Path) -> ndarray:
+def _parse_body_pose_rows(rows: list[dict[str, str]], *, path: Path) -> list[EpflBodyPoseRow]:
+    body_rows: list[EpflBodyPoseRow] = []
+    for row_idx, row in enumerate(rows):
+        try:
+            body_row: EpflBodyPoseRow = from_dict(EpflBodyPoseRow, row)
+        except Exception as exc:
+            raise ValueError(f"Failed to parse EPFL body pose row {row_idx} from {path}") from exc
+        body_rows.append(body_row)
+    return body_rows
+
+
+def _normalize_hand_row_aliases(row: dict[str, str]) -> dict[str, str]:
+    aliases: dict[str, tuple[str, ...]] = {
+        "left_Rh": ("left_RH",),
+        "right_Rh": ("right_RH",),
+        "left_Th": ("left_TH",),
+        "right_Th": ("right_TH",),
+    }
+    normalized: dict[str, str] = dict(row)
+    for canonical_key, alias_keys in aliases.items():
+        canonical_value: str | None = normalized.get(canonical_key)
+        if canonical_value is not None and canonical_value != "":
+            continue
+        for alias_key in alias_keys:
+            alias_value: str | None = normalized.get(alias_key)
+            if alias_value is not None and alias_value != "":
+                normalized[canonical_key] = alias_value
+                break
+    return normalized
+
+
+def _parse_hand_pose_rows(rows: list[dict[str, str]], *, path: Path) -> list[EpflHandPoseRow]:
+    hand_rows: list[EpflHandPoseRow] = []
+    for row_idx, row in enumerate(rows):
+        try:
+            normalized_row: dict[str, str] = _normalize_hand_row_aliases(row)
+            hand_row: EpflHandPoseRow = from_dict(EpflHandPoseRow, normalized_row)
+        except Exception as exc:
+            raise ValueError(f"Failed to parse EPFL MANO pose row {row_idx} from {path}") from exc
+        hand_rows.append(hand_row)
+    return hand_rows
+
+
+def _parse_keypoints(rows: list[EpflBodyPoseRow] | list[EpflHandPoseRow], *, num_keypoints: int, path: Path) -> ndarray:
     keypoints: list[ndarray] = []
     for row_idx, row in enumerate(rows):
-        if "kp3ds" not in row:
-            raise KeyError(f"EPFL pose CSV is missing kp3ds column: {path}")
-        frame_keypoints: ndarray = _parse_numeric_cell(row["kp3ds"]).astype(np.float32, copy=False)
+        frame_keypoints: ndarray = row.kp3ds.astype(np.float32, copy=False)
         if frame_keypoints.shape == (1, num_keypoints, 3):
             frame_keypoints = frame_keypoints[0]
         elif frame_keypoints.shape != (num_keypoints, 3):
@@ -338,51 +476,51 @@ def _parse_keypoints(rows: list[dict[str, str]], *, num_keypoints: int, path: Pa
     return np.stack(keypoints).astype(np.float32, copy=False)
 
 
-def _parse_scalar(row: dict[str, str], key: str, *, default: float | None = None) -> float:
-    value: str | None = row.get(key)
-    if value is None or value == "":
-        if default is None:
-            raise KeyError(f"Missing scalar column {key}")
-        return default
-    return float(value)
-
-
 def _parse_confidences(
-    rows: list[dict[str, str]],
+    rows: list[EpflBodyPoseRow] | list[EpflHandPoseRow],
     *,
     num_keypoints: int,
     mode: Literal["body", "hand"],
     finite_mask: ndarray,
+    has_kp3ds_conf: bool,
+    has_body_l2_dist: bool = False,
+    has_hand_l2_dist: bool = False,
 ) -> ndarray:
-    if "kp3ds_conf" not in rows[0]:
+    if not has_kp3ds_conf:
         return finite_mask.astype(np.float32)
 
-    conf_list: list[ndarray] = [_parse_vector_cell(row["kp3ds_conf"], expected_len=num_keypoints, field_name="kp3ds_conf") for row in rows]
+    conf_list: list[ndarray] = []
+    for row_idx, row in enumerate(rows):
+        if row.kp3ds_conf is None:
+            raise ValueError(f"Missing EPFL kp3ds_conf values at row {row_idx}")
+        conf_list.append(_vector_from_array(row.kp3ds_conf, expected_len=num_keypoints, field_name="kp3ds_conf"))
     conf: ndarray = np.stack(conf_list).astype(np.float32, copy=False)
-    if mode == "body" and "l2_dist" in rows[0]:
-        empty_body_count: int = sum(1 for row in rows if row.get("l2_dist") in {None, ""})
+    if mode == "body" and has_body_l2_dist:
+        body_rows: list[EpflBodyPoseRow] = cast(list[EpflBodyPoseRow], rows)
+        empty_body_count: int = sum(1 for row in body_rows if row.l2_dist is None)
         if empty_body_count:
             warnings.warn(
                 f"Found {empty_body_count} empty EPFL body l2 distance values; treating them as accepted confidence.",
                 stacklevel=2,
             )
         body_l2: ndarray = np.array(
-            [_parse_scalar(row, "l2_dist", default=0.0) for row in rows],
+            [0.0 if row.l2_dist is None else row.l2_dist for row in body_rows],
             dtype=np.float32,
         )
         conf = conf * (body_l2 < np.float32(0.09))[:, np.newaxis]
-    if mode == "hand" and "l2_dist_left" in rows[0] and "l2_dist_right" in rows[0]:
-        empty_left_count: int = sum(1 for row in rows if row.get("l2_dist_left") in {None, ""})
-        empty_right_count: int = sum(1 for row in rows if row.get("l2_dist_right") in {None, ""})
+    if mode == "hand" and has_hand_l2_dist:
+        hand_rows: list[EpflHandPoseRow] = cast(list[EpflHandPoseRow], rows)
+        empty_left_count: int = sum(1 for row in hand_rows if row.l2_dist_left is None)
+        empty_right_count: int = sum(1 for row in hand_rows if row.l2_dist_right is None)
         empty_count: int = empty_left_count + empty_right_count
         if empty_count:
             warnings.warn(
                 f"Found {empty_count} empty EPFL hand l2 distance values; treating them as accepted confidence.",
                 stacklevel=2,
             )
-        left_l2: ndarray = np.array([_parse_scalar(row, "l2_dist_left", default=0.0) for row in rows], dtype=np.float32)
+        left_l2: ndarray = np.array([0.0 if row.l2_dist_left is None else row.l2_dist_left for row in hand_rows], dtype=np.float32)
         right_l2: ndarray = np.array(
-            [_parse_scalar(row, "l2_dist_right", default=0.0) for row in rows],
+            [0.0 if row.l2_dist_right is None else row.l2_dist_right for row in hand_rows],
             dtype=np.float32,
         )
         conf[:, :21] = conf[:, :21] * (left_l2 < np.float32(0.06))[:, np.newaxis]
@@ -397,25 +535,14 @@ def _apply_confidence_to_xyz(
 ) -> tuple[Float32[ndarray, "num_frames num_kpts 3"], Float32[ndarray, "num_frames num_kpts"]]:
     xyz_out: ndarray = xyz.astype(np.float32, copy=True)
     conf_out: ndarray = conf.astype(np.float32, copy=True)
-    finite_mask: ndarray = np.isfinite(xyz_out).all(axis=-1)
+    finite_mask: ndarray = np.asarray(np.isfinite(xyz_out).all(axis=-1), dtype=bool)
     conf_out = np.where(finite_mask, conf_out, np.float32(0.0)).astype(np.float32)
     xyz_out[conf_out <= np.float32(0.0)] = np.nan
     return xyz_out, conf_out
 
 
-def _cell_from_aliases(row: dict[str, str], keys: tuple[str, ...], *, field_name: str) -> str:
-    for key in keys:
-        value: str | None = row.get(key)
-        if value is not None and value != "":
-            return value
-    raise KeyError(f"Missing EPFL column {field_name}; accepted aliases: {keys}")
-
-
-def _root_axis_angle(row: dict[str, str], keys: tuple[str, ...], *, field_name: str) -> ndarray:
-    root_raw: ndarray = _parse_numeric_cell(_cell_from_aliases(row, keys, field_name=field_name)).astype(
-        np.float32,
-        copy=False,
-    )
+def _root_axis_angle(root_value: ndarray, *, field_name: str) -> ndarray:
+    root_raw: ndarray = root_value.astype(np.float32, copy=False)
     if root_raw.shape == (3,):
         return root_raw
     if root_raw.shape == (3, 3):
@@ -429,7 +556,7 @@ def _root_axis_angle(row: dict[str, str], keys: tuple[str, ...], *, field_name: 
     raise ValueError(f"{field_name} must be axis-angle length 3 or rotation matrix 3x3, got {root_raw.shape}")
 
 
-def _mano_pose_from_row(row: dict[str, str], *, side: Literal["left", "right"]) -> ndarray:
+def _mano_pose_from_row(row: EpflHandPoseRow, *, side: Literal["left", "right"]) -> ndarray:
     """Build the MANO 48-vector for one hand from a CSV row.
 
     EPFL packs ``{side}_poses`` as a 48-vector whose first three entries are zero
@@ -438,8 +565,10 @@ def _mano_pose_from_row(row: dict[str, str], *, side: Literal["left", "right"]) 
     placeholder. In both cases we always overlay ``Rh`` onto the root.
     """
     pose_key: str = f"{side}_poses"
-    pose: ndarray = _parse_vector_cell(row[pose_key], field_name=pose_key)
-    root: ndarray = _root_axis_angle(row, (f"{side}_Rh", f"{side}_RH"), field_name=f"{side}_Rh")
+    pose_value: ndarray = row.left_poses if side == "left" else row.right_poses
+    root_value: ndarray = row.left_Rh if side == "left" else row.right_Rh
+    pose: ndarray = _vector_from_array(pose_value, field_name=pose_key)
+    root: ndarray = _root_axis_angle(root_value, field_name=f"{side}_Rh")
     if pose.shape[0] == 48:
         full: ndarray = pose.astype(np.float32, copy=True)
         full[:3] = root.astype(np.float32, copy=False)
@@ -454,7 +583,7 @@ def _mano_pose_from_row(row: dict[str, str], *, side: Literal["left", "right"]) 
     raise ValueError(f"EPFL {pose_key} cannot be represented as MANO 48-vector; got {pose.shape[0]} values")
 
 
-def _load_mano_stack(hand_rows: list[dict[str, str]]) -> ManoStack:
+def _load_mano_stack(hand_rows: list[EpflHandPoseRow]) -> ManoStack:
     """Build the per-sequence ``ManoStack`` from EPFL ``pose3d_mano.csv`` rows.
 
     Note: EPFL packs translations in the standard SMPL/MANO convention where the
@@ -470,27 +599,11 @@ def _load_mano_stack(hand_rows: list[dict[str, str]]) -> ManoStack:
     use and cached under ``simplecv/data/``. Other ExoEgo loaders (HoCap,
     Hot3D) still load labels asset-free.
     """
-    required_column_aliases: dict[str, tuple[str, ...]] = {
-        "left_poses": ("left_poses",),
-        "right_poses": ("right_poses",),
-        "left_Rh": ("left_Rh", "left_RH"),
-        "right_Rh": ("right_Rh", "right_RH"),
-        "left_Th": ("left_Th", "left_TH"),
-        "right_Th": ("right_Th", "right_TH"),
-        "left_shapes": ("left_shapes",),
-        "right_shapes": ("right_shapes",),
-    }
-    missing_columns: list[str] = [
-        field_name for field_name, aliases in required_column_aliases.items() if not any(alias in hand_rows[0] for alias in aliases)
-    ]
-    if missing_columns:
-        raise KeyError(f"EPFL MANO parameter columns missing from pose3d_mano.csv: {missing_columns}")
-
-    left_shapes: ndarray = np.stack([_parse_vector_cell(row["left_shapes"], expected_len=10, field_name="left_shapes") for row in hand_rows]).astype(
-        np.float32, copy=False
-    )
+    left_shapes: ndarray = np.stack(
+        [_vector_from_array(row.left_shapes, expected_len=10, field_name="left_shapes") for row in hand_rows],
+    ).astype(np.float32, copy=False)
     right_shapes: ndarray = np.stack(
-        [_parse_vector_cell(row["right_shapes"], expected_len=10, field_name="right_shapes") for row in hand_rows]
+        [_vector_from_array(row.right_shapes, expected_len=10, field_name="right_shapes") for row in hand_rows],
     ).astype(np.float32, copy=False)
     left_delta: float = float(np.nanmax(np.abs(left_shapes - left_shapes[0])))
     right_delta: float = float(np.nanmax(np.abs(right_shapes - right_shapes[0])))
@@ -500,28 +613,28 @@ def _load_mano_stack(hand_rows: list[dict[str, str]]) -> ManoStack:
             stacklevel=2,
         )
 
+    # ManoStack convention: index 0 = right, index 1 = left.
+    betas: ndarray = np.stack(
+        [right_shapes[0], left_shapes[0]],
+        axis=0,
+    ).astype(np.float32, copy=False)
+
     num_frames: int = len(hand_rows)
     so3: ndarray = np.zeros((num_frames, 2, 48), dtype=np.float32)
     trans: ndarray = np.zeros((num_frames, 2, 3), dtype=np.float32)
     for frame_idx, row in enumerate(hand_rows):
         so3[frame_idx, 0] = _mano_pose_from_row(row, side="right")
         so3[frame_idx, 1] = _mano_pose_from_row(row, side="left")
-        trans[frame_idx, 0] = _parse_vector_cell(
-            _cell_from_aliases(row, ("right_Th", "right_TH"), field_name="right_Th"),
+        trans[frame_idx, 0] = _vector_from_array(
+            row.right_Th,
             expected_len=3,
             field_name="right_Th",
         )
-        trans[frame_idx, 1] = _parse_vector_cell(
-            _cell_from_aliases(row, ("left_Th", "left_TH"), field_name="left_Th"),
+        trans[frame_idx, 1] = _vector_from_array(
+            row.left_Th,
             expected_len=3,
             field_name="left_Th",
         )
-
-    # ManoStack convention: index 0 = right, index 1 = left.
-    betas: ndarray = np.stack(
-        [right_shapes[0], left_shapes[0]],
-        axis=0,
-    ).astype(np.float32, copy=False)
 
     # EPFL packs translations using the standard MANO convention where the root
     # rotation also rotates the template wrist (wrist_world = R_root @ root_j + Th).
@@ -608,10 +721,18 @@ class EpflSmartKitchenSequence(BaseExoEgoSequence[EpflSmartKitchenConfig]):
     def load_labels(self) -> ExoEgoLabels | None:
         body_path: Path = body_pose_path(self.config)
         hand_path: Path = hand_pose_path(self.config)
-        body_rows: list[dict[str, str]] = _read_csv_rows(body_path)
-        hand_rows: list[dict[str, str]] = _read_csv_rows(hand_path)
-        if len(body_rows) != len(hand_rows):
-            raise ValueError(f"EPFL body and hand label frame counts must match: {body_path} has {len(body_rows)}, {hand_path} has {len(hand_rows)}")
+        body_raw_rows: list[dict[str, str]] = _read_csv_rows(body_path)
+        hand_raw_rows: list[dict[str, str]] = _read_csv_rows(hand_path)
+        if len(body_raw_rows) != len(hand_raw_rows):
+            raise ValueError(
+                f"EPFL body and hand label frame counts must match: {body_path} has {len(body_raw_rows)}, {hand_path} has {len(hand_raw_rows)}"
+            )
+        body_has_l2_dist: bool = "l2_dist" in body_raw_rows[0]
+        hand_has_l2_dist: bool = "l2_dist_left" in hand_raw_rows[0] and "l2_dist_right" in hand_raw_rows[0]
+        body_has_kp3ds_conf: bool = "kp3ds_conf" in body_raw_rows[0]
+        hand_has_kp3ds_conf: bool = "kp3ds_conf" in hand_raw_rows[0]
+        body_rows: list[EpflBodyPoseRow] = _parse_body_pose_rows(body_raw_rows, path=body_path)
+        hand_rows: list[EpflHandPoseRow] = _parse_hand_pose_rows(hand_raw_rows, path=hand_path)
 
         body_xyz_raw: Float32[ndarray, "num_frames body_kpts=17 3"] = _parse_keypoints(
             body_rows,
@@ -623,19 +744,23 @@ class EpflSmartKitchenSequence(BaseExoEgoSequence[EpflSmartKitchenConfig]):
             num_keypoints=42,
             path=hand_path,
         )
-        body_finite: ndarray = np.isfinite(body_xyz_raw).all(axis=-1)
-        hand_finite: ndarray = np.isfinite(hand_xyz_raw).all(axis=-1)
+        body_finite: ndarray = np.asarray(np.isfinite(body_xyz_raw).all(axis=-1), dtype=bool)
+        hand_finite: ndarray = np.asarray(np.isfinite(hand_xyz_raw).all(axis=-1), dtype=bool)
         body_conf_raw: Float32[ndarray, "num_frames body_kpts=17"] = _parse_confidences(
             body_rows,
             num_keypoints=17,
             mode="body",
             finite_mask=body_finite,
+            has_kp3ds_conf=body_has_kp3ds_conf,
+            has_body_l2_dist=body_has_l2_dist,
         )
         hand_conf_raw: Float32[ndarray, "num_frames hand_kpts=42"] = _parse_confidences(
             hand_rows,
             num_keypoints=42,
             mode="hand",
             finite_mask=hand_finite,
+            has_kp3ds_conf=hand_has_kp3ds_conf,
+            has_hand_l2_dist=hand_has_l2_dist,
         )
         body_xyz: Float32[ndarray, "num_frames body_kpts=17 3"]
         body_conf: Float32[ndarray, "num_frames body_kpts=17"]

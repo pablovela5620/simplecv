@@ -24,6 +24,38 @@ The default Pixi environment uses the released `rerun-sdk[datafusion]>=0.32`, so
 
 The `rerun-prerelease` environment is kept in `pyproject.toml` as a spare lane for testing future prerelease wheels, but avoid using it unless a specific unreleased Rerun feature is required.
 
+#### Full ExoEgo Forge catalog
+The full local ExoEgo Forge catalog is the current exception: use the prerelease Rerun SDK and raise the open-file limit before launching it. Without the higher limit, Rerun can fail with `Too many open files` while loading the 6332 RRDs.
+
+```bash
+ulimit -n 524288
+pixi run -e rerun-prerelease python tools/catalog.py \
+    --rrd-root /mnt/8tb/data/exoego-forge-catalog \
+    --no-optimize-for-catalog \
+    --port 9988
+```
+
+Expected local catalog URL:
+
+```text
+rerun+http://127.0.0.1:9988
+```
+
+Recent timing on `pablo-dl-server`: after the EPFL Smart Kitchen no-normal reingest, the full catalog reached `Server is up` in about 2m12s with `ulimit -n 524288`.
+
+When reingesting EPFL Smart Kitchen for this catalog, write to the shared `/mnt/8tb` catalog root, not a repo-relative `data/` directory:
+
+```bash
+pixi run python tools/batch_raw_to_rrd.py \
+    --rrd-save-dir /mnt/8tb/data/exoego-forge-catalog \
+    --max-conversions None \
+    --force \
+    --no-log-mano-vertex-normals \
+    epfl-smart-kitchen
+```
+
+That command writes under `/mnt/8tb/data/exoego-forge-catalog/epfl-smart-kitchen/{train,test}/...` and intentionally omits MANO vertex normals.
+
 ### Visualize Polycam Data
 Quick example
 ```

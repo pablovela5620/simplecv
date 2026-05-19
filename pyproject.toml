@@ -13,7 +13,7 @@ dependencies = [
     "einops>=0.8.0",
     "icecream>=2.1.3",
     "opencv-python>=4.10.0",
-    "pyserde>=0.20.0",
+    "pyserde>=0.31.2,<0.32",
     "typing-extensions>=4.1.0",
     "rerun-sdk[datafusion]>=0.32",
     "tyro>=0.9.1",
@@ -157,7 +157,7 @@ numpy = ">=2.0"
 einops = ">=0.8.0,<0.9"
 icecream = ">=2.1.3,<3"
 py-opencv = ">=4.10.0,<5"
-pyserde = ">=0.20.0"
+pyserde = ">=0.31.2,<0.32"
 typing_extensions = ">=4.1.0,<4.13.0"
 tyro = ">=0.9.1,<0.10"
 tqdm = ">=4.67.1,<5"
@@ -236,6 +236,7 @@ hypothesis = ">=6.112.1,<7"
 pyrefly = ">=1.0.0"
 types-tqdm = ">=4.67.0,<5"
 pyarrow-stubs = "*"
+vulture = ">=2.16,<3"
 
 [tool.pixi.feature.dev.pypi-dependencies]
 pytest-beartype = ">=0.2,<1"
@@ -266,7 +267,7 @@ python = "==3.10"
 tyro = ">=0.9.1,<0.10"
 beartype = ">=0.21.0,<0.22"
 jaxtyping = ">=0.2.36,<0.3.0"
-pyserde = ">=0.23.0,<0.30"
+pyserde = ">=0.31.2,<0.32"
 typing_extensions = ">=4.1.0,<4.13.0"
 librealsense = "==2.53.1"
 # rerun-sdk = ">=0.25.1"
@@ -282,13 +283,19 @@ pyrealsense2 = "==2.53.1.4623"
 # T265 diagnostics helpers (run with: pixi run -e t265 <task>)
 t265-enum = { cmd = "rs-enumerate-devices", description = "List RealSense devices using librealsense CLI" }
 
-# [tool.pixi.feature.rerun-prerelease.pypi-dependencies]
-# rerun-sdk = { version = "==0.32.0a1+dev", extras = ["datafusion"] }
+# Pre-release `rerun-sdk` from a specific rerun-io/reality main commit.
+# Pinned at `5f732f2` (rerun-io/reality, 2026-05-18) to pick up the
+# schema-cache fix from rerun-io/rerun PR #12774 (issue #12778), which
+# turns catalog registration from O(N²) into O(N). The public 0.32.1
+# release ships *without* this fix — see AGENTS.md "Pre-release Rerun"
+# for when/why to use this feature.
+[tool.pixi.feature.rerun-prerelease.pypi-dependencies]
+rerun-sdk = { version = "==0.33.0a1+dev", extras = ["datafusion"] }
 
-# [tool.pixi.feature.rerun-prerelease.pypi-options]
-# index-url = "https://pypi.org/simple"
-# find-links = [{ url = "https://build.rerun.io/commit/3505806/wheels/" }]
-# prerelease-mode = "allow"
+[tool.pixi.feature.rerun-prerelease.pypi-options]
+index-url = "https://pypi.org/simple"
+find-links = [{ url = "https://build.rerun.io/commit/5f732f2/wheels/" }]
+prerelease-mode = "allow"
 
 [tool.pixi.environments]
 default = { features = [] }
@@ -299,7 +306,7 @@ t265 = { features = ["t265"], no-default-feature = true }
 gpu = { features = ["cuda129"], solve-group = "cuda129" }
 dev = { features = ["dev", "cuda129"], solve-group = "cuda129" }
 notebook = { features = ["notebook"] }
-# rerun-prerelease = { features = ["rerun-prerelease", "dev"] }
+rerun-prerelease = { features = ["rerun-prerelease", "dev"] }
 
 
 # Minimal environment for running data extraction notebooks without heavy ML deps

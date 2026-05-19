@@ -4,6 +4,13 @@
 
 Use Pixi for all project commands. Do not use `pip` or `uv` in this repo.
 
+## Performance Benchmarking
+
+Use the default Pixi environment for actual performance measurements. Do not use
+`pixi run -e dev` for benchmark numbers, because the dev environment enables
+runtime checking and can significantly slow down the measured path. Reserve
+`pixi run -e dev` for tests and validation.
+
 ## Implementation Workflow
 
 Use the `tdd` skill for implementation work. Prefer a failing or characterization
@@ -28,3 +35,14 @@ For catalog/server changes:
 - Use PEP 526-style variable annotations for nontrivial local values.
 - Annotate arrays with jaxtyping dtype and shape.
 - Follow the repo's existing dataclass field documentation style.
+
+## Pre-release Rerun
+
+Prefer the public `rerun-sdk` release. Use the `rerun-prerelease` Pixi
+environment only for a confirmed Rerun bug that is fixed upstream but not yet
+released.
+
+When updating it, pin `find-links` to the matching `rerun-io/reality` wheel
+commit, match the wheel version string, and leave the upstream issue/PR in a
+comment. Keep it opt-in; do not make prerelease Rerun the default. Once the fix
+ships publicly, move back to the public release pin.

@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import weakref
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -147,19 +148,6 @@ class CatalogServer(Protocol):
 
     def shutdown(self) -> None:
         """Stop the catalog server."""
-        ...
-
-    def __enter__(self) -> CatalogServer:
-        """Enter the server context manager."""
-        ...
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: Any | None,
-    ) -> None:
-        """Exit the server context manager."""
         ...
 
 
@@ -404,9 +392,14 @@ def mount_catalog(
             registration_paths = source_paths
         registration_paths_by_dataset[dataset_name] = registration_paths
 
+    server_datasets: dict[str, os.PathLike[str] | Sequence[os.PathLike[str] | str] | str] = {}
+    for dataset_name, registration_paths in registration_paths_by_dataset.items():
+        registration_pathlikes: list[os.PathLike[str] | str] = list(registration_paths)
+        server_datasets[dataset_name] = registration_pathlikes
+
     # Loading datasets at server startup avoids cumulative catalog RPC pressure
     # for large datasets such as Assembly101 while preserving segment URLs.
-    server: rr.server.Server = rr.server.Server(datasets=registration_paths_by_dataset, port=port)
+    server: rr.server.Server = rr.server.Server(datasets=server_datasets, port=port)
     client = server.client()
 
     for dataset_name in tqdm(dataset_names, desc="blueprint", unit="dataset", disable=not show_progress):

@@ -177,13 +177,13 @@ def _available_ffmpeg_video_encoders() -> set[str]:
     return encoders
 
 
-def _encoder_args_for(name: str, available: set[str]) -> list[str]:
+def _encoder_args_for(name: str, _available: set[str]) -> list[str]:
     """
     Map an encoder name to a list of ffmpeg CLI arguments.
 
     Args:
         name: encoder identifier (e.g. "libsvtav1")
-        available: set of encoders discovered in the local ffmpeg build
+        _available: set of encoders discovered in the local ffmpeg build
 
     Raises:
         ValueError: if no mapping exists for name.

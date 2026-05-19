@@ -364,9 +364,9 @@ def test_mount_catalog_python_server_preserves_recursive_file_list(
 
         def __exit__(
             self,
-            exc_type: type[BaseException] | None,
-            exc_value: BaseException | None,
-            traceback: Any | None,
+            _exc_type: type[BaseException] | None,
+            _exc_value: BaseException | None,
+            _traceback: Any | None,
         ) -> None:
             pass
 
@@ -421,9 +421,9 @@ def test_catalog_main_shutdowns_server_directly_on_keyboard_interrupt(
 
         def __exit__(
             self,
-            exc_type: type[BaseException] | None,
-            exc_value: BaseException | None,
-            traceback: Any | None,
+            _exc_type: type[BaseException] | None,
+            _exc_value: BaseException | None,
+            _traceback: Any | None,
         ) -> None:
             raise AssertionError("catalog main should not rely on Rerun Server.__exit__")
 
@@ -661,7 +661,8 @@ def test_epfl_smart_kitchen_catalog_uses_hololens_and_all_nine_exo_cameras() -> 
 
 def test_video_exclusion_queries_remove_hocap_videos_from_3d_view() -> None:
     blueprint = build_table_card_blueprint("hocap", timeline="video_time")
-    scene_view = blueprint.root_container.contents[0]
+    root_contents: list[Any] = list(blueprint.root_container.contents)
+    scene_view = root_contents[0]
     camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES["hocap"]
     expected_contents: list[str] = ["+ /**"]
     for kind in ("ego", "exo"):
@@ -684,13 +685,16 @@ def test_table_card_blueprints_play_uniform_selection_without_3d_range_override(
     for dataset_name in DEFAULT_CATALOG_DATASETS:
         blueprint = build_table_card_blueprint(dataset_name, timeline="video_time")
         time_panel = blueprint.time_panel
-        scene_view = blueprint.root_container.contents[0]
+        root_contents: list[Any] = list(blueprint.root_container.contents)
+        scene_view = root_contents[0]
+        time_selection = time_panel.time_selection
+        assert time_selection is not None
 
         assert time_panel.timeline == "video_time"
         assert time_panel.play_state == "playing"
         assert time_panel.loop_mode == "selection"
-        assert time_panel.time_selection.min.value == 0
-        assert time_panel.time_selection.max.value == 10_000_000_000
+        assert time_selection.min.value == 0
+        assert time_selection.max.value == 10_000_000_000
         assert scene_view.visualizer_overrides == {}
 
         encoded_blueprint: str = build_rrd_index_table_blueprint(dataset_name)

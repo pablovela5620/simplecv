@@ -1,6 +1,8 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
+from typing import cast
 
 import numpy as np
 import rerun as rr
@@ -37,21 +39,22 @@ class BatchConvertConfig:
     """Enable COCO-133 label logging during conversion."""
     log_mano: bool = True
     """Enable derived MANO mesh/keypoint logging during conversion."""
+    log_mano_vertex_normals: bool = False
+    """Compute and log dynamic MANO mesh vertex normals during conversion."""
 
 
 def main(config: BatchConvertConfig):
     start_time: float = timer()
-    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
-    num_sequences: int = exoego_sequence.num_sequences()
+    sequence_cls = cast(type[BaseExoEgoSequence], config.dataset._target)
+    num_sequences: int = sequence_cls.num_sequences_for_config(config.dataset)
     if config.max_conversions is not None:
         num_sequences = min(num_sequences, config.max_conversions)
 
     seen_recording_ids: set[str] = set()
     seen_output_paths: set[Path] = set()
+    sequence_iter = cast(Iterable[BaseExoEgoSequence], sequence_cls.iter_episode_sequences(config.dataset))
 
-    for idx, current_exoego_sequence in enumerate(
-        tqdm(exoego_sequence.iter_dataset(), total=num_sequences, desc="Processing sequences")
-    ):
+    for idx, current_exoego_sequence in enumerate(tqdm(sequence_iter, total=num_sequences, desc="Processing sequences")):
         identity: SequenceIdentity = current_exoego_sequence.sequence_identity
         rrd_save_path: Path = identity.rrd_path(config.rrd_save_dir)
         resolved_rrd_save_path: Path = rrd_save_path.expanduser().resolve()
@@ -81,6 +84,7 @@ def main(config: BatchConvertConfig):
                 log_ego=config.log_ego,
                 log_labels=config.log_labels,
                 log_mano=config.log_mano,
+                log_mano_vertex_normals=config.log_mano_vertex_normals,
             )
             rec: rr.RecordingStream = current_cfg.rr_config.rec_stream
             rr.send_recording_name(identity.sequence_key, recording=rec)

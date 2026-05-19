@@ -390,7 +390,7 @@ def configure_logging() -> None:
     LOGGER.setLevel(logging.INFO)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main() -> int:
     configure_logging()
     args = tyro.cli(CLIArgs)
     input_root: Path = args.input_root.resolve()

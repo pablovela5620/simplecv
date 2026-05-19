@@ -226,12 +226,84 @@ def test_epfl_smart_kitchen_counts_train_and_test_sessions(tmp_path: Path) -> No
 
 
 def test_epfl_smart_kitchen_numeric_parser_preserves_large_values_and_non_finites() -> None:
-    parsed = _parse_numeric_cell("[100001.0, NaN, -Infinity, inf]")
+    parsed = _parse_numeric_cell("[100001.0, NaN, -Infinity, inf, +inf]")
 
     assert float(parsed[0]) == pytest.approx(100001.0)
     assert np.isnan(parsed[1])
     assert np.isneginf(parsed[2])
     assert np.isposinf(parsed[3])
+    assert np.isposinf(parsed[4])
+
+
+def test_epfl_smart_kitchen_pyserde_hand_row_decodes_csv_string_arrays_and_aliases() -> None:
+    from simplecv.data.exoego.epfl_smart_kitchen import _parse_hand_pose_rows
+
+    rows = _parse_hand_pose_rows(
+        [
+            {
+                "kp3ds": json.dumps([[float(idx), float(idx + 1), float(idx + 2)] for idx in range(42)]),
+                "kp3ds_conf": json.dumps([1.0] * 42),
+                "l2_dist_left": "",
+                "l2_dist_right": "0.01",
+                "left_poses": json.dumps([0.01] * 48),
+                "right_poses": json.dumps([0.02] * 45),
+                "left_RH": json.dumps([0.0, 0.1, 0.2]),
+                "right_RH": json.dumps([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                "left_TH": json.dumps([0.1, 0.2, 0.3]),
+                "right_TH": json.dumps([0.4, 0.5, 0.6]),
+                "left_shapes": json.dumps([float(idx) * 0.01 for idx in range(10)]),
+                "right_shapes": json.dumps([float(idx) * 0.02 for idx in range(10)]),
+            }
+        ],
+        path=Path("pose3d_mano.csv"),
+    )
+    row = rows[0]
+
+    assert row.kp3ds.dtype == np.float32
+    assert row.kp3ds.shape == (42, 3)
+    assert row.kp3ds_conf is not None
+    assert row.kp3ds_conf.shape == (42,)
+    assert row.l2_dist_left is None
+    assert row.l2_dist_right == pytest.approx(0.01)
+    assert row.left_Rh.shape == (3,)
+    assert row.right_Rh.shape == (3, 3)
+    np.testing.assert_allclose(row.left_Th, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+    np.testing.assert_allclose(row.right_Th, np.array([0.4, 0.5, 0.6], dtype=np.float32))
+
+
+def test_epfl_smart_kitchen_pyserde_hand_row_decodes_canonical_csv_strings() -> None:
+    from serde import from_dict
+
+    from simplecv.data.exoego.epfl_smart_kitchen import EpflHandPoseRow
+
+    row = from_dict(
+        EpflHandPoseRow,
+        {
+            "kp3ds": json.dumps([[float(idx), float(idx + 1), float(idx + 2)] for idx in range(42)]),
+            "kp3ds_conf": json.dumps([1.0] * 42),
+            "l2_dist_left": "",
+            "l2_dist_right": "0.01",
+            "left_poses": json.dumps([0.01] * 48),
+            "right_poses": json.dumps([0.02] * 45),
+            "left_Rh": json.dumps([0.0, 0.1, 0.2]),
+            "right_Rh": json.dumps([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            "left_Th": json.dumps([0.1, 0.2, 0.3]),
+            "right_Th": json.dumps([0.4, 0.5, 0.6]),
+            "left_shapes": json.dumps([float(idx) * 0.01 for idx in range(10)]),
+            "right_shapes": json.dumps([float(idx) * 0.02 for idx in range(10)]),
+        },
+    )
+
+    assert row.kp3ds.dtype == np.float32
+    assert row.kp3ds.shape == (42, 3)
+    assert row.kp3ds_conf is not None
+    assert row.kp3ds_conf.shape == (42,)
+    assert row.l2_dist_left is None
+    assert row.l2_dist_right == pytest.approx(0.01)
+    assert row.left_Rh.shape == (3,)
+    assert row.right_Rh.shape == (3, 3)
+    np.testing.assert_allclose(row.left_Th, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+    np.testing.assert_allclose(row.right_Th, np.array([0.4, 0.5, 0.6], dtype=np.float32))
 
 
 def test_epfl_smart_kitchen_sequence_loads_no_label_ego_and_exo_streams(tmp_path: Path) -> None:
@@ -252,6 +324,7 @@ def test_epfl_smart_kitchen_sequence_loads_no_label_ego_and_exo_streams(tmp_path
     assert sample.labels is None
     assert sample.ego_cam_params_list is not None
     assert sample.exo_cam_params_list is not None
+    assert sample.exo_cam_params_list[0] is not None
     assert sample.ego_cam_params_list[0].name == "hololens"
     assert sample.exo_cam_params_list[0].name == "output0"
     np.testing.assert_array_equal(
@@ -499,6 +572,8 @@ def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_pa
         column_names: list[str] = query_session._dataset_view("/**").arrow_schema().names
         assert "/world/gt/mano/right/mesh:Mesh3D:vertex_positions" in column_names
         assert "/world/gt/mano/left/mesh:Mesh3D:vertex_positions" in column_names
+        assert "/world/gt/mano/right/mesh:Mesh3D:vertex_normals" not in column_names
+        assert "/world/gt/mano/left/mesh:Mesh3D:vertex_normals" not in column_names
         assert "/world/gt/mano/coco133_xyz:Points3D:positions" in column_names
         assert "/world/ego/hololens/pinhole/video:VideoStream:codec" in column_names
         assert "/world/exo/output0/pinhole/video:VideoStream:codec" in column_names
@@ -517,6 +592,50 @@ def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_pa
         exo_plane = first_valid_value(exo_plane_table["/world/exo/output0/pinhole:Pinhole:image_plane_distance"])
         assert float(ego_plane[0]) == pytest.approx(0.1)
         assert float(exo_plane[0]) == pytest.approx(0.25)
+    finally:
+        query_session.close()
+
+
+def test_epfl_smart_kitchen_visualized_rrd_can_log_mano_vertex_normals(tmp_path: Path) -> None:
+    if not (PROJECT_ROOT / "simplecv" / "data" / "MANO_RIGHT.pkl").exists() or not (PROJECT_ROOT / "simplecv" / "data" / "MANO_LEFT.pkl").exists():
+        pytest.skip("MANO model files are not available")
+
+    _write_minimal_public_release(tmp_path)
+    cfg = EpflSmartKitchenConfig(
+        root_directory=tmp_path,
+        split="train",
+        participant_id="YH2002",
+        session_name="2023_12_04_10_15_23",
+        exo_camera_names=("output0",),
+        load_labels=True,
+    )
+    sequence = EpflSmartKitchenSequence(cfg)
+    rrd_path: Path = tmp_path / "epfl-mini-with-mano-normals.rrd"
+    viz_config = VisualizeConfig(
+        rr_config=RerunTyroConfig(
+            application_id="test-epfl-visualize-normals",
+            recording_id="test-epfl-visualize-normals",
+            save=rrd_path,
+        ),
+        dataset=cfg,
+        log_exo=True,
+        log_ego=True,
+        log_labels=True,
+        log_mano=True,
+        log_mano_vertex_normals=True,
+    )
+    rec: rr.RecordingStream = viz_config.rr_config.rec_stream
+
+    visualize_exo_ego(sequence, viz_config)
+    rec.flush(timeout_sec=60.0)
+
+    query_session = RRDQuerySession(rrd_path)
+    try:
+        column_names: list[str] = query_session._dataset_view("/**").arrow_schema().names
+        assert "/world/gt/mano/right/mesh:Mesh3D:vertex_positions" in column_names
+        assert "/world/gt/mano/left/mesh:Mesh3D:vertex_positions" in column_names
+        assert "/world/gt/mano/right/mesh:Mesh3D:vertex_normals" in column_names
+        assert "/world/gt/mano/left/mesh:Mesh3D:vertex_normals" in column_names
     finally:
         query_session.close()
 
