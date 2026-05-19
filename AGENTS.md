@@ -38,35 +38,11 @@ For catalog/server changes:
 
 ## Pre-release Rerun
 
-The default environment uses the public conda-forge / PyPI `rerun-sdk`
-release pinned in `pyproject.toml` (see `dependencies` and
-`[tool.pixi.feature.dev]`). **Always prefer the public release.**
+Prefer the public `rerun-sdk` release. Use the `rerun-prerelease` Pixi
+environment only for a confirmed Rerun bug that is fixed upstream but not yet
+released.
 
-A separate `rerun-prerelease` pixi feature exists that installs an
-unreleased build of `rerun-sdk` from
-`https://build.rerun.io/commit/<reality-sha>/wheels/`. **Only opt into
-this when you hit a Rerun bug that has been fixed on `main` but not yet
-shipped in a release.** Workflow:
-
-1. Reproduce the bug against the public release with a small script and
-   capture the symptom (timing curve, error message, partial-state
-   behavior).
-2. Locate the upstream fix: the PR on `rerun-io/rerun` and its
-   corresponding merge commit on `rerun-io/reality` (private). The
-   wheel index key is the *reality* commit, not the public one — try
-   the 7-char truncation first (e.g. `5f732f2`); if HTTP 404, the wheel
-   isn't built yet, pick the next reality commit that returns HTTP 200.
-3. Update the SHA in `[tool.pixi.feature.rerun-prerelease.pypi-options]`
-   `find-links` and the version string in `pypi-dependencies` to match
-   the wheel filename at that commit (e.g. `==0.33.0a1+dev`).
-4. Use the env via `pixi run -e rerun-prerelease …` for verification.
-   Do **not** make `rerun-prerelease` the default for any task in
-   `pyproject.toml`; leave it as an opt-in.
-5. Once a public release ships with the fix, bump the public version
-   pin and revert the `rerun-prerelease` feature back to its previous
-   commented-out / stub state.
-
-When committing a switch to the prerelease feature, include a comment
-naming the upstream issue + PR (e.g. `rerun-io/rerun#12778` /
-`rerun-io/rerun#12774`) so the next engineer to look at this knows why
-we're off the public release.
+When updating it, pin `find-links` to the matching `rerun-io/reality` wheel
+commit, match the wheel version string, and leave the upstream issue/PR in a
+comment. Keep it opt-in; do not make prerelease Rerun the default. Once the fix
+ships publicly, move back to the public release pin.
