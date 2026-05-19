@@ -128,6 +128,8 @@ class Open3DFuser(DepthFuser):
         o3d.io.write_triangle_mesh(str(path), self.volume.extract_triangle_mesh())
 
     def get_mesh(self, export_single_mesh=None, convert_to_trimesh=False) -> o3d.geometry.TriangleMesh:
+        # Kept for compatibility with the broader DepthFuser call surface.
+        _ = export_single_mesh, convert_to_trimesh
         mesh = self.volume.extract_triangle_mesh()
 
         return mesh

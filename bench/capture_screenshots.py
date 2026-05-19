@@ -18,6 +18,7 @@ same Rust-side scene; the artifact is what matters for verification.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -209,17 +210,13 @@ def main() -> int:
     finally:
         if proc.poll() is None:
             print("[shots] shutting down catalog", flush=True)
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
             try:
                 proc.wait(timeout=15.0)
             except subprocess.TimeoutExpired:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 proc.wait()
 
 

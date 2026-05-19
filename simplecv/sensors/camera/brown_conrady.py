@@ -381,9 +381,12 @@ def project_brown_conrady_diagonal(
     cam_T_world: Float[ndarray, "n_frames 4 4"] = np.stack(
         [pinholes_per_frame[idx].extrinsics.cam_T_world for idx in range(n_frames)]
     )
-    K_stack: Float[ndarray, "n_frames 3 3"] = np.stack(
-        [pinholes_per_frame[idx].intrinsics.k_matrix for idx in range(n_frames)], dtype=float
-    )
+    k_matrices: list[Float[ndarray, "3 3"]] = []
+    for idx in range(n_frames):
+        k_matrix: Float[ndarray, "3 3"] | None = pinholes_per_frame[idx].intrinsics.k_matrix
+        assert k_matrix is not None, "Brown-Conrady projection requires a 3x3 intrinsic matrix."
+        k_matrices.append(k_matrix)
+    K_stack: Float[ndarray, "n_frames 3 3"] = np.stack(k_matrices, dtype=float)
 
     # World → cam (per frame)
     xyz_world_h: Float[ndarray, "n_frames n_points 4"] = np.concatenate(
@@ -409,12 +412,21 @@ def project_brown_conrady_diagonal(
         uv_norm[..., 0] = (uv_norm[..., 0] - cx[:, None]) / fx[:, None]
         uv_norm[..., 1] = (uv_norm[..., 1] - cy[:, None]) / fy[:, None]
 
-        for frame_idx, distortion in enumerate(distortions):
-            if distortion is None:
-                continue
-            frame_flat: Float[ndarray, "_ 2"] = uv_norm[frame_idx].reshape(-1, 2)
-            distorted_flat = _distort_normalized_points(points_xy=frame_flat, distortion=distortion)
-            uv_norm[frame_idx] = distorted_flat.reshape(-1, 2)
+        shared_distortion: BrownConradyDistortion | None = distortions[0]
+        if shared_distortion is not None and all(distortion == shared_distortion for distortion in distortions):
+            uv_norm_flat: Float[ndarray, "_ 2"] = uv_norm.reshape(n_frames * xyz_stack_world.shape[1], 2)
+            distorted_flat: Float[ndarray, "_ 2"] = _distort_normalized_points(
+                points_xy=uv_norm_flat,
+                distortion=shared_distortion,
+            )
+            uv_norm = distorted_flat.reshape(n_frames, xyz_stack_world.shape[1], 2)
+        else:
+            for frame_idx, distortion in enumerate(distortions):
+                if distortion is None:
+                    continue
+                frame_flat: Float[ndarray, "_ 2"] = uv_norm[frame_idx].reshape(-1, 2)
+                distorted_flat = _distort_normalized_points(points_xy=frame_flat, distortion=distortion)
+                uv_norm[frame_idx] = distorted_flat.reshape(-1, 2)
 
         uv[..., 0] = uv_norm[..., 0] * fx[:, None] + cx[:, None]
         uv[..., 1] = uv_norm[..., 1] * fy[:, None] + cy[:, None]

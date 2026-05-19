@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
-from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
+from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample
 from simplecv.data.skeleton.coco_133 import (
@@ -69,6 +69,9 @@ class VisualizeConfig:
     log_mano: bool = True
     """Enable streaming of MANO meshes and keypoints derived from the dataset."""
 
+    log_mano_vertex_normals: bool = False
+    """Compute and log dynamic MANO mesh vertex normals. Disabled by default for faster RRD ingest."""
+
     log_labels: bool = True
     """Control whether 2D/3D keypoint annotations are logged alongside videos."""
 
@@ -90,9 +93,7 @@ def set_annotation_context() -> None:
             [
                 rr.ClassDescription(
                     info=rr.AnnotationInfo(id=0, label="Coco Wholebody", color=(0, 0, 255)),
-                    keypoint_annotations=[
-                        rr.AnnotationInfo(id=id, label=name) for id, name in COCO_133_ID2NAME.items()
-                    ],
+                    keypoint_annotations=[rr.AnnotationInfo(id=id, label=name) for id, name in COCO_133_ID2NAME.items()],
                     keypoint_connections=COCO_133_LINKS,
                 ),
             ]
@@ -116,14 +117,10 @@ def log_environment_mesh(exoego_sequence: BaseExoEgoSequence, parent_log_path: P
         dtype=np.uint32,
     )
     vertex_normals: Float32[np.ndarray, "num_vertices 3"] | None = (
-        None
-        if environment_mesh.vertex_normals is None
-        else np.ascontiguousarray(environment_mesh.vertex_normals, dtype=np.float32)
+        None if environment_mesh.vertex_normals is None else np.ascontiguousarray(environment_mesh.vertex_normals, dtype=np.float32)
     )
     vertex_colors: UInt8[np.ndarray, "num_vertices 4"] | None = (
-        None
-        if environment_mesh.vertex_colors is None
-        else np.ascontiguousarray(environment_mesh.vertex_colors, dtype=np.uint8)
+        None if environment_mesh.vertex_colors is None else np.ascontiguousarray(environment_mesh.vertex_colors, dtype=np.uint8)
     )
 
     env_mesh_path: Path = parent_log_path / "gt" / "env_mesh"
@@ -184,6 +181,7 @@ def create_container(
     Returns:
         rrb.Blueprint: Assembled layout containing the configured views.
     """
+
     def _should_include(path: Path) -> bool:
         """Check if camera should be included based on skip list."""
         # Path structure: /world/{ego|exo}/{cam_name}/pinhole/video
@@ -198,9 +196,7 @@ def create_container(
         exclusion_patterns.append(f"- /world/exo/{cam_name}/**")
 
     # Include everything except excluded cameras
-    contents_filter: str | list[str] = (
-        ["+ /**"] + exclusion_patterns if exclusion_patterns else "/**"
-    )
+    contents_filter: str | list[str] = ["+ /**"] + exclusion_patterns if exclusion_patterns else "/**"
 
     main_view = rrb.Spatial3DView(
         origin="/",
@@ -288,9 +284,7 @@ def compute_vertex_normals_batch(
         vertex_normals[:, i1, :] = vertex_normals[:, i1, :] + fn_k
         vertex_normals[:, i2, :] = vertex_normals[:, i2, :] + fn_k
 
-    norms: Float32[ndarray, "n_frames n_verts 1"] = np.linalg.norm(vertex_normals, axis=-1, keepdims=True).astype(
-        np.float32
-    )
+    norms: Float32[ndarray, "n_frames n_verts 1"] = np.linalg.norm(vertex_normals, axis=-1, keepdims=True).astype(np.float32)
     denom: Float32[ndarray, "n_frames n_verts 1"] = np.maximum(norms, np.float32(eps))
     vn_unit: Float32[ndarray, "n_frames n_verts 3"] = (vertex_normals / denom).astype(np.float32)
     mask: ndarray = norms > eps
@@ -304,6 +298,7 @@ def log_mano_batch(
     timeline: str,
     timestamps_ns: Int[ndarray, "n_frames"],
     log_mano: bool,
+    log_mano_vertex_normals: bool = False,
 ) -> None:
     """Stream MANO meshes and derived COCO joints to Rerun for both hands.
 
@@ -317,6 +312,9 @@ def log_mano_batch(
             aligned with the MANO parameter stream; typically the label
             timeline from the recording.
         log_mano (bool): Gate controlling whether any MANO data is emitted.
+        log_mano_vertex_normals (bool): Compute and emit per-frame MANO mesh
+            vertex normals. This is disabled by default because it substantially
+            increases EPFL Smart Kitchen RRD ingest time and output size.
 
     Returns:
         None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
@@ -337,25 +335,18 @@ def log_mano_batch(
 
         mano_root_path: Path = mano_parent_log_path / "mano"
         mano_layers = [
-            MANOLayerNP(side="right", betas=mano_stack.betas, use_pca=mano_stack.use_pca),
-            MANOLayerNP(side="left", betas=mano_stack.betas, use_pca=mano_stack.use_pca),
+            # previous version only returned one shape for both hands. This is backwards compatible and works for 2 hands
+            MANOLayerNP(side="right", betas=mano_stack.betas_for(0), use_pca=mano_stack.use_pca),
+            MANOLayerNP(side="left", betas=mano_stack.betas_for(1), use_pca=mano_stack.use_pca),
         ]
         mano_so3: Float32[ndarray, "n_frames n_hands=2 48"] = mano_stack.so3
         mano_trans: Float32[ndarray, "n_frames n_hands=2 3"] = mano_stack.trans
-        so3_per_hand: Float32[ndarray, "n_hands=2 n_frames 48"] = rearrange(
-            mano_so3, "n_frames n_hands pose -> n_hands n_frames pose"
-        )
-        trans_per_hand: Float32[ndarray, "n_hands=2 n_frames 3"] = rearrange(
-            mano_trans, "n_frames n_hands dim -> n_hands n_frames dim"
-        )
+        so3_per_hand: Float32[ndarray, "n_hands=2 n_frames 48"] = rearrange(mano_so3, "n_frames n_hands pose -> n_hands n_frames pose")
+        trans_per_hand: Float32[ndarray, "n_hands=2 n_frames 3"] = rearrange(mano_trans, "n_frames n_hands dim -> n_hands n_frames dim")
         # Prepare a single COCO-133 buffer (both hands combined)
         n_frames_mano_total: int = min(so3_per_hand.shape[1], len(timestamps_ns))
-        xyz_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133 3"] = np.full(
-            (n_frames_mano_total, 133, 3), np.nan, dtype=np.float32
-        )
-        conf_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133"] = np.zeros(
-            (n_frames_mano_total, 133), dtype=np.float32
-        )
+        xyz_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133 3"] = np.full((n_frames_mano_total, 133, 3), np.nan, dtype=np.float32)
+        conf_coco_mano: Float32[ndarray, "n_frames n_joints_coco=133"] = np.zeros((n_frames_mano_total, 133), dtype=np.float32)
         for poses, translations, mano_layer in zip(so3_per_hand, trans_per_hand, mano_layers, strict=True):
             mano_outputs: tuple[
                 Float32[ndarray, "n_frames n_verts=778 3"],
@@ -381,34 +372,38 @@ def log_mano_batch(
                 static=True,
             )
 
-            # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices
-            faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
+            # Log MANO mesh: static faces from the MANO layer, dynamic per-frame vertices.
             verts_np: Float32[ndarray, "n_frames n_verts=778 3"] = verts
             n_frames_mesh: int = min(len(verts_np), len(timestamps_ns))
-            vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
-                verts_np[0:n_frames_mesh], faces_np
+            vertex_positions_flat: Float32[ndarray, "n_total 3"] = rearrange(
+                verts_np[0:n_frames_mesh],
+                "n v d -> (n v) d",
             )
+            mesh_columns: rr.ComponentColumnList
+            if log_mano_vertex_normals:
+                faces_np: Int[ndarray, "n_faces=1538 3"] = mano_layer.f.astype(np.int32)
+                vertex_normals: Float32[ndarray, "n_frames n_verts=778 3"] = compute_vertex_normals_batch(
+                    verts_np[0:n_frames_mesh],
+                    faces_np,
+                )
+                vertex_normals_flat: Float32[ndarray, "n_total 3"] = rearrange(
+                    vertex_normals,
+                    "n v d -> (n v) d",
+                )
+                mesh_columns = rr.Mesh3D.columns(
+                    vertex_positions=vertex_positions_flat,
+                    vertex_normals=vertex_normals_flat,
+                )
+            else:
+                mesh_columns = rr.Mesh3D.columns(vertex_positions=vertex_positions_flat)
             rr.send_columns(
                 f"{mesh_entity_path}",
                 indexes=[rr.TimeColumn(timeline, duration=1e-9 * timestamps_ns[0:n_frames_mesh])],
-                columns=[
-                    *rr.Mesh3D.columns(
-                        vertex_positions=rearrange(
-                            verts_np[0:n_frames_mesh],
-                            "n v d -> (n v) d",
-                        ),
-                        vertex_normals=rearrange(
-                            vertex_normals[0:n_frames_mesh],
-                            "n v d -> (n v) d",
-                        ),
-                    ).partition(lengths=[verts_np.shape[1]] * n_frames_mesh),
-                ],
+                columns=[*mesh_columns.partition(lengths=[verts_np.shape[1]] * n_frames_mesh)],
             )
 
         if n_frames_mano_total > 0:
-            colors_coco: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(
-                confidence_scores=conf_coco_mano[..., np.newaxis]
-            )
+            colors_coco: UInt8[ndarray, "n_frames 133 3"] = confidence_scores_to_rgb(confidence_scores=conf_coco_mano[..., np.newaxis])
             positions_flat: Float32[ndarray, "n_total 3"] = rearrange(
                 xyz_coco_mano,
                 "n_frames kpts dim -> (n_frames kpts) dim",
@@ -459,6 +454,7 @@ def log_exoego_batch(
     log_ego: bool = True,
     log_exo: bool = True,
     log_mano: bool = False,
+    log_mano_vertex_normals: bool = False,
 ) -> None:
     """Bulk-log 3D labels plus their ego/exo projections using columnar APIs.
 
@@ -474,6 +470,8 @@ def log_exoego_batch(
         log_ego (bool): Enable logging of ego camera projections.
         log_exo (bool): Enable logging of exo camera projections.
         log_mano (bool): Enable logging of MANO-derived meshes and keypoints.
+        log_mano_vertex_normals (bool): Compute and log dynamic MANO mesh
+            vertex normals when MANO mesh logging is enabled.
 
     Returns:
         None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
@@ -488,9 +486,7 @@ def log_exoego_batch(
     # batch send all 3D data #
     ##########################
     xyzc_stack_all: Float[ndarray, "n_frames 133 4"] = exoego_labels.xyzc_stack
-    label_timestamps_ns: Int[ndarray, "n_frames"] = (
-        exoego_labels.timestamps_ns if exoego_labels.timestamps_ns is not None else shortest_timestamp
-    )
+    label_timestamps_ns: Int[ndarray, "n_frames"] = exoego_labels.timestamps_ns if exoego_labels.timestamps_ns is not None else shortest_timestamp
     n_frames_labels: int = len(xyzc_stack_all)
     n_frames_timestamps: int = len(label_timestamps_ns)
     n_frames_total: int = min(n_frames_labels, n_frames_timestamps)
@@ -551,15 +547,14 @@ def log_exoego_batch(
             timeline=timeline,
             timestamps_ns=label_timestamps_trim,
             log_mano=log_mano,
+            log_mano_vertex_normals=log_mano_vertex_normals,
         )
 
     ###########################
     # batch send all exo cams #
     ###########################
     if exoego_sequence.exo_sequence is not None and log_exo:
-        exo_cam_param_list: list[PinholeParameters] = [
-            c for c in exoego_sequence.exo_sequence.exo_cam_list if c is not None
-        ]
+        exo_cam_param_list: list[PinholeParameters] = [c for c in exoego_sequence.exo_sequence.exo_cam_list if c is not None]
         if not exo_cam_param_list:
             warnings.warn(
                 "Skipping exo camera projections; no exo camera metadata available.",
@@ -571,9 +566,7 @@ def log_exoego_batch(
                     xyz_stack_world=xyz_stack, pinholes_per_view=exo_cam_param_list
                 )
             else:
-                raise NotImplementedError(
-                    f"Exo camera parameters of type '{type(exo_cam_param_list[0])}' are not supported."
-                )
+                raise NotImplementedError(f"Exo camera parameters of type '{type(exo_cam_param_list[0])}' are not supported.")
             for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
                 exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
                 exo_pinhole_path: Path = exo_cam_path / "pinhole"
@@ -650,9 +643,7 @@ def log_exoego_batch(
 
             if isinstance(ego_cam_param_list[0], PinholeParameters):
                 # Time-aligned fast path: one call over the full trimmed sequence
-                pinhole_slice_full: list[PinholeParameters] = cast(
-                    list[PinholeParameters], ego_cam_param_list[:n_frames_total]
-                )
+                pinhole_slice_full: list[PinholeParameters] = cast(list[PinholeParameters], ego_cam_param_list[:n_frames_total])
                 uv_ego_stack: Float[ndarray, "n_frames 133 2"] = project_brown_conrady_diagonal(
                     xyz_stack_world=xyz_trim[:n_frames_total],
                     pinholes_per_frame=pinhole_slice_full,
@@ -661,18 +652,14 @@ def log_exoego_batch(
 
             elif isinstance(ego_cam_param_list[0], Fisheye62Parameters):
                 # Time-aligned fisheye fast path: one pose per frame, no outer-product grid
-                fisheye_slice_full: list[Fisheye62Parameters] = cast(
-                    list[Fisheye62Parameters], ego_cam_param_list[:n_frames_total]
-                )
+                fisheye_slice_full: list[Fisheye62Parameters] = cast(list[Fisheye62Parameters], ego_cam_param_list[:n_frames_total])
                 uv_ego_stack: Float[ndarray, "n_frames 133 2"] = project_kannala_brandt_diagonal(
                     xyz_stack_world=xyz_trim[:n_frames_total],
                     pinholes_per_frame=fisheye_slice_full,
                     filter_invalid=True,
                 )
             else:
-                raise NotImplementedError(
-                    f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported."
-                )
+                raise NotImplementedError(f"Ego camera parameters of type '{type(ego_cam_param_list[0])}' are not supported.")
 
             n_frames_cam: int = len(uv_ego_stack)
             if n_frames_cam > 0:
@@ -770,9 +757,7 @@ def _video_stream_timestamps_for_logging(
     ego_sequence: BaseEgoSequence | None = exoego_sequence.ego_sequence
     if log_ego and ego_sequence is not None:
         for stream_name in ego_sequence.ego_video_names:
-            stream_timestamps: Int[ndarray, "n_frames"] | None = exoego_sequence.stream_timestamps_ns.get(
-                f"ego/{stream_name}"
-            )
+            stream_timestamps: Int[ndarray, "n_frames"] | None = exoego_sequence.stream_timestamps_ns.get(f"ego/{stream_name}")
             if stream_timestamps is not None:
                 timestamp_list.append(stream_timestamps)
 
@@ -822,9 +807,7 @@ def setup_scene(
             f"Mismatched exo video assets ({len(exo_video_files)}) and names ({len(exo_video_names)})."
         )
         # Build name→cam dict using video names as keys (handles None cam params for uncalibrated cameras)
-        exo_cam_by_name: dict[str, PinholeParameters | None] = dict(
-            zip(exo_sequence.exo_video_names, exo_sequence.exo_cam_list, strict=True)
-        )
+        exo_cam_by_name: dict[str, PinholeParameters | None] = dict(zip(exo_sequence.exo_video_names, exo_sequence.exo_cam_list, strict=True))
         exo_video_log_path_list: list[Path] = []
         logged_exo_cameras: set[str] = set()
         for stream_name, video_file in zip(exo_video_names, exo_video_files, strict=True):
@@ -844,17 +827,11 @@ def setup_scene(
             video_log_path: Path = cam_log_path / "pinhole" / "video"
             exo_video_log_path_list.append(video_log_path)
             # Use blob if available, otherwise use file path
-            video_source: bytes | Path = (
-                exo_video_blobs[stream_name]
-                if exo_video_blobs and stream_name in exo_video_blobs
-                else video_file
-            )
+            video_source: bytes | Path = exo_video_blobs[stream_name] if exo_video_blobs and stream_name in exo_video_blobs else video_file
             if isinstance(video_source, Path):
                 assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.
-            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
-                video_source, video_log_path, timeline=timeline, recording=recording
-            )
+            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_source, video_log_path, timeline=timeline, recording=recording)
             exo_timestamp_list.append(exo_timestamps_ns)
         exo_video_log_paths = exo_video_log_path_list
 
@@ -871,8 +848,8 @@ def setup_scene(
         ego_video_log_path_list: list[Path] = []
 
         def _log_ego_cameras(shortest_ego_timestamp: Int[ndarray, "n_frames"]) -> None:
-            ego_cam_dict: dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]] = cast(
-                dict[CamNameType, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
+            ego_cam_dict: dict[str, list[PinholeParameters | Fisheye62Parameters]] = cast(
+                dict[str, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
             )
             for cam_name, ego_cam_param_list in ego_cam_dict.items():
                 if not ego_cam_param_list:
@@ -904,9 +881,7 @@ def setup_scene(
                 # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
                 rr.send_columns(
                     f"{cam_log_path}",
-                    indexes=[
-                        rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])
-                    ],
+                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])],
                     columns=[
                         *rr.Transform3D.columns(
                             translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
@@ -921,17 +896,11 @@ def setup_scene(
             ego_video_log_path: Path = cam_log_path / "pinhole" / "video"
             ego_video_log_path_list.append(ego_video_log_path)
             # Use blob if available, otherwise use file path
-            video_source: bytes | Path = (
-                ego_video_blobs[stream_name]
-                if ego_video_blobs and stream_name in ego_video_blobs
-                else video_file
-            )
+            video_source: bytes | Path = ego_video_blobs[stream_name] if ego_video_blobs and stream_name in ego_video_blobs else video_file
             if isinstance(video_source, Path):
                 assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
             # Log video asset which is referred to by frame references.
-            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
-                video_source, ego_video_log_path, timeline=timeline, recording=recording
-            )
+            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_source, ego_video_log_path, timeline=timeline, recording=recording)
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
 
@@ -940,9 +909,7 @@ def setup_scene(
         if ego_timestamp_list:
             _log_ego_cameras(_choose_shortest_timeline_by_duration(ego_timestamp_list))
 
-    shortest_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(
-        exo_timestamp_list + ego_timestamp_list
-    )
+    shortest_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(exo_timestamp_list + ego_timestamp_list)
 
     return SceneSetupResult(
         log_paths=LogPaths(exo_video_log_paths=exo_video_log_paths, ego_video_log_paths=ego_video_log_paths),
@@ -984,6 +951,7 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
             log_ego=config.log_ego,
             log_exo=config.log_exo,
             log_mano=config.log_mano,
+            log_mano_vertex_normals=config.log_mano_vertex_normals,
         )
 
     scene_setup_result: SceneSetupResult = setup_scene(
@@ -1006,9 +974,7 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
         )
 
     skip_set: frozenset[str] = (
-        frozenset(name.strip() for name in config.skip_camera_names.split(",") if name.strip())
-        if config.skip_camera_names
-        else frozenset()
+        frozenset(name.strip() for name in config.skip_camera_names.split(",") if name.strip()) if config.skip_camera_names else frozenset()
     )
     container: rrb.ContainerLike = create_container(
         exo_video_log_paths=log_paths.exo_video_log_paths,

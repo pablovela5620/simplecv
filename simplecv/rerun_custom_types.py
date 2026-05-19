@@ -7,6 +7,7 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Float, Int, UInt8
 from numpy import ndarray
+from numpy.typing import ArrayLike
 
 from simplecv.camera_parameters import (
     BrownConradyDistortion,
@@ -152,7 +153,7 @@ class _ConfidenceAwareColumnList(rr.ComponentColumnList):
         base_list.append(rr.ComponentColumn(confidence_descriptor, ConfidenceBatch(raw_conf)))
         super().__init__(base_list)
 
-    def partition(self, lengths: Int[ndarray, "m"]) -> rr.ComponentColumnList:
+    def partition(self, lengths: ArrayLike) -> rr.ComponentColumnList:
         partitioned: rr.ComponentColumnList = super().partition(lengths)
         if self._raw_confidences is None:
             return partitioned

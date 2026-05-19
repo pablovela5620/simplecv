@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -127,17 +128,13 @@ def run_once(log_dir: Path, run_idx: int, profile_cmd: list[str] | None = None) 
                     break
     finally:
         if proc.poll() is None:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
             try:
                 proc.wait(timeout=SHUTDOWN_TIMEOUT_S)
             except subprocess.TimeoutExpired:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 proc.wait()
     elapsed_s: float | None = (ready_at - t_start) if ready_at is not None else None
     if main_entered_epoch is not None:

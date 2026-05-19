@@ -9,7 +9,7 @@ from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
-from simplecv.data.ego.base_ego import BaseEgoSequence, EgoData
+from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, CamNameType, EgoData
 from simplecv.data.exoego.epfl_smart_kitchen import (
     EPFL_EGO_CAMERA_NAME,
     _camera_size,
@@ -35,7 +35,7 @@ class EpflSmartKitchenEgoSequence(BaseEgoSequence[EpflSmartKitchenConfig]):
             raise FileNotFoundError(f"EPFL HoloLens RGB video not found: {video_path}")
         return [video_path]
 
-    def load_ego_cams(self) -> dict[str, list[PinholeParameters]]:
+    def load_ego_cams(self) -> dict[str, list[CameraParam]]:
         camera_matrix: dict[str, dict] = load_camera_matrix(self.config)
         if EPFL_EGO_CAMERA_NAME not in camera_matrix:
             raise KeyError(f"EPFL camera matrix is missing {EPFL_EGO_CAMERA_NAME!r}")
@@ -53,7 +53,7 @@ class EpflSmartKitchenEgoSequence(BaseEgoSequence[EpflSmartKitchenConfig]):
         )
         distortion: BrownConradyDistortion | None = _distortion_from_entry(EPFL_EGO_CAMERA_NAME, entry)
         cam_T_world_list: list[Float32[ndarray, "4 4"]] = load_hololens_world_to_camera_poses(self.config)
-        camera_list: list[PinholeParameters] = []
+        camera_list: list[CameraParam] = []
         for cam_T_world in cam_T_world_list:
             extrinsics: Extrinsics = Extrinsics(
                 cam_R_world=cam_T_world[:3, :3],
@@ -71,17 +71,18 @@ class EpflSmartKitchenEgoSequence(BaseEgoSequence[EpflSmartKitchenConfig]):
     def align_cams_and_videos(
         self,
         video_path_list: list[Path],
-        ego_cam_dict: dict[str, list[PinholeParameters]],
-    ) -> tuple[dict[str, list[PinholeParameters]], dict[str, Path]]:
+        ego_cam_dict: dict[CamNameType, list[CameraParam]],
+    ) -> tuple[dict[CamNameType, list[CameraParam]], dict[CamNameType, Path]]:
         if len(video_path_list) != 1:
             raise ValueError(f"Expected one EPFL HoloLens video, got {len(video_path_list)}")
         if set(ego_cam_dict) != {EPFL_EGO_CAMERA_NAME}:
             raise ValueError(f"Expected one EPFL HoloLens camera, got {set(ego_cam_dict)}")
-        return ego_cam_dict, {EPFL_EGO_CAMERA_NAME: video_path_list[0]}
+        camera_name: CamNameType = next(iter(ego_cam_dict))
+        return ego_cam_dict, {camera_name: video_path_list[0]}
 
     def __getitem__(self, idx: int) -> EgoData:
         bgr_list = self.ego_video_readers[idx]
-        camera_list: list[PinholeParameters] = self.ego_cam_dict[EPFL_EGO_CAMERA_NAME]
+        camera_list: list[CameraParam] = self.ego_cam_dict[EPFL_EGO_CAMERA_NAME]
         camera_idx: int = min(idx, len(camera_list) - 1)
         if idx >= len(camera_list) and not getattr(self, "_warned_pose_clamp", False):
             warnings.warn(

@@ -36,9 +36,7 @@ def _frame_pixels(frame_idx: int) -> UInt8[ndarray, "h w 3"]:
 def _write_synthetic_mp4(path: Path, num_frames: int = 3) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     container: av.container.OutputContainer = av.open(str(path), mode="w")
-    stream: av.video.stream.VideoStream = container.add_stream(
-        "h264", rate=30, options={"preset": "ultrafast", "crf": "0"}
-    )
+    stream: av.video.stream.VideoStream = container.add_stream("h264", rate=30, options={"preset": "ultrafast", "crf": "0"})
     stream.width = 32
     stream.height = 32
     stream.pix_fmt = "yuv420p"
@@ -161,9 +159,7 @@ def test_epfl_smart_kitchen_sequence_identity_includes_split_participant_and_ses
     assert identity.dataset == "epfl-smart-kitchen"
     assert identity.sequence_key == "train/YH2002/2023_12_04_10_15_23"
     assert identity.recording_id == "epfl-smart-kitchen__train__YH2002__2023_12_04_10_15_23"
-    assert identity.rrd_path(Path("/tmp/catalog")) == Path(
-        "/tmp/catalog/epfl-smart-kitchen/train/YH2002/2023_12_04_10_15_23.rrd"
-    )
+    assert identity.rrd_path(Path("/tmp/catalog")) == Path("/tmp/catalog/epfl-smart-kitchen/train/YH2002/2023_12_04_10_15_23.rrd")
 
 
 def test_epfl_smart_kitchen_is_registered_for_generic_exoego_viewer() -> None:
@@ -184,15 +180,7 @@ def test_epfl_smart_kitchen_ignores_generated_hololens_sidecar_when_present(tmp_
         participant_id="YH2002",
         session_name="2023_12_04_10_15_23",
     )
-    sidecar_path: Path = (
-        tmp_path
-        / "Public_release_videos"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "videos"
-        / "hololens.rerun_h264.mp4"
-    )
+    sidecar_path: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "videos" / "hololens.rerun_h264.mp4"
     sidecar_path.write_bytes(b"sidecar")
 
     assert video_path_for_camera(cfg, "hololens").name == "hololens.mp4"
@@ -227,13 +215,9 @@ def test_epfl_smart_kitchen_sample_download_task_matches_hocap_style() -> None:
 
 
 def test_epfl_smart_kitchen_counts_train_and_test_sessions(tmp_path: Path) -> None:
-    (tmp_path / "Public_release_pose" / "train" / "YH2002" / "2023_12_04_10_15_23" / "pose_3d").mkdir(
-        parents=True
-    )
+    (tmp_path / "Public_release_pose" / "train" / "YH2002" / "2023_12_04_10_15_23" / "pose_3d").mkdir(parents=True)
     (tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23").mkdir(parents=True)
-    (tmp_path / "Public_release_pose" / "test" / "YH2003" / "2023_12_05_11_16_24" / "pose_3d").mkdir(
-        parents=True
-    )
+    (tmp_path / "Public_release_pose" / "test" / "YH2003" / "2023_12_05_11_16_24" / "pose_3d").mkdir(parents=True)
     (tmp_path / "Public_release_videos" / "test" / "YH2003" / "2023_12_05_11_16_24").mkdir(parents=True)
     (tmp_path / "Public_release_pose" / "test" / "YH2004" / "pose_only_session" / "pose_3d").mkdir(parents=True)
     cfg = EpflSmartKitchenConfig(root_directory=tmp_path)
@@ -242,12 +226,84 @@ def test_epfl_smart_kitchen_counts_train_and_test_sessions(tmp_path: Path) -> No
 
 
 def test_epfl_smart_kitchen_numeric_parser_preserves_large_values_and_non_finites() -> None:
-    parsed = _parse_numeric_cell("[100001.0, NaN, -Infinity, inf]")
+    parsed = _parse_numeric_cell("[100001.0, NaN, -Infinity, inf, +inf]")
 
     assert float(parsed[0]) == pytest.approx(100001.0)
     assert np.isnan(parsed[1])
     assert np.isneginf(parsed[2])
     assert np.isposinf(parsed[3])
+    assert np.isposinf(parsed[4])
+
+
+def test_epfl_smart_kitchen_pyserde_hand_row_decodes_csv_string_arrays_and_aliases() -> None:
+    from simplecv.data.exoego.epfl_smart_kitchen import _parse_hand_pose_rows
+
+    rows = _parse_hand_pose_rows(
+        [
+            {
+                "kp3ds": json.dumps([[float(idx), float(idx + 1), float(idx + 2)] for idx in range(42)]),
+                "kp3ds_conf": json.dumps([1.0] * 42),
+                "l2_dist_left": "",
+                "l2_dist_right": "0.01",
+                "left_poses": json.dumps([0.01] * 48),
+                "right_poses": json.dumps([0.02] * 45),
+                "left_RH": json.dumps([0.0, 0.1, 0.2]),
+                "right_RH": json.dumps([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                "left_TH": json.dumps([0.1, 0.2, 0.3]),
+                "right_TH": json.dumps([0.4, 0.5, 0.6]),
+                "left_shapes": json.dumps([float(idx) * 0.01 for idx in range(10)]),
+                "right_shapes": json.dumps([float(idx) * 0.02 for idx in range(10)]),
+            }
+        ],
+        path=Path("pose3d_mano.csv"),
+    )
+    row = rows[0]
+
+    assert row.kp3ds.dtype == np.float32
+    assert row.kp3ds.shape == (42, 3)
+    assert row.kp3ds_conf is not None
+    assert row.kp3ds_conf.shape == (42,)
+    assert row.l2_dist_left is None
+    assert row.l2_dist_right == pytest.approx(0.01)
+    assert row.left_Rh.shape == (3,)
+    assert row.right_Rh.shape == (3, 3)
+    np.testing.assert_allclose(row.left_Th, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+    np.testing.assert_allclose(row.right_Th, np.array([0.4, 0.5, 0.6], dtype=np.float32))
+
+
+def test_epfl_smart_kitchen_pyserde_hand_row_decodes_canonical_csv_strings() -> None:
+    from serde import from_dict
+
+    from simplecv.data.exoego.epfl_smart_kitchen import EpflHandPoseRow
+
+    row = from_dict(
+        EpflHandPoseRow,
+        {
+            "kp3ds": json.dumps([[float(idx), float(idx + 1), float(idx + 2)] for idx in range(42)]),
+            "kp3ds_conf": json.dumps([1.0] * 42),
+            "l2_dist_left": "",
+            "l2_dist_right": "0.01",
+            "left_poses": json.dumps([0.01] * 48),
+            "right_poses": json.dumps([0.02] * 45),
+            "left_Rh": json.dumps([0.0, 0.1, 0.2]),
+            "right_Rh": json.dumps([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            "left_Th": json.dumps([0.1, 0.2, 0.3]),
+            "right_Th": json.dumps([0.4, 0.5, 0.6]),
+            "left_shapes": json.dumps([float(idx) * 0.01 for idx in range(10)]),
+            "right_shapes": json.dumps([float(idx) * 0.02 for idx in range(10)]),
+        },
+    )
+
+    assert row.kp3ds.dtype == np.float32
+    assert row.kp3ds.shape == (42, 3)
+    assert row.kp3ds_conf is not None
+    assert row.kp3ds_conf.shape == (42,)
+    assert row.l2_dist_left is None
+    assert row.l2_dist_right == pytest.approx(0.01)
+    assert row.left_Rh.shape == (3,)
+    assert row.right_Rh.shape == (3, 3)
+    np.testing.assert_allclose(row.left_Th, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+    np.testing.assert_allclose(row.right_Th, np.array([0.4, 0.5, 0.6], dtype=np.float32))
 
 
 def test_epfl_smart_kitchen_sequence_loads_no_label_ego_and_exo_streams(tmp_path: Path) -> None:
@@ -268,6 +324,7 @@ def test_epfl_smart_kitchen_sequence_loads_no_label_ego_and_exo_streams(tmp_path
     assert sample.labels is None
     assert sample.ego_cam_params_list is not None
     assert sample.exo_cam_params_list is not None
+    assert sample.exo_cam_params_list[0] is not None
     assert sample.ego_cam_params_list[0].name == "hololens"
     assert sample.exo_cam_params_list[0].name == "output0"
     np.testing.assert_array_equal(
@@ -282,15 +339,7 @@ def test_epfl_smart_kitchen_sequence_loads_no_label_ego_and_exo_streams(tmp_path
 
 def test_epfl_smart_kitchen_hololens_video_dimensions_are_loaded_once(tmp_path: Path, monkeypatch) -> None:
     _write_minimal_public_release(tmp_path)
-    camera_matrix_path: Path = (
-        tmp_path
-        / "Public_release_videos"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "meta_data"
-        / "camera_matrix.json"
-    )
+    camera_matrix_path: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "meta_data" / "camera_matrix.json"
     camera_matrix: dict[str, dict] = json.loads(camera_matrix_path.read_text())
     del camera_matrix["hololens"]["width"]
     del camera_matrix["hololens"]["height"]
@@ -327,15 +376,7 @@ def test_epfl_smart_kitchen_hololens_pose_loader_carries_previous_pose_for_empty
         participant_id="YH2002",
         session_name="2023_12_04_10_15_23",
     )
-    holo_path: Path = (
-        tmp_path
-        / "Public_release_videos"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "meta_data"
-        / "holo_data_wpose.csv"
-    )
+    holo_path: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "meta_data" / "holo_data_wpose.csv"
     first_pose: list[list[float]] = [
         [1.0, 0.0, 0.0, 1.0],
         [0.0, 1.0, 0.0, 2.0],
@@ -374,15 +415,7 @@ def test_epfl_smart_kitchen_hololens_pose_loader_warns_when_leading_rows_use_fir
         participant_id="YH2002",
         session_name="2023_12_04_10_15_23",
     )
-    holo_path: Path = (
-        tmp_path
-        / "Public_release_videos"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "meta_data"
-        / "holo_data_wpose.csv"
-    )
+    holo_path: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "meta_data" / "holo_data_wpose.csv"
     first_valid_pose: list[list[float]] = [
         [1.0, 0.0, 0.0, 7.0],
         [0.0, 1.0, 0.0, 8.0],
@@ -430,24 +463,34 @@ def test_epfl_smart_kitchen_sequence_loads_coco133_labels_and_mano_stack(tmp_pat
     assert labels.mano_stack.use_pca is False
     assert labels.mano_stack.so3.shape == (3, 2, 48)
     assert labels.mano_stack.trans.shape == (3, 2, 3)
-    np.testing.assert_allclose(labels.mano_stack.betas, np.array([float(idx) * 0.01 for idx in range(10)]))
-    np.testing.assert_allclose(labels.mano_stack.so3[0, 0], np.array([0.02] * 48, dtype=np.float32))
-    np.testing.assert_allclose(labels.mano_stack.so3[0, 1], np.array([0.01] * 48, dtype=np.float32))
+    # Per-hand betas (index 0 = right, 1 = left); the fixture offsets right by 1e-5.
+    assert labels.mano_stack.betas.shape == (2, 10)
+    np.testing.assert_allclose(
+        labels.mano_stack.betas_for(0),
+        np.array([float(idx) * 0.01 + 1e-5 for idx in range(10)], dtype=np.float32),
+        rtol=0,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        labels.mano_stack.betas_for(1),
+        np.array([float(idx) * 0.01 for idx in range(10)], dtype=np.float32),
+        rtol=0,
+        atol=1e-6,
+    )
+    # Root rotation is always taken from Rh (zeros in this fixture), overlaid on
+    # the first three pose entries; the remaining 45 finger pose values come
+    # from the *_poses CSV column.
+    np.testing.assert_allclose(labels.mano_stack.so3[0, 0, :3], np.zeros(3, dtype=np.float32))
+    np.testing.assert_allclose(labels.mano_stack.so3[0, 0, 3:], np.array([0.02] * 45, dtype=np.float32))
+    np.testing.assert_allclose(labels.mano_stack.so3[0, 1, :3], np.zeros(3, dtype=np.float32))
+    np.testing.assert_allclose(labels.mano_stack.so3[0, 1, 3:], np.array([0.01] * 45, dtype=np.float32))
 
 
 def test_epfl_smart_kitchen_rejects_short_mano_pose_vectors_instead_of_padding_pca(
     tmp_path: Path,
 ) -> None:
     _write_minimal_public_release(tmp_path)
-    hand_path: Path = (
-        tmp_path
-        / "Public_release_pose"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "pose_3d"
-        / "pose3d_mano.csv"
-    )
+    hand_path: Path = tmp_path / "Public_release_pose" / "train" / "YH2002" / "2023_12_04_10_15_23" / "pose_3d" / "pose3d_mano.csv"
     with hand_path.open(newline="") as file:
         reader = csv.DictReader(file)
         rows: list[dict[str, str]] = [dict(row) for row in reader]
@@ -472,32 +515,12 @@ def test_epfl_smart_kitchen_rejects_short_mano_pose_vectors_instead_of_padding_p
 
 def test_epfl_smart_kitchen_ego_sequence_warns_when_reusing_final_pose(tmp_path: Path) -> None:
     _write_minimal_public_release(tmp_path)
-    holo_path: Path = (
-        tmp_path
-        / "Public_release_videos"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "meta_data"
-        / "holo_data_wpose.csv"
-    )
+    holo_path: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "meta_data" / "holo_data_wpose.csv"
     with holo_path.open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=["world2holo"])
         writer.writeheader()
-        writer.writerow(
-            {
-                "world2holo": json.dumps(
-                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
-                )
-            }
-        )
-        writer.writerow(
-            {
-                "world2holo": json.dumps(
-                    [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 1.0, 3.0], [0.0, 0.0, 0.0, 1.0]]
-                )
-            }
-        )
+        writer.writerow({"world2holo": json.dumps([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]])})
+        writer.writerow({"world2holo": json.dumps([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 2.0], [0.0, 0.0, 1.0, 3.0], [0.0, 0.0, 0.0, 1.0]])})
     from simplecv.data.ego.epfl_smart_kitchen_ego import EpflSmartKitchenEgoSequence
 
     cfg = EpflSmartKitchenConfig(
@@ -513,9 +536,7 @@ def test_epfl_smart_kitchen_ego_sequence_warns_when_reusing_final_pose(tmp_path:
 
 
 def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_path: Path) -> None:
-    if not (PROJECT_ROOT / "simplecv" / "data" / "MANO_RIGHT.pkl").exists() or not (
-        PROJECT_ROOT / "simplecv" / "data" / "MANO_LEFT.pkl"
-    ).exists():
+    if not (PROJECT_ROOT / "simplecv" / "data" / "MANO_RIGHT.pkl").exists() or not (PROJECT_ROOT / "simplecv" / "data" / "MANO_LEFT.pkl").exists():
         pytest.skip("MANO model files are not available")
 
     _write_minimal_public_release(tmp_path)
@@ -551,6 +572,8 @@ def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_pa
         column_names: list[str] = query_session._dataset_view("/**").arrow_schema().names
         assert "/world/gt/mano/right/mesh:Mesh3D:vertex_positions" in column_names
         assert "/world/gt/mano/left/mesh:Mesh3D:vertex_positions" in column_names
+        assert "/world/gt/mano/right/mesh:Mesh3D:vertex_normals" not in column_names
+        assert "/world/gt/mano/left/mesh:Mesh3D:vertex_normals" not in column_names
         assert "/world/gt/mano/coco133_xyz:Points3D:positions" in column_names
         assert "/world/ego/hololens/pinhole/video:VideoStream:codec" in column_names
         assert "/world/exo/output0/pinhole/video:VideoStream:codec" in column_names
@@ -573,17 +596,53 @@ def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_pa
         query_session.close()
 
 
+def test_epfl_smart_kitchen_visualized_rrd_can_log_mano_vertex_normals(tmp_path: Path) -> None:
+    if not (PROJECT_ROOT / "simplecv" / "data" / "MANO_RIGHT.pkl").exists() or not (PROJECT_ROOT / "simplecv" / "data" / "MANO_LEFT.pkl").exists():
+        pytest.skip("MANO model files are not available")
+
+    _write_minimal_public_release(tmp_path)
+    cfg = EpflSmartKitchenConfig(
+        root_directory=tmp_path,
+        split="train",
+        participant_id="YH2002",
+        session_name="2023_12_04_10_15_23",
+        exo_camera_names=("output0",),
+        load_labels=True,
+    )
+    sequence = EpflSmartKitchenSequence(cfg)
+    rrd_path: Path = tmp_path / "epfl-mini-with-mano-normals.rrd"
+    viz_config = VisualizeConfig(
+        rr_config=RerunTyroConfig(
+            application_id="test-epfl-visualize-normals",
+            recording_id="test-epfl-visualize-normals",
+            save=rrd_path,
+        ),
+        dataset=cfg,
+        log_exo=True,
+        log_ego=True,
+        log_labels=True,
+        log_mano=True,
+        log_mano_vertex_normals=True,
+    )
+    rec: rr.RecordingStream = viz_config.rr_config.rec_stream
+
+    visualize_exo_ego(sequence, viz_config)
+    rec.flush(timeout_sec=60.0)
+
+    query_session = RRDQuerySession(rrd_path)
+    try:
+        column_names: list[str] = query_session._dataset_view("/**").arrow_schema().names
+        assert "/world/gt/mano/right/mesh:Mesh3D:vertex_positions" in column_names
+        assert "/world/gt/mano/left/mesh:Mesh3D:vertex_positions" in column_names
+        assert "/world/gt/mano/right/mesh:Mesh3D:vertex_normals" in column_names
+        assert "/world/gt/mano/left/mesh:Mesh3D:vertex_normals" in column_names
+    finally:
+        query_session.close()
+
+
 def test_epfl_smart_kitchen_empty_hand_l2_cells_do_not_drop_keypoints(tmp_path: Path) -> None:
     _write_minimal_public_release(tmp_path)
-    hand_path: Path = (
-        tmp_path
-        / "Public_release_pose"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "pose_3d"
-        / "pose3d_mano.csv"
-    )
+    hand_path: Path = tmp_path / "Public_release_pose" / "train" / "YH2002" / "2023_12_04_10_15_23" / "pose_3d" / "pose3d_mano.csv"
     with hand_path.open(newline="") as file:
         reader = csv.DictReader(file)
         rows: list[dict[str, str]] = [dict(row) for row in reader]
@@ -614,15 +673,7 @@ def test_epfl_smart_kitchen_empty_hand_l2_cells_do_not_drop_keypoints(tmp_path: 
 
 def test_epfl_smart_kitchen_empty_body_l2_cells_do_not_drop_keypoints(tmp_path: Path) -> None:
     _write_minimal_public_release(tmp_path)
-    body_path: Path = (
-        tmp_path
-        / "Public_release_pose"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "pose_3d"
-        / "pose3d_smpl.csv"
-    )
+    body_path: Path = tmp_path / "Public_release_pose" / "train" / "YH2002" / "2023_12_04_10_15_23" / "pose_3d" / "pose3d_smpl.csv"
     with body_path.open(newline="") as file:
         reader = csv.DictReader(file)
         rows: list[dict[str, str]] = [dict(row) for row in reader]
@@ -651,15 +702,7 @@ def test_epfl_smart_kitchen_empty_body_l2_cells_do_not_drop_keypoints(tmp_path: 
 
 def test_epfl_smart_kitchen_label_load_fails_on_timestamp_count_mismatch(tmp_path: Path) -> None:
     _write_minimal_public_release(tmp_path)
-    timestamps_path: Path = (
-        tmp_path
-        / "Public_release_videos"
-        / "train"
-        / "YH2002"
-        / "2023_12_04_10_15_23"
-        / "meta_data"
-        / "timestamps.txt"
-    )
+    timestamps_path: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "meta_data" / "timestamps.txt"
     timestamps_path.write_text("1000\n34333\n")
     cfg = EpflSmartKitchenConfig(
         root_directory=tmp_path,

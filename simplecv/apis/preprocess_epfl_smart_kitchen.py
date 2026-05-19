@@ -323,14 +323,14 @@ def _optional_int(value: object) -> int | None:
     """Parse an optional ffprobe integer field."""
     if value is None or value == "N/A":
         return None
-    return int(value)
+    return int(str(value))
 
 
 def _optional_float(value: object) -> float | None:
     """Parse an optional ffprobe float field."""
     if value is None or value == "N/A":
         return None
-    return float(value)
+    return float(str(value))
 
 
 def probe_video(video_path: Path, *, ffprobe_path: str = "ffprobe", count_frames: bool = False) -> VideoProbe:

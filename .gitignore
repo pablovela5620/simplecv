@@ -180,3 +180,4 @@ pretrained_models/*
 /AGENTS.md.bak
 # END Ruler Generated Files
 artifacts/
+.playwright-cli/

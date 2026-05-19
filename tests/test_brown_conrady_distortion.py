@@ -10,7 +10,7 @@ from hypothesis import strategies as st
 from hypothesis.strategies import DrawFn, composite
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
-from simplecv.sensors.camera.brown_conrady import project_brown_conrady_grid
+from simplecv.sensors.camera.brown_conrady import project_brown_conrady_diagonal, project_brown_conrady_grid
 
 
 @composite
@@ -120,5 +120,82 @@ def test_brown_conrady_matches_opencv(case: tuple[np.ndarray, list[PinholeParame
             dist_vec,
         )
         uv_cv[:, view_idx, :, :] = uv_flat.reshape(n_frames, n_points, 2)
+
+    np.testing.assert_allclose(uv_bc, uv_cv, rtol=1e-9, atol=1e-9)
+
+
+def test_brown_conrady_diagonal_matches_opencv_with_shared_distortion() -> None:
+    """Frame-aligned projection should match OpenCV when distortion is shared."""
+
+    xyz_world = np.array(
+        [
+            [[0.1, -0.2, 1.5], [0.3, 0.1, 2.0]],
+            [[-0.2, 0.15, 1.2], [0.05, -0.1, 1.8]],
+            [[0.25, 0.05, 2.4], [-0.15, 0.2, 1.6]],
+        ],
+        dtype=np.float64,
+    )
+    K = np.array([[700.0, 0.0, 320.0], [0.0, 710.0, 240.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+    intrinsics = Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=K, height=720, width=1280)
+    distortion = BrownConradyDistortion(
+        k1=0.01,
+        k2=-0.005,
+        p1=0.0003,
+        p2=-0.0002,
+        k3=0.0001,
+        k4=0.0002,
+        k5=-0.0001,
+        k6=0.00005,
+    )
+    pinholes: list[PinholeParameters] = []
+    for frame_idx in range(xyz_world.shape[0]):
+        extrinsics = Extrinsics(
+            cam_R_world=np.eye(3),
+            cam_t_world=np.array([0.01 * frame_idx, -0.02 * frame_idx, 0.0], dtype=np.float64),
+        )
+        pinholes.append(
+            PinholeParameters(
+                name=f"frame_{frame_idx}",
+                intrinsics=intrinsics,
+                extrinsics=extrinsics,
+                distortion=distortion,
+            )
+        )
+
+    uv_bc = project_brown_conrady_diagonal(xyz_world, pinholes, filter_invalid=False)
+
+    uv_cv = np.empty_like(uv_bc)
+    rvec = np.zeros((3, 1), dtype=np.float64)
+    dist_vec = np.array(
+        [
+            distortion.k1,
+            distortion.k2,
+            distortion.p1,
+            distortion.p2,
+            distortion.k3,
+            distortion.k4,
+            distortion.k5,
+            distortion.k6,
+            distortion.s1,
+            distortion.s2,
+            distortion.s3,
+            distortion.s4,
+            distortion.tau_x,
+            distortion.tau_y,
+        ],
+        dtype=np.float64,
+    )
+    for frame_idx, pinhole in enumerate(pinholes):
+        xyz_h = np.concatenate([xyz_world[frame_idx], np.ones((xyz_world.shape[1], 1), dtype=np.float64)], axis=-1)
+        xyz_cam_h = xyz_h @ pinhole.extrinsics.cam_T_world.T
+        xyz_cam = xyz_cam_h[:, :3] / xyz_cam_h[:, 3:]
+        uv_flat, _ = cv2.projectPoints(
+            xyz_cam,
+            rvec,
+            np.zeros((3, 1), dtype=np.float64),
+            K,
+            dist_vec,
+        )
+        uv_cv[frame_idx] = uv_flat.reshape(xyz_world.shape[1], 2)
 
     np.testing.assert_allclose(uv_bc, uv_cv, rtol=1e-9, atol=1e-9)
